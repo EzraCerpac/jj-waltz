@@ -30,8 +30,7 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 Install from the public tap:
 
 ```bash
-brew tap ezracerpac/homebrew-tap
-brew install jj-waltz
+brew install EzraCerpac/tap/jj-waltz
 ```
 
 ### Cargo
