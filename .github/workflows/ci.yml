@@ -19,7 +19,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -32,7 +32,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install jj
@@ -40,7 +40,7 @@ jobs:
           mkdir -p /tmp/jj-install
           curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jj-vcs/jj/releases/download/v0.39.0/jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz \
             | tar -xzf - -C /tmp/jj-install
-          install /tmp/jj-install/jj-v0.39.0-x86_64-unknown-linux-musl/jj /usr/local/bin/jj
+          install /tmp/jj-install/jj /usr/local/bin/jj
       - name: Check lockfile
         run: cargo check
       - name: Test
@@ -53,7 +53,7 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
