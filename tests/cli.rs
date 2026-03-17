@@ -108,6 +108,17 @@ fn completion_helper_lists_workspace_candidates() {
         .stdout(predicate::str::contains("^\tDefault workspace"));
 }
 
+#[test]
+fn switch_print_path_does_not_overflow_stack() {
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["switch", "solver-benchmark", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("solver-benchmark"));
+}
+
 struct TestRepo {
     _tempdir: TempDir,
     default_root: PathBuf,
