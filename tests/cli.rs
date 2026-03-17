@@ -144,6 +144,42 @@ fn switch_applies_workspace_links_for_data_directory() {
 }
 
 #[test]
+fn switch_uses_default_workspace_link_config() {
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd()
+        .args(["switch", "solver-benchmark"])
+        .assert()
+        .success();
+    fs::remove_file(repo.default_root.join(".jwlinks.toml")).expect("remove default config");
+
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .current_dir(repo.default_root.with_extension("solver-benchmark"))
+        .args(["switch", "default"])
+        .assert()
+        .success();
+
+    repo.cmd()
+        .args(["switch", "solver-benchmark"])
+        .assert()
+        .success();
+
+    let workspace_data = repo
+        .default_root
+        .with_extension("solver-benchmark")
+        .join("data");
+    let metadata = fs::symlink_metadata(&workspace_data).expect("metadata");
+    assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
 fn switch_accepts_existing_directory_when_it_matches_target() {
     let repo = TestRepo::new().expect("create test repo");
     fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");

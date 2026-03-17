@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -181,6 +181,10 @@ pub fn switch_workspace(target: &str, options: &SwitchOptions) -> Result<SwitchR
         bookmark: options.bookmark.clone(),
         relative_subdir,
     })
+}
+
+pub fn default_workspace_root() -> Result<PathBuf> {
+    workspace_root_by_name(&default_workspace_name()?)
 }
 
 pub fn path_for_workspace(token: &str) -> Result<PathBuf> {

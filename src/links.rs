@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,7 +41,14 @@ struct LinkRuleRaw {
 }
 
 pub fn apply_workspace_links(workspace_root: &Path) -> Result<LinkApplyReport> {
-    let rules = load_rules(workspace_root)?;
+    apply_workspace_links_with_config_root(workspace_root, workspace_root)
+}
+
+pub fn apply_workspace_links_with_config_root(
+    config_root: &Path,
+    workspace_root: &Path,
+) -> Result<LinkApplyReport> {
+    let rules = load_rules(config_root, workspace_root)?;
     let mut report = LinkApplyReport::default();
 
     for rule in rules {
@@ -51,11 +58,11 @@ pub fn apply_workspace_links(workspace_root: &Path) -> Result<LinkApplyReport> {
     Ok(report)
 }
 
-fn load_rules(workspace_root: &Path) -> Result<Vec<LinkRule>> {
+fn load_rules(config_root: &Path, workspace_root: &Path) -> Result<Vec<LinkRule>> {
     let mut combined: Vec<LinkRuleRaw> = Vec::new();
 
     for file_name in [LINKS_FILE, LINKS_LOCAL_FILE] {
-        let path = workspace_root.join(file_name);
+        let path = config_root.join(file_name);
         if !path.exists() {
             continue;
         }

@@ -1,7 +1,7 @@
 use crate::links;
 use crate::shell::{self, ShellKind};
 use crate::workspace::{self, SwitchOptions};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -181,7 +181,10 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
     )?;
 
     if !cmd.no_links {
-        let links_report = links::apply_workspace_links(&result.path)?;
+        let config_root =
+            workspace::default_workspace_root().unwrap_or_else(|_| result.path.clone());
+        let links_report =
+            links::apply_workspace_links_with_config_root(&config_root, &result.path)?;
         if !cmd.print_path && links_report.has_entries() {
             println!(
                 "Links: {} created, {} already satisfied, {} missing target",
