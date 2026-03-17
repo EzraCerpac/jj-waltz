@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,11 +29,6 @@ pub struct SwitchOptions {
     pub preserve_subdir: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct WorkspaceListItem {
-    name: String,
-}
-
 pub fn current_workspace_name() -> Result<String> {
     let output = run_jj(&[
         "workspace",
@@ -52,23 +46,13 @@ pub fn current_workspace_name() -> Result<String> {
 
 pub fn workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let current = current_workspace_name().ok();
-    let list_output = run_jj(&[
-        "workspace",
-        "list",
-        "-T",
-        "json(self) ++ \"\\n\"",
-        "--color=never",
-    ])?;
-
     let mut entries = Vec::new();
 
-    for line in trimmed_stdout(list_output)?.lines() {
-        let item: WorkspaceListItem = serde_json::from_str(line)
-            .with_context(|| format!("invalid jj workspace json: {line}"))?;
-        let root = workspace_root_by_name(&item.name).ok();
+    for name in workspace_names()? {
+        let root = workspace_root_by_name(&name).ok();
         entries.push(WorkspaceEntry {
-            is_current: current.as_deref() == Some(item.name.as_str()),
-            name: item.name,
+            is_current: current.as_deref() == Some(name.as_str()),
+            name,
             root,
         });
     }
@@ -86,7 +70,11 @@ pub fn workspace_root_by_name(name: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(trimmed_stdout(output)?));
     }
 
-    if name == "default" && workspace_exists("default")? {
+    if name == "default"
+        && workspace_names()?
+            .iter()
+            .any(|candidate| candidate == "default")
+    {
         let guessed = guessed_default_workspace_root()?;
         if guessed.is_dir() {
             return Ok(guessed);
@@ -97,7 +85,7 @@ pub fn workspace_root_by_name(name: &str) -> Result<PathBuf> {
 }
 
 pub fn workspace_exists(name: &str) -> Result<bool> {
-    Ok(workspace_entries()?.iter().any(|entry| entry.name == name))
+    Ok(workspace_names()?.iter().any(|entry| entry == name))
 }
 
 pub fn resolve_workspace_token(token: &str) -> Result<String> {
@@ -370,6 +358,23 @@ fn validate_workspace_name(name: &str) -> Result<()> {
         bail!("workspace name cannot contain ':'")
     }
     Ok(())
+}
+
+fn workspace_names() -> Result<Vec<String>> {
+    let output = run_jj(&[
+        "workspace",
+        "list",
+        "-T",
+        "name ++ \"\\n\"",
+        "--color=never",
+    ])?;
+
+    Ok(trimmed_stdout(output)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf> {
