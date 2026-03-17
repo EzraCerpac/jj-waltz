@@ -1,6 +1,6 @@
 [package]
 name = "jj-waltz"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A Jujutsu workspace switcher inspired by Worktrunk"
 license = "MIT"
@@ -31,26 +31,36 @@ tempfile = "3.19.1"
 [workspace]
 members = ["."]
 
+# Config for 'dist'
 [workspace.metadata.dist]
-cargo-dist-version = "1.10.0"
-ci = ["github"]
-hosting = ["github"]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# Where to host releases
+hosting = "github"
+# The installers to generate for each app
 installers = ["shell", "powershell", "homebrew"]
-targets = [
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# A GitHub repo to push Homebrew formulas to
 tap = "EzraCerpac/homebrew-tap"
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+# Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# Whether to enable GitHub Attestations
 github-attestations = true
+# Which actions to run on pull requests
 pr-run-mode = "plan"
-checksum = ["sha256"]
+# Checksums to generate for each App
+checksum = "sha256"
+# The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.gz"
+# The archive format to use for windows builds (defaults .zip)
 windows-archive = ".zip"
+# Whether to install an updater program
+install-updater = false
 
 [profile.dist]
 inherits = "release"
