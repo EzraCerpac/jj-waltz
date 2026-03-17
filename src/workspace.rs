@@ -257,6 +257,33 @@ pub fn previous_workspace_name() -> Result<String> {
     }
 }
 
+pub fn completion_workspace_candidates() -> Result<Vec<(String, String)>> {
+    let current = current_workspace_name().ok();
+    let previous = previous_workspace_name().ok();
+    let default = default_workspace_name().ok();
+
+    let mut candidates = Vec::new();
+
+    for entry in workspace_entries()? {
+        let description = if current.as_deref() == Some(entry.name.as_str()) {
+            "Existing workspace (current)"
+        } else if previous.as_deref() == Some(entry.name.as_str()) {
+            "Existing workspace (previous)"
+        } else if default.as_deref() == Some(entry.name.as_str()) {
+            "Existing workspace (default)"
+        } else {
+            "Existing workspace"
+        };
+        candidates.push((entry.name, description.to_owned()));
+    }
+
+    candidates.push(("@".to_owned(), "Current workspace".to_owned()));
+    candidates.push(("-".to_owned(), "Previous workspace".to_owned()));
+    candidates.push(("^".to_owned(), "Default workspace".to_owned()));
+
+    Ok(candidates)
+}
+
 fn remember_previous_workspace(
     from_name: &str,
     from_root: &Path,

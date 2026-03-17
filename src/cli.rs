@@ -21,16 +21,23 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    #[command(alias = "s")]
+    #[command(alias = "s", about = "Switch to or create a workspace")]
     Switch(SwitchCommand),
+    #[command(alias = "l", about = "List known workspaces")]
     List,
+    #[command(about = "Print a workspace path")]
     Path(PathCommand),
-    #[command(alias = "rm")]
+    #[command(alias = "rm", about = "Forget a workspace")]
     Remove(RemoveCommand),
+    #[command(about = "Forget missing workspaces")]
     Prune,
+    #[command(about = "Print the current workspace root")]
     Root,
+    #[command(about = "Print the current workspace name")]
     Current,
+    #[command(about = "Shell integration helpers")]
     Shell(ShellCommand),
+    #[command(about = "Generate shell completions")]
     Completions(CompletionCommand),
 }
 
@@ -38,11 +45,25 @@ enum Commands {
 struct SwitchCommand {
     #[arg(value_name = "NAME")]
     name: String,
-    #[arg(long, value_name = "REVSET")]
+    #[arg(
+        long,
+        value_name = "REVSET",
+        help = "Create a new workspace at a revset"
+    )]
     at: Option<String>,
-    #[arg(short, long, value_name = "BOOKMARK")]
+    #[arg(
+        short,
+        long,
+        value_name = "BOOKMARK",
+        help = "Create a bookmark in a new workspace"
+    )]
     bookmark: Option<String>,
-    #[arg(short = 'x', long, value_name = "COMMAND")]
+    #[arg(
+        short = 'x',
+        long,
+        value_name = "COMMAND",
+        help = "Run a command after switching"
+    )]
     execute: Option<String>,
     #[arg(long, hide = true, action = ArgAction::SetTrue)]
     print_path: bool,
@@ -60,8 +81,8 @@ struct PathCommand {
 struct RemoveCommand {
     #[arg(value_name = "NAME")]
     name: Option<String>,
-    #[arg(long, action = ArgAction::SetTrue)]
-    delete_dir: bool,
+    #[arg(long, action = ArgAction::SetTrue, help = "Forget the workspace but keep its directory")]
+    keep_dir: bool,
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +101,8 @@ struct ShellCommand {
 enum ShellSubcommand {
     Init(ShellInitCommand),
     Completions(CompletionCommand),
+    #[command(hide = true)]
+    CompleteWorkspaces,
 }
 
 #[derive(Debug, Args)]
@@ -202,9 +225,10 @@ fn run_path(cmd: PathCommand) -> Result<()> {
 }
 
 fn run_remove(cmd: RemoveCommand) -> Result<()> {
-    let (name, path) = workspace::remove_workspace(cmd.name.as_deref(), cmd.delete_dir)?;
+    let delete_dir = !cmd.keep_dir;
+    let (name, path) = workspace::remove_workspace(cmd.name.as_deref(), delete_dir)?;
     println!("Forgot workspace: {name}");
-    if cmd.delete_dir {
+    if delete_dir {
         println!("Deleted directory: {}", path.display());
     }
     Ok(())
@@ -223,6 +247,7 @@ fn run_shell(cmd: ShellCommand) -> Result<()> {
     match cmd.command {
         ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell.into())?),
         ShellSubcommand::Completions(cmd) => run_completions(cmd.shell.into()),
+        ShellSubcommand::CompleteWorkspaces => run_complete_workspaces(),
     }
 }
 
@@ -277,5 +302,13 @@ fn run_execute(cwd: &PathBuf, command: &str, args: &[String]) -> Result<()> {
 fn print_line(value: impl std::fmt::Display) -> Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{value}").context("failed to write stdout")?;
+    Ok(())
+}
+
+fn run_complete_workspaces() -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    for (candidate, description) in workspace::completion_workspace_candidates()? {
+        writeln!(stdout, "{candidate}\t{description}").context("failed to write stdout")?;
+    }
     Ok(())
 }
