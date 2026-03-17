@@ -20,6 +20,7 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
 - `jw list`, `jw path`, `jw remove`, `jw prune`, `jw root`, `jw current`
 - `--execute` support for jumping into editors or agents after switching
+- optional workspace links via `.jwlinks.toml` for sharing large ignored directories
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
 
@@ -38,6 +39,23 @@ brew install EzraCerpac/tap/jj-waltz
 ```bash
 cargo install --git https://github.com/EzraCerpac/jj-waltz --locked
 ```
+
+## Workspace links
+
+If you keep large ignored data in one workspace and want it accessible from others,
+define links in `.jwlinks.toml`:
+
+```toml
+[[link]]
+source = "data"
+target = "../ezra-cerpac/data"
+required = true
+```
+
+When you run `jw switch`, `jw` creates symlinks in the target workspace unless you pass
+`--no-links`. You can also run `jw links apply` manually.
+
+For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep ignored).
 
 ## Shell setup
 
