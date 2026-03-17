@@ -3,6 +3,8 @@
 `jj-waltz` is a Jujutsu workspace switcher with the short binary name `jw`.
 It is built for fast parallel development, reliable shell integration, and clean distribution.
 
+Fish is the recommended shell for the best `jw` experience, including the richest completions and native directory-switching integration.
+
 ## Why
 
 Jujutsu workspaces are powerful, but the raw workflow is still more manual than it needs to be.

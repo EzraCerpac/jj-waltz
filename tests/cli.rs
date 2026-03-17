@@ -49,10 +49,63 @@ fn switch_default_returns_existing_root() {
 fn completions_command_generates_fish_script() {
     Command::cargo_bin("jw")
         .expect("binary")
-        .args(["completions", "fish"])
+        .args(["shell", "completions", "fish"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("complete -c jw"));
+        .stdout(predicate::str::contains("__jw_workspace_candidates"))
+        .stdout(predicate::str::contains("-l keep-dir"))
+        .stdout(predicate::str::contains(
+            "switch 'Switch to or create a workspace'",
+        ));
+}
+
+#[test]
+fn completions_command_generates_zsh_script() {
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .args(["shell", "completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_jw_workspace_candidates"))
+        .stdout(predicate::str::contains(
+            "--keep-dir[Forget the workspace but keep its directory]",
+        ))
+        .stdout(predicate::str::contains(
+            "switch:Switch to or create a workspace",
+        ));
+}
+
+#[test]
+fn remove_deletes_workspace_directory_by_default() {
+    let repo = TestRepo::new().expect("create test repo");
+    let workspace_root = repo.default_root.with_extension("feature-a");
+
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    assert!(workspace_root.is_dir());
+
+    repo.cmd()
+        .args(["remove", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted directory:"));
+
+    assert!(!workspace_root.exists());
+}
+
+#[test]
+fn completion_helper_lists_workspace_candidates() {
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    repo.cmd()
+        .args(["shell", "complete-workspaces"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feature-a\tExisting workspace"))
+        .stdout(predicate::str::contains("@\tCurrent workspace"))
+        .stdout(predicate::str::contains("^\tDefault workspace"));
 }
 
 struct TestRepo {
