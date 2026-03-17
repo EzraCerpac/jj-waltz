@@ -20,8 +20,6 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 - `--execute` support for jumping into editors or agents after switching
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
-- release automation and Homebrew distribution support
-- GitHub Actions CI with linting, tests, cross-platform builds, and Dependabot
 
 ## Install
 
