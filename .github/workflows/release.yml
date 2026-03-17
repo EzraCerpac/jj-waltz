@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      manifest: ${{ steps.plan.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
+      - id: plan
+        run: |
+          dist manifest --output-format=json --no-local-paths > dist-manifest.json
+          echo "manifest=$(cat dist-manifest.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
+      - name: Build artifacts
+        run: dist build --artifacts=local --target=${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: target/distrib/
+
+  global:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
+      - name: Build global artifacts
+        run: dist build --artifacts=global
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-global
+          path: target/distrib/
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, global]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: dist host --steps=upload artifacts/*
