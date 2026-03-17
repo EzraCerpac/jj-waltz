@@ -27,17 +27,17 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 
 ### Homebrew
 
-Once the tap is published:
+Install from the public tap:
 
 ```bash
-brew tap ezracerpac/tap
+brew tap ezracerpac/homebrew-tap
 brew install jj-waltz
 ```
 
 ### Cargo
 
 ```bash
-cargo install jj-waltz
+cargo install --git https://github.com/EzraCerpac/jj-waltz --locked
 ```
 
 ## Shell setup
@@ -58,9 +58,9 @@ jw shell init fish | source
 To generate completions manually:
 
 ```bash
-jw completions fish
-jw completions zsh
-jw completions bash
+jw shell completions fish
+jw shell completions zsh
+jw shell completions bash
 ```
 
 ## Quick start
