@@ -1,0 +1,57 @@
+[package]
+name = "jj-waltz"
+version = "0.1.0"
+edition = "2024"
+description = "A Jujutsu workspace switcher inspired by Worktrunk"
+license = "MIT"
+repository = "https://github.com/ezracerpac/jj-waltz"
+homepage = "https://github.com/ezracerpac/jj-waltz"
+readme = "README.md"
+keywords = ["jj", "jujutsu", "cli", "workspace", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.85"
+
+[[bin]]
+name = "jw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.40", features = ["derive", "wrap_help"] }
+clap_complete = "4.5.59"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+shlex = "1.3.0"
+
+[dev-dependencies]
+assert_cmd = "2.0.17"
+predicates = "3.1.3"
+tempfile = "3.19.1"
+
+[workspace]
+members = ["."]
+
+[workspace.metadata.dist]
+cargo-dist-version = "1.10.0"
+ci = ["github"]
+hosting = ["github"]
+installers = ["shell", "powershell", "homebrew"]
+targets = [
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+tap = "ezracerpac/homebrew-tap"
+publish-jobs = ["homebrew"]
+install-path = "CARGO_HOME"
+github-attestations = true
+pr-run-mode = "plan"
+checksum = ["sha256"]
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
