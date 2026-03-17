@@ -1,7 +1,7 @@
 use crate::links;
 use crate::shell::{self, ShellKind};
 use crate::workspace::{self, SwitchOptions};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::io::{self, Write};
 use std::path::PathBuf;

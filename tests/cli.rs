@@ -203,7 +203,18 @@ fn switch_fails_on_conflicting_existing_path() {
     .expect("write links config");
 
     let target_root = repo.default_root.with_extension("solver-benchmark");
+    repo.cmd()
+        .args(["switch", "solver-benchmark", "--no-links"])
+        .assert()
+        .success();
+
     fs::create_dir_all(target_root.join("cache")).expect("create conflicting path");
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .current_dir(&target_root)
+        .args(["switch", "default", "--no-links"])
+        .assert()
+        .success();
 
     repo.cmd()
         .args(["switch", "solver-benchmark"])
