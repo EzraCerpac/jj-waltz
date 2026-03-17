@@ -4,7 +4,7 @@
 
 ## Planned tap
 
-- tap: `ezracerpac/homebrew-tap`
+- tap: `EzraCerpac/homebrew-tap`
 - formula: `jj-waltz`
 - binary: `jw`
 
@@ -19,4 +19,4 @@
 
 - keep the project metadata in `Cargo.toml` accurate
 - ensure the GitHub repository and Homebrew tap names match the published locations
-- after the first public release, test with `brew install ezracerpac/tap/jj-waltz`
+- after the first public release, test with `brew install EzraCerpac/homebrew-tap/jj-waltz`

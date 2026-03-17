@@ -43,7 +43,7 @@ targets = [
     "aarch64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ]
-tap = "ezracerpac/homebrew-tap"
+tap = "EzraCerpac/homebrew-tap"
 publish-jobs = ["homebrew"]
 install-path = "CARGO_HOME"
 github-attestations = true
