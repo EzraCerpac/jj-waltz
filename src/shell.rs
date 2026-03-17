@@ -19,6 +19,7 @@ function __jw_subcommands
     printf '%s\t%s\n' root 'Print the current workspace root'
     printf '%s\t%s\n' current 'Print the current workspace name'
     printf '%s\t%s\n' shell 'Shell integration helpers'
+    printf '%s\t%s\n' links 'Manage workspace links'
     printf '%s\t%s\n' completions 'Generate shell completions'
     printf '%s\t%s\n' help 'Show command help'
 end
@@ -43,6 +44,7 @@ complete -c jw -n '__jw_using_subcommand switch s' -f -a '(__jw_workspace_candid
 complete -c jw -n '__jw_using_subcommand switch s' -l at -r -d 'Create a new workspace at a revset'
 complete -c jw -n '__jw_using_subcommand switch s' -s b -l bookmark -r -d 'Create a bookmark in a new workspace'
 complete -c jw -n '__jw_using_subcommand switch s' -s x -l execute -r -d 'Run a command after switching'
+complete -c jw -n '__jw_using_subcommand switch s' -l no-links -d 'Skip applying workspace links'
 complete -c jw -n '__jw_using_subcommand switch s' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand path' -f -a '(__jw_workspace_candidates)'
@@ -53,6 +55,9 @@ complete -c jw -n '__jw_using_subcommand remove rm' -l keep-dir -d 'Forget the w
 complete -c jw -n '__jw_using_subcommand remove rm' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand list l prune root current completions' -s h -l help -d 'Print help'
+
+complete -c jw -n '__jw_using_subcommand links' -f -a 'apply\tApply configured links to the current workspace'
+complete -c jw -n '__jw_using_subcommand links; and __fish_seen_subcommand_from apply' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand completions' -f -a 'bash\tBash shell fish\tFish shell zsh\tZsh shell elvish\tElvish shell powershell\tPowerShell shell'
 
@@ -106,6 +111,7 @@ _jw() {
         'root:Print the current workspace root'
         'current:Print the current workspace name'
         'shell:Shell integration helpers'
+        'links:Manage workspace links'
         'completions:Generate shell completions'
         'help:Show command help'
       )
@@ -118,6 +124,7 @@ _jw() {
             '--at[Create a new workspace at a revset]:revset:' \
             '(-b --bookmark)'{-b,--bookmark}'[Create a bookmark in a new workspace]:bookmark:' \
             '(-x --execute)'{-x,--execute}'[Run a command after switching]:command:_command_names' \
+            '--no-links[Skip applying workspace links]' \
             '(-h --help)'{-h,--help}'[Print help]' \
             '1:workspace:_jw_workspace_candidates' \
             '*::args:_files'
@@ -135,6 +142,17 @@ _jw() {
           ;;
         list|l|prune|root|current)
           _arguments '(-h --help)'{-h,--help}'[Print help]'
+          ;;
+        links)
+          if (( CURRENT == 3 )); then
+            local -a links_commands
+            links_commands=(
+              'apply:Apply configured links to the current workspace'
+            )
+            _describe -t links-commands 'links command' links_commands
+          else
+            _arguments '(-h --help)'{-h,--help}'[Print help]'
+          fi
           ;;
         completions)
           _arguments \
@@ -170,6 +188,7 @@ _jw() {
             'root:Print the current workspace root'
             'current:Print the current workspace name'
             'shell:Shell integration helpers'
+            'links:Manage workspace links'
             'completions:Generate shell completions'
             'help:Show command help'
           )

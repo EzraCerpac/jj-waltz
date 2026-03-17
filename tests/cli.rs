@@ -119,6 +119,63 @@ fn switch_print_path_does_not_overflow_stack() {
         .stdout(predicate::str::contains("solver-benchmark"));
 }
 
+#[test]
+fn switch_applies_workspace_links_for_data_directory() {
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd()
+        .args(["switch", "solver-benchmark"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links: 1 created"));
+
+    let workspace_data = repo
+        .default_root
+        .with_extension("solver-benchmark")
+        .join("data");
+    let metadata = fs::symlink_metadata(&workspace_data).expect("metadata");
+    assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
+fn switch_accepts_existing_directory_when_it_matches_target() {
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd().args(["switch", "default"]).assert().success();
+}
+
+#[test]
+fn switch_fails_on_conflicting_existing_path() {
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"cache\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    let target_root = repo.default_root.with_extension("solver-benchmark");
+    fs::create_dir_all(target_root.join("cache")).expect("create conflicting path");
+
+    repo.cmd()
+        .args(["switch", "solver-benchmark"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("link conflict"));
+}
+
 struct TestRepo {
     _tempdir: TempDir,
     default_root: PathBuf,

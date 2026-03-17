@@ -1,3 +1,4 @@
+use crate::links;
 use crate::shell::{self, ShellKind};
 use crate::workspace::{self, SwitchOptions};
 use anyhow::{Context, Result, bail};
@@ -37,6 +38,8 @@ enum Commands {
     Current,
     #[command(about = "Shell integration helpers")]
     Shell(ShellCommand),
+    #[command(about = "Manage workspace links")]
+    Links(LinksCommand),
     #[command(about = "Generate shell completions")]
     Completions(CompletionCommand),
 }
@@ -67,8 +70,22 @@ struct SwitchCommand {
     execute: Option<String>,
     #[arg(long, hide = true, action = ArgAction::SetTrue)]
     print_path: bool,
+    #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
+    no_links: bool,
     #[arg(trailing_var_arg = true)]
     execute_args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct LinksCommand {
+    #[command(subcommand)]
+    command: LinksSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum LinksSubcommand {
+    #[command(about = "Apply configured links to the current workspace")]
+    Apply,
 }
 
 #[derive(Debug, Args)]
@@ -144,6 +161,7 @@ pub fn run() -> Result<()> {
         Commands::Root => print_line(workspace::workspace_root_current()?.display()),
         Commands::Current => print_line(workspace::current_workspace_name()?),
         Commands::Shell(cmd) => run_shell(cmd),
+        Commands::Links(cmd) => run_links(cmd),
         Commands::Completions(cmd) => run_completions(cmd.shell.into()),
     }
 }
@@ -161,6 +179,16 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
             preserve_subdir: true,
         },
     )?;
+
+    if !cmd.no_links {
+        let links_report = links::apply_workspace_links(&result.path)?;
+        if !cmd.print_path && links_report.has_entries() {
+            println!(
+                "Links: {} created, {} already satisfied, {} missing target",
+                links_report.linked, links_report.satisfied, links_report.skipped_missing_target
+            );
+        }
+    }
 
     if cmd.print_path {
         let path = match result.relative_subdir {
@@ -257,6 +285,20 @@ fn run_completions(shell: ShellKind) -> Result<()> {
     let mut handle = stdout.lock();
     shell::write_completions(shell, &mut command, &mut handle)?;
     Ok(())
+}
+
+fn run_links(cmd: LinksCommand) -> Result<()> {
+    match cmd.command {
+        LinksSubcommand::Apply => {
+            let root = workspace::workspace_root_current()?;
+            let report = links::apply_workspace_links(&root)?;
+            println!(
+                "Links: {} created, {} already satisfied, {} missing target",
+                report.linked, report.satisfied, report.skipped_missing_target
+            );
+            Ok(())
+        }
+    }
 }
 
 fn run_execute(cwd: &PathBuf, command: &str, args: &[String]) -> Result<()> {
