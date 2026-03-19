@@ -1,0 +1,4 @@
+interface:
+  display_name: "JJ Waltz Support"
+  short_description: "Help with jj-waltz support tasks"
+  default_prompt: "Use $jj-waltz-support to troubleshoot jw usage, shell setup, or workspace-link issues in a JJ repo."
