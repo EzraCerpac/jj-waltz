@@ -1,11 +1,11 @@
 ---
-name: jj-waltz-support
-description: Help users use and troubleshoot jj-waltz (`jw`) in real Jujutsu repositories. Use this whenever the user mentions `jw`, `jj-waltz`, switching JJ workspaces, shell init or completions, `.jwlinks.toml`, `.jwlinks.local.toml`, workspace aliases like `@`, `-`, or `^`, `--execute`, or when `jw switch` is not changing directories, links are conflicting, or workspace paths/cleanup are confusing. Prefer this skill even if the user only describes the symptom and does not name `jj-waltz`.
+name: jj-waltz
+description: Create, switch, manage, and troubleshoot jj-waltz (`jw`) workspaces in real Jujutsu repositories. Use this whenever the user mentions `jw`, `jj-waltz`, creating or switching a workspace or worktree, shell init or completions, `.jwlinks.toml`, `.jwlinks.local.toml`, workspace aliases like `@`, `-`, or `^`, `--execute`, or when the task would benefit from splitting work across multiple JJ workspaces for parallel execution. Prefer this skill even if the user only asks for a new workspace or describes the desired workflow without naming `jj-waltz`.
 ---
 
-# jj-waltz Support
+# jj-waltz
 
-Support users of `jj-waltz` by diagnosing the repo and shell state first, then giving precise commands and a short explanation of why those commands matter.
+Use `jj-waltz` to route work into the right JJ workspace layout, then diagnose or explain behavior when needed.
 
 This skill is specific to this repository's behavior. Do not invent capabilities beyond what `jw` actually supports here.
 
@@ -36,18 +36,19 @@ Important options and tokens:
 
 ## Default approach
 
-Start with diagnosis, not generic advice.
+Start by deciding whether the task is primarily:
 
-1. Confirm the user's goal and symptom in one sentence.
-2. Inspect the local environment if the task depends on current repo state.
-3. Give the smallest set of commands that would verify or fix the issue.
-4. State the expected result so the user knows what success looks like.
+1. workspace creation or routing
+2. multi-workspace orchestration for execution
+3. troubleshooting or explanation
 
-Keep the response concise and support-oriented. Prefer actionable help over tutorial prose.
+Prefer taking the user directly into the right workspace flow instead of waiting until things break. If the task is already in execution mode and separate workspaces would make parallel work cleaner, bias toward creating them proactively.
+
+Keep the response concise and action-oriented. Prefer exact commands and expected results over tutorial prose.
 
 ## What to inspect
 
-When the user is troubleshooting and local context is available, inspect the most relevant state before answering:
+When local context is available, inspect the most relevant state before acting:
 
 - current working directory
 - current shell if shell integration is involved
@@ -56,10 +57,34 @@ When the user is troubleshooting and local context is available, inspect the mos
 - `jw current`, `jw root`, or `jw path <name>` for path confusion
 - `.jwlinks.toml` and `.jwlinks.local.toml` for link issues
 - whether the user is invoking `jw switch` directly or through shell init
+- whether the current task naturally decomposes into independent subtasks that merit separate workspaces
 
-Do not mutate repo-tracked files unless the user explicitly asks for that. For support cases, inspect first and then recommend the next command.
+For troubleshooting, inspect first and then recommend the next command. For workspace setup and execution flows, it is fine to move directly into the appropriate `jw` commands.
 
-## Support playbooks
+## Workspace playbooks
+
+### Creating and switching workspaces
+
+Use this path whenever the user wants a new workspace, asks to jump into another one, or describes a workflow that clearly maps to workspace creation:
+
+- `jw switch <name>` creates the workspace if it does not already exist.
+- `jw switch --at <revset> <name>` creates it at a revset.
+- `jw switch --bookmark <bookmark> <name>` creates a bookmark in the new workspace.
+- `jw switch -x <command> <name>` runs a command after switching instead of relying on shell `cd`.
+
+If the user needs an editor or agent launch, prefer the built-in `--execute` workflow over ad hoc chained shell commands.
+
+### Parallel workspace orchestration
+
+If the task is already being executed and it cleanly splits into multiple independent subtasks, prefer separate JJ workspaces instead of piling all edits into one checkout.
+
+- Create one workspace per substantial subtask.
+- Derive short, task-shaped workspace names.
+- Reuse an existing matching workspace when it is clearly the right target.
+- Prefer `jw switch -x <command>` when the next step is to launch a tool or another agent inside the new workspace.
+- Keep small, tightly coupled, or highly sequential tasks in one workspace.
+
+Follow host policy on subagents and parallel work. If parallel execution is not permitted in the current environment, still trigger this skill and recommend the workspace split explicitly.
 
 ### Shell integration
 
@@ -94,17 +119,6 @@ When the user is confused about where they are or where `jw` will send them:
 - Explain `@`, `-`, `^`, and `default` directly instead of leaving them implicit.
 
 Preserved subdirectory behavior matters. If a user switches between sibling workspaces while inside a subdirectory, `jw` tries to carry that relative subdirectory across. If that subdirectory does not exist in the target workspace, the effective destination falls back to the workspace root.
-
-### Creating and jumping into workspaces
-
-For creation flows:
-
-- `jw switch <name>` creates the workspace if it does not already exist.
-- `jw switch --at <revset> <name>` creates it at a revset.
-- `jw switch --bookmark <bookmark> <name>` creates a bookmark in the new workspace.
-- `jw switch -x <command> <name>` runs a command after switching instead of relying on shell `cd`.
-
-If the user needs an editor or agent launch, prefer the built-in `--execute` workflow over ad hoc chained shell commands.
 
 ### Link configuration
 
@@ -158,7 +172,7 @@ Use this shape unless the user asks for something else:
 2. A short command block with the exact next commands.
 3. One or two lines describing the expected result.
 
-If the user asked a conceptual question rather than a broken-state question, skip the diagnosis line and answer directly with the relevant commands and explanation.
+If the user asked a conceptual question rather than a broken-state question, skip the diagnosis line and answer directly with the relevant commands and explanation. If the task is about creating or splitting workspaces, the first line can frame the workspace plan rather than a failure mode.
 
 ## Guardrails
 
@@ -166,6 +180,7 @@ If the user asked a conceptual question rather than a broken-state question, ski
 - Do not tell users `.jwlinks.toml` targets are relative to the config file location; here they are resolved from the workspace root.
 - Do not recommend destructive cleanup when a simpler inspection command would answer the question.
 - Do not assume `default` is always a literal workspace name; it is also a supported token.
+- Do not create multiple workspaces just because parallelism is theoretically possible; the split should make the execution materially cleaner.
 - Do not overexplain JJ broadly unless the user asked for JJ background.
 
 ## Examples
@@ -198,3 +213,13 @@ Response shape:
 
 - explain `-`, `@`, `^`, and `default`
 - show `jw current`, `jw switch -`, and `jw switch default`
+
+**Example 4**
+
+User: `set up separate workspaces so parallel agents can handle frontend, tests, and docs`
+
+Response shape:
+
+- propose or create one workspace per subtask when execution mode allows it
+- use short task-based workspace names
+- prefer `jw switch -x <command>` when the next step is to launch work inside each workspace

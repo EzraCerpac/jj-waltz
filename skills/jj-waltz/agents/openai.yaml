@@ -1,0 +1,4 @@
+interface:
+  display_name: "JJ Waltz"
+  short_description: "Create and manage jj-waltz workspaces"
+  default_prompt: "Use $jj-waltz to create, route, or troubleshoot JJ workspaces with jw, including parallel workspace setups."
