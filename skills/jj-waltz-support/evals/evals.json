@@ -1,0 +1,23 @@
+{
+  "skill_name": "jj-waltz-support",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I installed jw and `jw switch feature-ui` creates the workspace, but in zsh it leaves me in the same directory instead of moving into the new workspace. What am I missing?",
+      "expected_output": "Explains that shell integration is required for directory switching, gives the zsh `jw shell init zsh` setup, and tells the user what to rerun or re-source.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I want every jj-waltz workspace to share the same ignored `data` directory. I added a `.jwlinks.toml`, but when I switch into `solver-benchmark` I get a link conflict. Help me figure out whether the target is missing or the workspace already has the wrong path.",
+      "expected_output": "Uses `.jwlinks.toml` terminology correctly, distinguishes missing-target behavior from link conflicts, and gives concrete inspection and retry commands such as checking the target path and running `jw links apply` or `jw switch` again.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Can you explain what `jw switch -`, `jw switch @`, and `jw switch default` do? Also, if I want to see where a workspace resolves before switching, what should I run?",
+      "expected_output": "Correctly explains the workspace tokens for previous, current, and default workspaces, and points the user to commands like `jw current`, `jw root`, or `jw path <name>` for inspection.",
+      "files": []
+    }
+  ]
+}
