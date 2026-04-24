@@ -11,7 +11,8 @@ fn apply_links_supports_large_rule_sets_and_nested_parents() {
     for idx in 0..120 {
         let source = format!("mounts/group-{idx}/dataset");
         let target = format!("../repo/targets/{idx}");
-        fs::create_dir_all(env.workspace_root.join(format!("targets/{idx}"))).expect("create target");
+        fs::create_dir_all(env.workspace_root.join(format!("targets/{idx}")))
+            .expect("create target");
         config.push_str("[[link]]\n");
         config.push_str(&format!("source = \"{source}\"\n"));
         config.push_str(&format!("target = \"{target}\"\n"));
@@ -32,7 +33,10 @@ fn apply_links_supports_large_rule_sets_and_nested_parents() {
     for idx in [0, 47, 119] {
         let link = target_workspace.join(format!("mounts/group-{idx}/dataset"));
         let metadata = fs::symlink_metadata(&link).expect("link metadata");
-        assert!(metadata.file_type().is_symlink(), "expected symlink for {idx}");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "expected symlink for {idx}"
+        );
     }
 }
 
@@ -134,7 +138,10 @@ fn apply_links_rejects_invalid_source_values_and_missing_required_targets() {
 
 fn assert_symlink(path: &Path) {
     let metadata = fs::symlink_metadata(path).expect("metadata");
-    assert!(metadata.file_type().is_symlink(), "expected symlink: {path:?}");
+    assert!(
+        metadata.file_type().is_symlink(),
+        "expected symlink: {path:?}"
+    );
 }
 
 struct LinkTestEnv {
