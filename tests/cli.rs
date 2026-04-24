@@ -250,6 +250,37 @@ fn switch_fails_on_conflicting_existing_path() {
         .stderr(predicate::str::contains("link conflict"));
 }
 
+#[test]
+fn switch_reapplies_links_after_intermediate_commits_and_workspace_hops() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(repo.default_root.join("data/blob.bin"), [7_u8; 8192]).expect("write data blob");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+    let feature_a_root = repo.default_root.with_extension("feature-a");
+    fs::write(feature_a_root.join("feature.txt"), "feature-a\n").expect("write feature file");
+    run_in(&feature_a_root, ["jj", "file", "track", "feature.txt"]).expect("track file");
+    run_in(&feature_a_root, ["jj", "commit", "-m", "feature-a commit"]).expect("commit change");
+
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .current_dir(&feature_a_root)
+        .args(["switch", "default"])
+        .assert()
+        .success();
+
+    repo.cmd().args(["switch", "feature-b"]).assert().success();
+    let feature_b_data = repo.default_root.with_extension("feature-b").join("data");
+    let metadata = fs::symlink_metadata(&feature_b_data).expect("metadata");
+    assert!(metadata.file_type().is_symlink());
+}
+
 struct TestRepo {
     _tempdir: TempDir,
     default_root: PathBuf,
