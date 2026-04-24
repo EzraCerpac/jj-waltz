@@ -5,8 +5,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
+fn jj_available() -> bool {
+    Command::new("jj")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+macro_rules! skip_without_jj {
+    () => {
+        if !jj_available() {
+            eprintln!("skipping test because `jj` is not installed");
+            return;
+        }
+    };
+}
+
 #[test]
 fn switch_creates_workspace_and_path_reports_it() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
 
     repo.cmd()
@@ -24,6 +41,7 @@ fn switch_creates_workspace_and_path_reports_it() {
 
 #[test]
 fn switch_default_returns_existing_root() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     let test_root = repo.default_root.with_extension("test");
     repo.run_jj([
@@ -47,6 +65,7 @@ fn switch_default_returns_existing_root() {
 
 #[test]
 fn completions_command_generates_fish_script() {
+    skip_without_jj!();
     Command::cargo_bin("jw")
         .expect("binary")
         .args(["shell", "completions", "fish"])
@@ -61,6 +80,7 @@ fn completions_command_generates_fish_script() {
 
 #[test]
 fn completions_command_generates_zsh_script() {
+    skip_without_jj!();
     Command::cargo_bin("jw")
         .expect("binary")
         .args(["shell", "completions", "zsh"])
@@ -77,6 +97,7 @@ fn completions_command_generates_zsh_script() {
 
 #[test]
 fn remove_deletes_workspace_directory_by_default() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     let workspace_root = repo.default_root.with_extension("feature-a");
 
@@ -95,6 +116,7 @@ fn remove_deletes_workspace_directory_by_default() {
 
 #[test]
 fn completion_helper_lists_workspace_candidates() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
 
     repo.cmd().args(["switch", "feature-a"]).assert().success();
@@ -110,6 +132,7 @@ fn completion_helper_lists_workspace_candidates() {
 
 #[test]
 fn switch_print_path_does_not_overflow_stack() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
 
     repo.cmd()
@@ -121,6 +144,7 @@ fn switch_print_path_does_not_overflow_stack() {
 
 #[test]
 fn switch_applies_workspace_links_for_data_directory() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
     fs::write(
@@ -145,6 +169,7 @@ fn switch_applies_workspace_links_for_data_directory() {
 
 #[test]
 fn switch_uses_default_workspace_link_config() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
     fs::write(
@@ -181,6 +206,7 @@ fn switch_uses_default_workspace_link_config() {
 
 #[test]
 fn switch_accepts_existing_directory_when_it_matches_target() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
     fs::write(
@@ -194,6 +220,7 @@ fn switch_accepts_existing_directory_when_it_matches_target() {
 
 #[test]
 fn switch_fails_on_conflicting_existing_path() {
+    skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
     fs::write(
