@@ -41,9 +41,10 @@ jobs:
           mkdir -p /tmp/jj-install
           archive=jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz
           base_url=https://github.com/jj-vcs/jj/releases/download/v0.39.0
+          expected_sha256=$(curl -LsSf https://api.github.com/repos/jj-vcs/jj/releases/tags/v0.39.0 | jq -r ".assets[] | select(.name == \"${archive}\") | .digest" | sed 's/^sha256://')
+          test -n "${expected_sha256}"
           curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/jj-install/${archive} ${base_url}/${archive}
-          curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/jj-install/sha256sums.txt ${base_url}/sha256sums.txt
-          (cd /tmp/jj-install && grep " ${archive}$" sha256sums.txt | sha256sum -c -)
+          echo "${expected_sha256}  /tmp/jj-install/${archive}" | sha256sum -c -
           tar -xzf /tmp/jj-install/${archive} -C /tmp/jj-install
           install /tmp/jj-install/jj /usr/local/bin/jj
       - name: Check lockfile
