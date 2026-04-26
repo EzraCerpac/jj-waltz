@@ -3,8 +3,12 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 const PREVIOUS_WORKSPACE_FILE: &str = "jw-prev-workspace";
+const JJ_RETRY_DELAY_MS: u64 = 50;
+const JJ_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceEntry {
@@ -61,10 +65,9 @@ pub fn workspace_entries() -> Result<Vec<WorkspaceEntry>> {
 }
 
 pub fn workspace_root_by_name(name: &str) -> Result<PathBuf> {
-    let output = Command::new("jj")
-        .args(["workspace", "root", "--name", name])
-        .output()
-        .with_context(|| "failed to execute `jj workspace root`".to_string())?;
+    let args = ["workspace", "root", "--name", name];
+    let output =
+        run_jj_raw(&args).with_context(|| "failed to execute `jj workspace root`".to_string())?;
 
     if output.status.success() {
         return Ok(PathBuf::from(trimmed_stdout(output)?));
@@ -387,10 +390,8 @@ fn canonicalize_dir(path: &Path) -> Result<PathBuf> {
 }
 
 fn run_jj(args: &[&str]) -> Result<std::process::Output> {
-    let output = Command::new("jj")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to execute `jj {}`", args.join(" ")))?;
+    let output =
+        run_jj_raw(args).with_context(|| format!("failed to execute `jj {}`", args.join(" ")))?;
 
     if output.status.success() {
         Ok(output)
@@ -400,9 +401,8 @@ fn run_jj(args: &[&str]) -> Result<std::process::Output> {
 }
 
 fn run_jj_owned(args: &[String]) -> Result<std::process::Output> {
-    let output = Command::new("jj")
-        .args(args)
-        .output()
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_jj_raw(&borrowed)
         .with_context(|| format!("failed to execute `jj {}`", args.join(" ")))?;
 
     if output.status.success() {
@@ -410,6 +410,46 @@ fn run_jj_owned(args: &[String]) -> Result<std::process::Output> {
     } else {
         bail!(stderr_message(output, "jj command failed"))
     }
+}
+
+fn run_jj_raw(args: &[&str]) -> Result<std::process::Output> {
+    let mut last_error: Option<std::io::Error> = None;
+    let mut last_output: Option<std::process::Output> = None;
+
+    for attempt in 1..=JJ_MAX_ATTEMPTS {
+        match Command::new("jj").args(args).output() {
+            Ok(output) => {
+                if output.status.success() || !is_transient_jj_failure(&output) {
+                    return Ok(output);
+                }
+                last_output = Some(output);
+                if attempt < JJ_MAX_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(JJ_RETRY_DELAY_MS));
+                }
+            }
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < JJ_MAX_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(JJ_RETRY_DELAY_MS));
+                }
+            }
+        }
+    }
+
+    if let Some(err) = last_error {
+        return Err(err).context("failed to execute `jj`");
+    }
+
+    last_output.ok_or_else(|| anyhow!("failed to execute `jj {}`", args.join(" ")))
+}
+
+fn is_transient_jj_failure(output: &std::process::Output) -> bool {
+    let message = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    message.contains("temporarily unavailable")
+        || message.contains("timed out")
+        || message.contains("resource busy")
+        || message.contains("would block")
+        || message.contains("lock")
 }
 
 fn trimmed_stdout(output: std::process::Output) -> Result<String> {
@@ -433,10 +473,14 @@ mod tests {
 
     #[test]
     fn validates_workspace_names() {
-        assert!(validate_workspace_name("feature").is_ok());
+        for valid in ["feature", "feature-1", "feature_branch", "a.b.c", "default"] {
+            assert!(validate_workspace_name(valid).is_ok(), "{valid}");
+        }
         assert!(validate_workspace_name("").is_err());
         assert!(validate_workspace_name("../bad").is_err());
         assert!(validate_workspace_name("-bad").is_err());
         assert!(validate_workspace_name("bad:name").is_err());
+        assert!(validate_workspace_name("bad\nname").is_err());
+        assert!(validate_workspace_name("/bad").is_err());
     }
 }

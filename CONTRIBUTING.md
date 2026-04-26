@@ -2,19 +2,22 @@
 
 Thanks for contributing to `jj-waltz`.
 
-## Development
+## Local quick check
 
 ```bash
-cargo check
-cargo test
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test -q
 ```
 
-## Scope
+## Test matrix to consider
 
-Please prefer small, focused changes with tests where practical.
+- Linux/macOS/Windows shell behavior (`bash`, `zsh`, `fish`, `powershell`).
+- `jj` installed vs unavailable (`doctor`, error messages, command exits).
+- Link workflows (`.jwlinks.toml` + optional `.jwlinks.local.toml`).
 
-## Design principles
+## Scope and design principles
 
-- jj-first behavior
-- shell integration that feels native
-- clear, actionable error messages
+- Prefer small, focused changes with tests where practical.
+- Keep `cli` orchestration-focused and push behavior into domain modules.
+- Preserve jj-first behavior and actionable error messages.

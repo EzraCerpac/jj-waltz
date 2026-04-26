@@ -1,5 +1,6 @@
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,6 +74,7 @@ fn completions_command_generates_fish_script() {
         .success()
         .stdout(predicate::str::contains("__jw_workspace_candidates"))
         .stdout(predicate::str::contains("-l keep-dir"))
+        .stdout(predicate::str::contains("doctor 'Run environment checks'"))
         .stdout(predicate::str::contains(
             "switch 'Switch to or create a workspace'",
         ));
@@ -90,6 +92,7 @@ fn completions_command_generates_zsh_script() {
         .stdout(predicate::str::contains(
             "--keep-dir[Forget the workspace but keep its directory]",
         ))
+        .stdout(predicate::str::contains("doctor:Run environment checks"))
         .stdout(predicate::str::contains(
             "switch:Switch to or create a workspace",
         ));
@@ -140,6 +143,62 @@ fn switch_print_path_does_not_overflow_stack() {
         .assert()
         .success()
         .stdout(predicate::str::contains("solver-benchmark"));
+}
+
+#[test]
+fn switch_print_path_preserves_nested_subdirectory() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let nested = repo.default_root.join("src/nested");
+    fs::create_dir_all(&nested).expect("create nested directory");
+
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .current_dir(&nested)
+        .args(["switch", "feature-nested", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feature-nested/src/nested"));
+}
+
+#[test]
+fn list_supports_json_output() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let output = repo
+        .cmd()
+        .args(["--json", "list"])
+        .output()
+        .expect("run list --json");
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    let rows = parsed.as_array().expect("array output");
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter()
+            .any(|row| row.get("name") == Some(&Value::String("default".to_owned())))
+    );
+}
+
+#[test]
+fn current_supports_json_output() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let output = repo
+        .cmd()
+        .args(["--json", "current"])
+        .output()
+        .expect("run current --json");
+    assert!(output.status.success());
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    assert_eq!(parsed["name"], Value::String("default".to_owned()));
+}
+
+#[test]
+fn doctor_command_succeeds_in_initialized_repo() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd().args(["doctor"]).assert().success();
 }
 
 #[test]

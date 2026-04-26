@@ -18,6 +18,7 @@ function __jw_subcommands
     printf '%s\t%s\n' prune 'Forget missing workspaces'
     printf '%s\t%s\n' root 'Print the current workspace root'
     printf '%s\t%s\n' current 'Print the current workspace name'
+    printf '%s\t%s\n' doctor 'Run environment checks'
     printf '%s\t%s\n' shell 'Shell integration helpers'
     printf '%s\t%s\n' links 'Manage workspace links'
     printf '%s\t%s\n' completions 'Generate shell completions'
@@ -54,7 +55,7 @@ complete -c jw -n '__jw_using_subcommand remove rm' -f -a '(__jw_workspace_candi
 complete -c jw -n '__jw_using_subcommand remove rm' -l keep-dir -d 'Forget the workspace but keep its directory'
 complete -c jw -n '__jw_using_subcommand remove rm' -s h -l help -d 'Print help'
 
-complete -c jw -n '__jw_using_subcommand list l prune root current completions' -s h -l help -d 'Print help'
+complete -c jw -n '__jw_using_subcommand list l prune root current doctor completions' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand links' -f -a 'apply\tApply configured links to the current workspace'
 complete -c jw -n '__jw_using_subcommand links; and __fish_seen_subcommand_from apply' -s h -l help -d 'Print help'
@@ -110,6 +111,7 @@ _jw() {
         'prune:Forget missing workspaces'
         'root:Print the current workspace root'
         'current:Print the current workspace name'
+        'doctor:Run environment checks'
         'shell:Shell integration helpers'
         'links:Manage workspace links'
         'completions:Generate shell completions'
@@ -140,7 +142,7 @@ _jw() {
             '(-h --help)'{-h,--help}'[Print help]' \
             '1:workspace:_jw_workspace_candidates'
           ;;
-        list|l|prune|root|current)
+        list|l|prune|root|current|doctor)
           _arguments '(-h --help)'{-h,--help}'[Print help]'
           ;;
         links)
@@ -187,6 +189,7 @@ _jw() {
             'prune:Forget missing workspaces'
             'root:Print the current workspace root'
             'current:Print the current workspace name'
+            'doctor:Run environment checks'
             'shell:Shell integration helpers'
             'links:Manage workspace links'
             'completions:Generate shell completions'

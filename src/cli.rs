@@ -3,6 +3,7 @@ use crate::shell::{self, ShellKind};
 use crate::workspace::{self, SwitchOptions};
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -16,6 +17,8 @@ use std::process::{Command, Stdio};
     arg_required_else_help = true
 )]
 pub struct Cli {
+    #[arg(long, global = true, action = ArgAction::SetTrue, help = "Emit JSON output")]
+    json: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -36,6 +39,8 @@ enum Commands {
     Root,
     #[command(about = "Print the current workspace name")]
     Current,
+    #[command(about = "Run environment checks")]
+    Doctor,
     #[command(about = "Shell integration helpers")]
     Shell(ShellCommand),
     #[command(about = "Manage workspace links")]
@@ -154,12 +159,13 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Commands::Switch(cmd) => run_switch(cmd),
-        Commands::List => run_list(),
-        Commands::Path(cmd) => run_path(cmd),
+        Commands::List => run_list(cli.json),
+        Commands::Path(cmd) => run_path(cmd, cli.json),
         Commands::Remove(cmd) => run_remove(cmd),
         Commands::Prune => run_prune(),
-        Commands::Root => print_line(workspace::workspace_root_current()?.display()),
-        Commands::Current => print_line(workspace::current_workspace_name()?),
+        Commands::Root => run_root(cli.json),
+        Commands::Current => run_current(cli.json),
+        Commands::Doctor => run_doctor(cli.json),
         Commands::Shell(cmd) => run_shell(cmd),
         Commands::Links(cmd) => run_links(cmd),
         Commands::Completions(cmd) => run_completions(cmd.shell.into()),
@@ -224,22 +230,43 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
     Ok(())
 }
 
-fn run_list() -> Result<()> {
+#[derive(Debug, Serialize)]
+struct ListEntry {
+    marker: char,
+    name: String,
+    path: Option<String>,
+}
+
+fn run_list(json: bool) -> Result<()> {
     let entries = workspace::workspace_entries()?;
     let current = workspace::current_workspace_name().ok();
     let previous = workspace::previous_workspace_name().ok();
     let default = workspace::default_workspace_name().ok();
 
+    if json {
+        let rows = entries
+            .into_iter()
+            .map(|entry| ListEntry {
+                marker: marker_for(
+                    &entry.name,
+                    current.as_deref(),
+                    previous.as_deref(),
+                    default.as_deref(),
+                ),
+                name: entry.name,
+                path: entry.root.map(|path| path.display().to_string()),
+            })
+            .collect::<Vec<_>>();
+        return print_json(&rows);
+    }
+
     for entry in entries {
-        let marker = if current.as_deref() == Some(entry.name.as_str()) {
-            '@'
-        } else if previous.as_deref() == Some(entry.name.as_str()) {
-            '-'
-        } else if default.as_deref() == Some(entry.name.as_str()) {
-            '^'
-        } else {
-            ' '
-        };
+        let marker = marker_for(
+            &entry.name,
+            current.as_deref(),
+            previous.as_deref(),
+            default.as_deref(),
+        );
 
         let path = entry
             .root
@@ -251,8 +278,33 @@ fn run_list() -> Result<()> {
     Ok(())
 }
 
-fn run_path(cmd: PathCommand) -> Result<()> {
-    print_line(workspace::path_for_workspace(&cmd.name)?.display())
+fn marker_for(
+    name: &str,
+    current: Option<&str>,
+    previous: Option<&str>,
+    default: Option<&str>,
+) -> char {
+    if current == Some(name) {
+        '@'
+    } else if previous == Some(name) {
+        '-'
+    } else if default == Some(name) {
+        '^'
+    } else {
+        ' '
+    }
+}
+
+fn run_path(cmd: PathCommand, json: bool) -> Result<()> {
+    let path = workspace::path_for_workspace(&cmd.name)?;
+    if json {
+        print_json(&serde_json::json!({
+            "name": workspace::resolve_workspace_token(&cmd.name)?,
+            "path": path.display().to_string()
+        }))
+    } else {
+        print_line(path.display())
+    }
 }
 
 fn run_remove(cmd: RemoveCommand) -> Result<()> {
@@ -272,6 +324,95 @@ fn run_prune() -> Result<()> {
     }
     println!("Pruned {} workspace(s)", removed.len());
     Ok(())
+}
+
+fn run_root(json: bool) -> Result<()> {
+    let root = workspace::workspace_root_current()?;
+    if json {
+        print_json(&serde_json::json!({ "root": root.display().to_string() }))
+    } else {
+        print_line(root.display())
+    }
+}
+
+fn run_current(json: bool) -> Result<()> {
+    let name = workspace::current_workspace_name()?;
+    if json {
+        print_json(&serde_json::json!({ "name": name }))
+    } else {
+        print_line(name)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    name: String,
+    ok: bool,
+    detail: String,
+}
+
+fn run_doctor(json: bool) -> Result<()> {
+    let mut checks = Vec::new();
+
+    let jj = Command::new("jj").arg("--version").output();
+    checks.push(match jj {
+        Ok(output) if output.status.success() => DoctorCheck {
+            name: "jj-installed".to_owned(),
+            ok: true,
+            detail: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        },
+        Ok(output) => DoctorCheck {
+            name: "jj-installed".to_owned(),
+            ok: false,
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        },
+        Err(err) => DoctorCheck {
+            name: "jj-installed".to_owned(),
+            ok: false,
+            detail: err.to_string(),
+        },
+    });
+
+    checks.push(match workspace::workspace_root_current() {
+        Ok(root) => DoctorCheck {
+            name: "workspace-root".to_owned(),
+            ok: true,
+            detail: root.display().to_string(),
+        },
+        Err(err) => DoctorCheck {
+            name: "workspace-root".to_owned(),
+            ok: false,
+            detail: err.to_string(),
+        },
+    });
+
+    checks.push(match workspace::default_workspace_name() {
+        Ok(name) => DoctorCheck {
+            name: "default-workspace".to_owned(),
+            ok: true,
+            detail: name,
+        },
+        Err(err) => DoctorCheck {
+            name: "default-workspace".to_owned(),
+            ok: false,
+            detail: err.to_string(),
+        },
+    });
+
+    if json {
+        return print_json(&checks);
+    }
+
+    for check in &checks {
+        let status = if check.ok { "ok" } else { "fail" };
+        println!("{status:>4}  {:<18} {}", check.name, check.detail);
+    }
+
+    if checks.iter().all(|check| check.ok) {
+        Ok(())
+    } else {
+        bail!("doctor found failing checks")
+    }
 }
 
 fn run_shell(cmd: ShellCommand) -> Result<()> {
@@ -347,6 +488,13 @@ fn run_execute(cwd: &PathBuf, command: &str, args: &[String]) -> Result<()> {
 fn print_line(value: impl std::fmt::Display) -> Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{value}").context("failed to write stdout")?;
+    Ok(())
+}
+
+fn print_json(value: &impl Serialize) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, value).context("failed to encode JSON output")?;
+    writeln!(stdout).context("failed to write stdout")?;
     Ok(())
 }
 

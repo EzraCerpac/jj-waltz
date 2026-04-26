@@ -37,9 +37,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install jj
         run: |
+          set -euo pipefail
           mkdir -p /tmp/jj-install
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jj-vcs/jj/releases/download/v0.39.0/jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz \
-            | tar -xzf - -C /tmp/jj-install
+          archive=jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz
+          base_url=https://github.com/jj-vcs/jj/releases/download/v0.39.0
+          curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/jj-install/${archive} ${base_url}/${archive}
+          curl --proto '=https' --tlsv1.2 -LsSf -o /tmp/jj-install/sha256sums.txt ${base_url}/sha256sums.txt
+          (cd /tmp/jj-install && grep " ${archive}$" sha256sums.txt | sha256sum -c -)
+          tar -xzf /tmp/jj-install/${archive} -C /tmp/jj-install
           install /tmp/jj-install/jj /usr/local/bin/jj
       - name: Check lockfile
         run: cargo check
@@ -58,3 +63,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --locked
+
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build binary
+        run: cargo build --locked
+      - name: Smoke help output
+        run: cargo run -- --help

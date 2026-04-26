@@ -90,6 +90,19 @@ jw switch -
 jw list
 ```
 
+## Advanced workflow examples
+
+```bash
+# preserve subdirectory and open an editor after switching
+jw switch -x nvim feature-auth -- src/api
+
+# diagnose environment and workspace assumptions
+jw doctor
+
+# script-safe output
+jw --json list
+```
+
 ## AI usage note
 
 This project supports AI-assisted development workflows, and portions of its implementation and documentation may be created with AI assistance. All shipped behavior is intended to be human-reviewed, tested, and maintained to production standards.
