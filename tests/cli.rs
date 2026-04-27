@@ -40,6 +40,128 @@ fn switch_creates_workspace_and_path_reports_it() {
 }
 
 #[test]
+fn switch_without_config_does_not_create_bookmark() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["switch", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created workspace: feature-a"))
+        .stdout(predicate::str::contains("bookmark:").not());
+
+    assert!(!repo.bookmarks().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn switch_config_can_create_bookmark_named_like_workspace() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config("[workspace]\ncreate_bookmark = true\n");
+
+    repo.cmd()
+        .args(["switch", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created workspace: feature-a"))
+        .stdout(predicate::str::contains("bookmark: feature-a"));
+
+    assert!(repo.bookmarks().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn switch_config_can_template_auto_bookmark_name() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config(
+        "[workspace]\ncreate_bookmark = true\nbookmark_template = \"wip/{workspace}\"\n",
+    );
+
+    repo.cmd()
+        .args(["switch", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bookmark: wip/feature-a"));
+
+    assert!(repo.bookmarks().contains(&"wip/feature-a".to_owned()));
+}
+
+#[test]
+fn switch_explicit_bookmark_overrides_config_default() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config(
+        "[workspace]\ncreate_bookmark = true\nbookmark_template = \"wip/{workspace}\"\n",
+    );
+
+    repo.cmd()
+        .args(["switch", "--bookmark", "custom-name", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bookmark: custom-name"));
+
+    let bookmarks = repo.bookmarks();
+    assert!(bookmarks.contains(&"custom-name".to_owned()));
+    assert!(!bookmarks.contains(&"wip/feature-a".to_owned()));
+}
+
+#[test]
+fn switch_existing_workspace_does_not_echo_config_bookmark() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config("[workspace]\ncreate_bookmark = true\n");
+
+    repo.cmd()
+        .args(["switch", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bookmark: feature-a"));
+
+    repo.cmd()
+        .args(["switch", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Switched workspace: feature-a"))
+        .stdout(predicate::str::contains("bookmark:").not());
+}
+
+#[test]
+fn switch_no_bookmark_suppresses_config_default() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config("[workspace]\ncreate_bookmark = true\n");
+
+    repo.cmd()
+        .args(["switch", "--no-bookmark", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bookmark:").not());
+
+    assert!(!repo.bookmarks().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn switch_rejects_bookmark_and_no_bookmark_together() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args([
+            "switch",
+            "--bookmark",
+            "custom-name",
+            "--no-bookmark",
+            "feature-a",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--bookmark and --no-bookmark cannot be used together",
+        ));
+}
+
+#[test]
 fn switch_default_returns_existing_root() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -52,9 +174,7 @@ fn switch_default_returns_existing_root() {
         test_root.to_str().unwrap(),
     ]);
 
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .current_dir(&test_root)
+    repo.cmd_at(&test_root)
         .args(["path", "default"])
         .assert()
         .success()
@@ -184,9 +304,7 @@ fn switch_uses_default_workspace_link_config() {
         .success();
     fs::remove_file(repo.default_root.join(".jwlinks.toml")).expect("remove default config");
 
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .current_dir(repo.default_root.with_extension("solver-benchmark"))
+    repo.cmd_at(&repo.default_root.with_extension("solver-benchmark"))
         .args(["switch", "default"])
         .assert()
         .success();
@@ -236,9 +354,7 @@ fn switch_fails_on_conflicting_existing_path() {
         .success();
 
     fs::create_dir_all(target_root.join("cache")).expect("create conflicting path");
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .current_dir(&target_root)
+    repo.cmd_at(&target_root)
         .args(["switch", "default", "--no-links"])
         .assert()
         .success();
@@ -268,9 +384,7 @@ fn switch_reapplies_links_after_intermediate_commits_and_workspace_hops() {
     run_in(&feature_a_root, ["jj", "file", "track", "feature.txt"]).expect("track file");
     run_in(&feature_a_root, ["jj", "commit", "-m", "feature-a commit"]).expect("commit change");
 
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .current_dir(&feature_a_root)
+    repo.cmd_at(&feature_a_root)
         .args(["switch", "default"])
         .assert()
         .success();
@@ -284,6 +398,7 @@ fn switch_reapplies_links_after_intermediate_commits_and_workspace_hops() {
 struct TestRepo {
     _tempdir: TempDir,
     default_root: PathBuf,
+    config_home: PathBuf,
 }
 
 impl TestRepo {
@@ -298,16 +413,23 @@ impl TestRepo {
         fs::write(default_root.join("README.md"), "hello\n")?;
         run_in(&default_root, ["jj", "file", "track", "root:README.md"])?;
         run_in(&default_root, ["jj", "commit", "-m", "initial"])?;
+        let config_home = tempdir.path().join("config");
 
         Ok(Self {
             _tempdir: tempdir,
             default_root,
+            config_home,
         })
     }
 
     fn cmd(&self) -> Command {
+        self.cmd_at(&self.default_root)
+    }
+
+    fn cmd_at(&self, cwd: &Path) -> Command {
         let mut cmd = Command::cargo_bin("jw").expect("binary");
-        cmd.current_dir(&self.default_root);
+        cmd.current_dir(cwd)
+            .env("XDG_CONFIG_HOME", &self.config_home);
         cmd
     }
 
@@ -317,6 +439,32 @@ impl TestRepo {
             std::iter::once("jj").chain(args).collect::<Vec<_>>(),
         )
         .expect("jj command succeeds");
+    }
+
+    fn write_config(&self, contents: &str) {
+        let config_dir = self.config_home.join("jj-waltz");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::write(config_dir.join("config.toml"), contents).expect("write config");
+    }
+
+    fn bookmarks(&self) -> Vec<String> {
+        let output = Command::new("jj")
+            .current_dir(&self.default_root)
+            .args(["bookmark", "list", "-T", "name ++ \"\\n\"", "--color=never"])
+            .output()
+            .expect("list bookmarks");
+        assert!(
+            output.status.success(),
+            "jj bookmark list failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
     }
 }
 

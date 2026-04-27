@@ -178,7 +178,11 @@ pub fn switch_workspace(target: &str, options: &SwitchOptions) -> Result<SwitchR
         workspace: resolved_name,
         path: target_path,
         created,
-        bookmark: options.bookmark.clone(),
+        bookmark: if created {
+            options.bookmark.clone()
+        } else {
+            None
+        },
         relative_subdir,
     })
 }

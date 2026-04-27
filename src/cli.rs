@@ -1,3 +1,4 @@
+use crate::config::{self, Config};
 use crate::links;
 use crate::shell::{self, ShellKind};
 use crate::workspace::{self, SwitchOptions};
@@ -61,6 +62,12 @@ struct SwitchCommand {
         help = "Create a bookmark in a new workspace"
     )]
     bookmark: Option<String>,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Do not create a bookmark for a new workspace"
+    )]
+    no_bookmark: bool,
     #[arg(
         short = 'x',
         long,
@@ -170,12 +177,17 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
     if cmd.execute.is_none() && !cmd.execute_args.is_empty() {
         bail!("arguments after -- require --execute")
     }
+    if cmd.bookmark.is_some() && cmd.no_bookmark {
+        bail!("--bookmark and --no-bookmark cannot be used together")
+    }
+
+    let bookmark = effective_bookmark(&cmd)?;
 
     let result = workspace::switch_workspace(
         &cmd.name,
         &SwitchOptions {
             at_revset: cmd.at,
-            bookmark: cmd.bookmark.clone(),
+            bookmark,
             preserve_subdir: true,
         },
     )?;
@@ -222,6 +234,26 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         println!("  bookmark: {bookmark}");
     }
     Ok(())
+}
+
+fn effective_bookmark(cmd: &SwitchCommand) -> Result<Option<String>> {
+    if cmd.no_bookmark {
+        return Ok(None);
+    }
+    if let Some(bookmark) = &cmd.bookmark {
+        return Ok(Some(bookmark.clone()));
+    }
+
+    let config = Config::load()?;
+    if !config.workspace.create_bookmark {
+        return Ok(None);
+    }
+
+    let workspace = workspace::resolve_workspace_token(&cmd.name)?;
+    Ok(Some(config::bookmark_from_template(
+        &config.workspace.bookmark_template,
+        &workspace,
+    )))
 }
 
 fn run_list() -> Result<()> {

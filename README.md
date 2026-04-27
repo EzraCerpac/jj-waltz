@@ -20,6 +20,7 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
 - `jw list`, `jw path`, `jw remove`, `jw prune`, `jw root`, `jw current`
 - `--execute` support for jumping into editors or agents after switching
+- optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
@@ -89,6 +90,25 @@ jw switch default
 jw switch -
 jw list
 ```
+
+## Config
+
+`jw` reads user config from `$XDG_CONFIG_HOME/jj-waltz/config.toml`, or
+`~/.config/jj-waltz/config.toml` when `XDG_CONFIG_HOME` is not set.
+
+To create a bookmark automatically whenever `jw switch` creates a workspace:
+
+```toml
+[workspace]
+create_bookmark = true
+bookmark_template = "{workspace}"
+```
+
+`bookmark_template` defaults to `{workspace}`. The `{workspace}` token is replaced
+with the resolved workspace name, so templates like `wip/{workspace}` are valid.
+
+For one command, `jw switch --bookmark custom-name feature-a` overrides the config,
+and `jw switch --no-bookmark feature-a` suppresses configured bookmark creation.
 
 ## AI usage note
 
