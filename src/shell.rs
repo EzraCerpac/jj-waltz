@@ -12,6 +12,7 @@ function __jw_subcommands
     printf '%s\t%s\n' s 'Alias for switch'
     printf '%s\t%s\n' list 'List known workspaces'
     printf '%s\t%s\n' l 'Alias for list'
+    printf '%s\t%s\n' ls 'Alias for list'
     printf '%s\t%s\n' path 'Print a workspace path'
     printf '%s\t%s\n' remove 'Forget a workspace'
     printf '%s\t%s\n' rm 'Alias for remove'
@@ -55,7 +56,7 @@ complete -c jw -n '__jw_using_subcommand remove rm' -f -a '(__jw_workspace_candi
 complete -c jw -n '__jw_using_subcommand remove rm' -l keep-dir -d 'Forget the workspace but keep its directory'
 complete -c jw -n '__jw_using_subcommand remove rm' -s h -l help -d 'Print help'
 
-complete -c jw -n '__jw_using_subcommand list l prune root current completions' -s h -l help -d 'Print help'
+complete -c jw -n '__jw_using_subcommand list l ls prune root current completions' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand links' -f -a 'apply\tApply configured links to the current workspace'
 complete -c jw -n '__jw_using_subcommand links; and __fish_seen_subcommand_from apply' -s h -l help -d 'Print help'
@@ -105,6 +106,7 @@ _jw() {
         's:Alias for switch'
         'list:List known workspaces'
         'l:Alias for list'
+        'ls:Alias for list'
         'path:Print a workspace path'
         'remove:Forget a workspace'
         'rm:Alias for remove'
@@ -142,7 +144,7 @@ _jw() {
             '(-h --help)'{-h,--help}'[Print help]' \
             '1:workspace:_jw_workspace_candidates'
           ;;
-        list|l|prune|root|current)
+        list|l|ls|prune|root|current)
           _arguments '(-h --help)'{-h,--help}'[Print help]'
           ;;
         links)
@@ -183,6 +185,7 @@ _jw() {
             's:Alias for switch'
             'list:List known workspaces'
             'l:Alias for list'
+            'ls:Alias for list'
             'path:Print a workspace path'
             'remove:Forget a workspace'
             'rm:Alias for remove'

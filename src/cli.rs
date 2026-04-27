@@ -25,7 +25,7 @@ pub struct Cli {
 enum Commands {
     #[command(alias = "s", about = "Switch to or create a workspace")]
     Switch(SwitchCommand),
-    #[command(alias = "l", about = "List known workspaces")]
+    #[command(aliases = ["l", "ls"], about = "List known workspaces")]
     List,
     #[command(about = "Print a workspace path")]
     Path(PathCommand),
