@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Parser)]
@@ -405,15 +405,15 @@ fn run_remove(cmd: RemoveCommand) -> Result<()> {
     Ok(())
 }
 
-fn print_remove_result(name: &str, path: &PathBuf, delete_dir: bool) {
+fn print_remove_result(name: &str, path: &Path, delete_dir: bool) {
     println!("Forgot workspace: {name}");
     if delete_dir {
         println!("Deleted directory: {}", path.display());
     }
 }
 
-fn apply_links_for_path(path: &PathBuf, quiet: bool) -> Result<()> {
-    let config_root = workspace::default_workspace_root().unwrap_or_else(|_| path.clone());
+fn apply_links_for_path(path: &Path, quiet: bool) -> Result<()> {
+    let config_root = workspace::default_workspace_root().unwrap_or_else(|_| path.to_path_buf());
     let links_report = links::apply_workspace_links_with_config_root(&config_root, path)?;
     if !quiet && links_report.has_entries() {
         println!(
@@ -463,7 +463,7 @@ fn run_links(cmd: LinksCommand) -> Result<()> {
     }
 }
 
-fn run_execute(cwd: &PathBuf, command: &str, args: &[String]) -> Result<()> {
+fn run_execute(cwd: &Path, command: &str, args: &[String]) -> Result<()> {
     let status = if cfg!(windows) {
         let mut full = String::from(command);
         for arg in args {
