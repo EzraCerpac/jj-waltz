@@ -40,6 +40,42 @@ fn switch_creates_workspace_and_path_reports_it() {
 }
 
 #[test]
+fn add_creates_multiple_workspaces_without_switching() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["add", "feature-a", "feature-b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created workspace: feature-a"))
+        .stdout(predicate::str::contains("Created workspace: feature-b"));
+
+    assert!(repo.default_root.with_extension("feature-a").is_dir());
+    assert!(repo.default_root.with_extension("feature-b").is_dir());
+    assert_eq!(repo.current_workspace_name(), "default");
+}
+
+#[test]
+fn switch_can_create_multiple_workspaces_and_print_final_path() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_a = repo.default_root.with_extension("feature-a");
+    let feature_b = repo.default_root.with_extension("feature-b");
+
+    repo.cmd()
+        .args(["switch", "feature-a", "feature-b", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            feature_b.to_string_lossy().as_ref(),
+        ));
+
+    assert!(feature_a.is_dir());
+    assert!(feature_b.is_dir());
+}
+
+#[test]
 fn switch_without_config_does_not_create_bookmark() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -162,6 +198,40 @@ fn switch_rejects_bookmark_and_no_bookmark_together() {
 }
 
 #[test]
+fn switch_rejects_explicit_bookmark_for_batch() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args([
+            "switch",
+            "--bookmark",
+            "custom-name",
+            "feature-a",
+            "feature-b",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--bookmark can only be used with a single workspace",
+        ));
+}
+
+#[test]
+fn add_rejects_explicit_bookmark_for_batch() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["add", "--bookmark", "custom-name", "feature-a", "feature-b"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--bookmark can only be used with a single workspace",
+        ));
+}
+
+#[test]
 fn switch_default_returns_existing_root() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -204,6 +274,9 @@ fn completions_command_generates_fish_script() {
         .assert()
         .success()
         .stdout(predicate::str::contains("__jw_workspace_candidates"))
+        .stdout(predicate::str::contains(
+            "add 'Create one or more workspaces'",
+        ))
         .stdout(predicate::str::contains("-l keep-dir"))
         .stdout(predicate::str::contains("ls 'Alias for list'"))
         .stdout(predicate::str::contains(
@@ -220,6 +293,9 @@ fn completions_command_generates_zsh_script() {
         .assert()
         .success()
         .stdout(predicate::str::contains("_jw_workspace_candidates"))
+        .stdout(predicate::str::contains(
+            "add:Create one or more workspaces",
+        ))
         .stdout(predicate::str::contains(
             "--keep-dir[Forget the workspace but keep its directory]",
         ))
@@ -246,6 +322,77 @@ fn remove_deletes_workspace_directory_by_default() {
         .stdout(predicate::str::contains("Deleted directory:"));
 
     assert!(!workspace_root.exists());
+}
+
+#[test]
+fn remove_deletes_multiple_workspace_directories_by_default() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_a = repo.default_root.with_extension("feature-a");
+    let feature_b = repo.default_root.with_extension("feature-b");
+
+    repo.cmd()
+        .args(["add", "feature-a", "feature-b"])
+        .assert()
+        .success();
+
+    repo.cmd()
+        .args(["remove", "feature-a", "feature-b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Forgot workspace: feature-a"))
+        .stdout(predicate::str::contains("Forgot workspace: feature-b"));
+
+    assert!(!feature_a.exists());
+    assert!(!feature_b.exists());
+}
+
+#[test]
+fn remove_keep_dir_preserves_multiple_workspace_directories() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_a = repo.default_root.with_extension("feature-a");
+    let feature_b = repo.default_root.with_extension("feature-b");
+
+    repo.cmd()
+        .args(["add", "feature-a", "feature-b"])
+        .assert()
+        .success();
+
+    repo.cmd()
+        .args(["remove", "--keep-dir", "feature-a", "feature-b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted directory:").not());
+
+    assert!(feature_a.is_dir());
+    assert!(feature_b.is_dir());
+}
+
+#[test]
+fn remove_batch_stops_at_first_error_after_completed_removals() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_a = repo.default_root.with_extension("feature-a");
+    let feature_b = repo.default_root.with_extension("feature-b");
+
+    repo.cmd()
+        .args(["add", "feature-a", "feature-b"])
+        .assert()
+        .success();
+
+    repo.cmd()
+        .args(["remove", "feature-a", "missing", "feature-b"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Forgot workspace: feature-a"))
+        .stdout(predicate::str::contains("Forgot workspace: feature-b").not())
+        .stderr(predicate::str::contains(
+            "failed to remove workspace missing",
+        ));
+
+    assert!(!feature_a.exists());
+    assert!(feature_b.is_dir());
 }
 
 #[test]
@@ -479,6 +626,27 @@ impl TestRepo {
             .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect()
+    }
+
+    fn current_workspace_name(&self) -> String {
+        let output = Command::new("jj")
+            .current_dir(&self.default_root)
+            .args([
+                "workspace",
+                "list",
+                "-T",
+                "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
+                "--color=never",
+            ])
+            .output()
+            .expect("list workspaces");
+        assert!(
+            output.status.success(),
+            "jj workspace list failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 }
 

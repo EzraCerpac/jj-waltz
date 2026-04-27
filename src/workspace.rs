@@ -29,6 +29,19 @@ pub struct SwitchOptions {
     pub preserve_subdir: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AddOptions {
+    pub at_revset: Option<String>,
+    pub bookmark: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddResult {
+    pub workspace: String,
+    pub path: PathBuf,
+    pub bookmark: Option<String>,
+}
+
 pub fn current_workspace_name() -> Result<String> {
     let output = run_jj(&[
         "workspace",
@@ -131,45 +144,17 @@ pub fn switch_workspace(target: &str, options: &SwitchOptions) -> Result<SwitchR
     };
 
     let resolved_name = resolve_workspace_token(target)?;
-    let mut created = false;
-
-    let target_path = if workspace_exists(&resolved_name)? {
-        workspace_root_by_name(&resolved_name)?
+    let (target_path, created, bookmark) = if workspace_exists(&resolved_name)? {
+        (workspace_root_by_name(&resolved_name)?, false, None)
     } else {
-        validate_workspace_name(&resolved_name)?;
-        let path = workspace_dir_for_name(&resolved_name)?;
-        if path.exists() {
-            bail!("directory already exists: {}", path.display());
-        }
-
-        let mut args = vec![
-            "workspace".to_owned(),
-            "add".to_owned(),
-            "--name".to_owned(),
-            resolved_name.clone(),
-        ];
-
-        if let Some(revset) = &options.at_revset {
-            args.push("--revision".to_owned());
-            args.push(revset.clone());
-        }
-
-        args.push(path.display().to_string());
-        run_jj_owned(&args)?;
-        created = true;
-
-        if let Some(bookmark) = &options.bookmark {
-            let output = Command::new("jj")
-                .current_dir(&path)
-                .args(["bookmark", "create", bookmark, "-r", "@"])
-                .output()
-                .with_context(|| "failed to create bookmark".to_string())?;
-            if !output.status.success() {
-                bail!(stderr_message(output, "failed to create bookmark"));
-            }
-        }
-
-        path
+        let result = add_workspace_by_name(
+            &resolved_name,
+            &AddOptions {
+                at_revset: options.at_revset.clone(),
+                bookmark: options.bookmark.clone(),
+            },
+        )?;
+        (result.path, true, result.bookmark)
     };
 
     remember_previous_workspace(&current_name, &current_root, &resolved_name, &target_path)?;
@@ -178,13 +163,17 @@ pub fn switch_workspace(target: &str, options: &SwitchOptions) -> Result<SwitchR
         workspace: resolved_name,
         path: target_path,
         created,
-        bookmark: if created {
-            options.bookmark.clone()
-        } else {
-            None
-        },
+        bookmark,
         relative_subdir,
     })
+}
+
+pub fn add_workspace(target: &str, options: &AddOptions) -> Result<AddResult> {
+    let name = resolve_workspace_token(target)?;
+    if workspace_exists(&name)? {
+        bail!("workspace already exists: {name}")
+    }
+    add_workspace_by_name(&name, options)
 }
 
 pub fn default_workspace_root() -> Result<PathBuf> {
@@ -219,6 +208,46 @@ pub fn remove_workspace(token: Option<&str>, delete_dir: bool) -> Result<(String
     }
 
     Ok((name, path))
+}
+
+fn add_workspace_by_name(name: &str, options: &AddOptions) -> Result<AddResult> {
+    validate_workspace_name(name)?;
+    let path = workspace_dir_for_name(name)?;
+    if path.exists() {
+        bail!("directory already exists: {}", path.display());
+    }
+
+    let mut args = vec![
+        "workspace".to_owned(),
+        "add".to_owned(),
+        "--name".to_owned(),
+        name.to_owned(),
+    ];
+
+    if let Some(revset) = &options.at_revset {
+        args.push("--revision".to_owned());
+        args.push(revset.clone());
+    }
+
+    args.push(path.display().to_string());
+    run_jj_owned(&args)?;
+
+    if let Some(bookmark) = &options.bookmark {
+        let output = Command::new("jj")
+            .current_dir(&path)
+            .args(["bookmark", "create", bookmark, "-r", "@"])
+            .output()
+            .with_context(|| "failed to create bookmark".to_string())?;
+        if !output.status.success() {
+            bail!(stderr_message(output, "failed to create bookmark"));
+        }
+    }
+
+    Ok(AddResult {
+        workspace: name.to_owned(),
+        path,
+        bookmark: options.bookmark.clone(),
+    })
 }
 
 pub fn prune_missing_workspaces() -> Result<Vec<String>> {

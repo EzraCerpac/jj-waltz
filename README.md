@@ -14,11 +14,13 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 
 ## Features
 
+- `jw add <name>...` creates one or more JJ workspaces without switching
 - `jw switch <name>` creates or switches to a JJ workspace
+- `jw switch <name>...` creates any missing workspaces and switches to the last one
 - `jw s <name>` short alias for the main workflow
 - preserve the current subdirectory when switching between sibling workspaces
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
-- `jw list` (`jw l`, `jw ls`), `jw path`, `jw remove`, `jw prune`, `jw root`, `jw current`
+- `jw list` (`jw l`, `jw ls`), `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, `jw current`
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
@@ -85,10 +87,13 @@ jw shell completions bash
 
 ```bash
 jw switch feature-api
+jw add frontend tests docs
+jw switch frontend tests docs
 jw switch -x opencode feature-ui
 jw switch default
 jw switch -
 jw ls
+jw remove frontend tests
 ```
 
 ## Config
@@ -109,6 +114,8 @@ with the resolved workspace name, so templates like `wip/{workspace}` are valid.
 
 For one command, `jw switch --bookmark custom-name feature-a` overrides the config,
 and `jw switch --no-bookmark feature-a` suppresses configured bookmark creation.
+Explicit `--bookmark` is single-workspace only; for batch `add` or `switch`, use
+`bookmark_template`.
 
 ## AI usage note
 
