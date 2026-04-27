@@ -18,7 +18,7 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 - `jw s <name>` short alias for the main workflow
 - preserve the current subdirectory when switching between sibling workspaces
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
-- `jw list`, `jw path`, `jw remove`, `jw prune`, `jw root`, `jw current`
+- `jw list` (`jw l`, `jw ls`), `jw path`, `jw remove`, `jw prune`, `jw root`, `jw current`
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
@@ -88,7 +88,7 @@ jw switch feature-api
 jw switch -x opencode feature-ui
 jw switch default
 jw switch -
-jw list
+jw ls
 ```
 
 ## Config

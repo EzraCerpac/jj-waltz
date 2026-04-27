@@ -14,7 +14,7 @@ This skill is specific to this repository's behavior. Do not invent capabilities
 Ground your answers in the real command surface:
 
 - `jw switch <name>` and alias `jw s <name>`
-- `jw list`
+- `jw list` and aliases `jw l`, `jw ls`
 - `jw path <name>`
 - `jw remove [name]`
 - `jw prune`
@@ -154,7 +154,7 @@ For link problems, suggest checks in this order:
 
 When users need to understand or clean up workspace state:
 
-- `jw list` shows known workspaces and marks current, previous, and default entries
+- `jw list`/`jw l`/`jw ls` shows known workspaces and marks current, previous, and default entries
 - `jw remove <name>` forgets a workspace and deletes its directory by default
 - `jw remove --keep-dir <name>` forgets it but leaves the directory in place
 - `jw prune` forgets missing workspaces

@@ -184,6 +184,18 @@ fn switch_default_returns_existing_root() {
 }
 
 #[test]
+fn list_accepts_ls_alias() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("default"));
+}
+
+#[test]
 fn completions_command_generates_fish_script() {
     skip_without_jj!();
     Command::cargo_bin("jw")
@@ -193,6 +205,7 @@ fn completions_command_generates_fish_script() {
         .success()
         .stdout(predicate::str::contains("__jw_workspace_candidates"))
         .stdout(predicate::str::contains("-l keep-dir"))
+        .stdout(predicate::str::contains("ls 'Alias for list'"))
         .stdout(predicate::str::contains(
             "switch 'Switch to or create a workspace'",
         ));
@@ -210,6 +223,7 @@ fn completions_command_generates_zsh_script() {
         .stdout(predicate::str::contains(
             "--keep-dir[Forget the workspace but keep its directory]",
         ))
+        .stdout(predicate::str::contains("ls:Alias for list"))
         .stdout(predicate::str::contains(
             "switch:Switch to or create a workspace",
         ));
