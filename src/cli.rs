@@ -4,6 +4,7 @@ use crate::shell::{self, ShellKind};
 use crate::workspace::{self, AddOptions, SwitchOptions};
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -186,7 +187,7 @@ impl From<ShellArg> for ShellKind {
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalized_args());
 
     match cli.command {
         Commands::Add(cmd) => run_add(cmd),
@@ -201,6 +202,16 @@ pub fn run() -> Result<()> {
         Commands::Links(cmd) => run_links(cmd),
         Commands::Completions(cmd) => run_completions(cmd.shell.into()),
     }
+}
+
+fn normalized_args() -> Vec<OsString> {
+    let mut args = std::env::args_os().collect::<Vec<_>>();
+    if matches!(args.get(1).and_then(|arg| arg.to_str()), Some("^" | "-")) {
+        let target = args[1].clone();
+        args[1] = OsString::from("switch");
+        args.insert(2, target);
+    }
+    args
 }
 
 fn run_add(cmd: AddCommand) -> Result<()> {
