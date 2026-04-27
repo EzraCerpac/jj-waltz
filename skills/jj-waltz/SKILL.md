@@ -15,6 +15,7 @@ Ground your answers in the real command surface:
 
 - `jw add <name>...`
 - `jw switch <name>...` and alias `jw s <name>...`
+- `jw ^` and `jw -` as aliases for `jw s ^` and `jw s -`
 - `jw list` and aliases `jw l`, `jw ls`
 - `jw path <name>`
 - `jw remove [name]...`
@@ -216,7 +217,7 @@ User: `what does jw switch - do, and how do i get back to the default workspace?
 Response shape:
 
 - explain `-`, `@`, `^`, and `default`
-- show `jw current`, `jw switch -`, and `jw switch default`
+- show `jw current`, `jw -`, and `jw ^`
 
 **Example 4**
 

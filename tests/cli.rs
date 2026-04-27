@@ -254,6 +254,38 @@ fn switch_default_returns_existing_root() {
 }
 
 #[test]
+fn default_shorthand_switches_to_default_workspace() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    repo.cmd_at(&feature_root)
+        .args(["^", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            repo.default_root.to_string_lossy().as_ref(),
+        ));
+}
+
+#[test]
+fn previous_shorthand_switches_to_previous_workspace() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    repo.cmd_at(&feature_root)
+        .args(["-", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            repo.default_root.to_string_lossy().as_ref(),
+        ));
+}
+
+#[test]
 fn list_accepts_ls_alias() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -278,6 +310,12 @@ fn completions_command_generates_fish_script() {
             "add 'Create one or more workspaces'",
         ))
         .stdout(predicate::str::contains("-l keep-dir"))
+        .stdout(predicate::str::contains(
+            "'^' 'Switch to default workspace'",
+        ))
+        .stdout(predicate::str::contains(
+            "'-' 'Switch to previous workspace'",
+        ))
         .stdout(predicate::str::contains("ls 'Alias for list'"))
         .stdout(predicate::str::contains(
             "switch 'Switch to or create a workspace'",
@@ -299,6 +337,8 @@ fn completions_command_generates_zsh_script() {
         .stdout(predicate::str::contains(
             "--keep-dir[Forget the workspace but keep its directory]",
         ))
+        .stdout(predicate::str::contains("^:Switch to default workspace"))
+        .stdout(predicate::str::contains("-:Switch to previous workspace"))
         .stdout(predicate::str::contains("ls:Alias for list"))
         .stdout(predicate::str::contains(
             "switch:Switch to or create a workspace",

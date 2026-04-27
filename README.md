@@ -18,6 +18,7 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 - `jw switch <name>` creates or switches to a JJ workspace
 - `jw switch <name>...` creates any missing workspaces and switches to the last one
 - `jw s <name>` short alias for the main workflow
+- `jw ^` and `jw -` switch to the default and previous workspaces
 - preserve the current subdirectory when switching between sibling workspaces
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
 - `jw list` (`jw l`, `jw ls`), `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, `jw current`
@@ -90,8 +91,8 @@ jw switch feature-api
 jw add frontend tests docs
 jw switch frontend tests docs
 jw switch -x opencode feature-ui
-jw switch default
-jw switch -
+jw ^
+jw -
 jw ls
 jw remove frontend tests
 ```

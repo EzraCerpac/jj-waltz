@@ -9,6 +9,8 @@ end
 
 function __jw_subcommands
     printf '%s\t%s\n' add 'Create one or more workspaces'
+    printf '%s\t%s\n' '^' 'Switch to default workspace'
+    printf '%s\t%s\n' '-' 'Switch to previous workspace'
     printf '%s\t%s\n' switch 'Switch to or create a workspace'
     printf '%s\t%s\n' s 'Alias for switch'
     printf '%s\t%s\n' list 'List known workspaces'
@@ -111,6 +113,8 @@ _jw() {
       local -a commands
       commands=(
         'add:Create one or more workspaces'
+        '^:Switch to default workspace'
+        '-:Switch to previous workspace'
         'switch:Switch to or create a workspace'
         's:Alias for switch'
         'list:List known workspaces'
@@ -131,7 +135,7 @@ _jw() {
       ;;
     args)
       case $words[2] in
-        switch|s)
+        switch|s|\^|-)
           _arguments \
             '--at[Create a new workspace at a revset]:revset:' \
             '(-b --bookmark)'{-b,--bookmark}'[Create a bookmark in a new workspace]:bookmark:' \
@@ -199,6 +203,8 @@ _jw() {
           local -a help_commands
           help_commands=(
             'add:Create one or more workspaces'
+            '^:Switch to default workspace'
+            '-:Switch to previous workspace'
             'switch:Switch to or create a workspace'
             's:Alias for switch'
             'list:List known workspaces'
@@ -288,7 +294,7 @@ fn fish_init() -> String {
     end
 
     switch $argv[1]
-        case switch s
+        case switch s '^' '-'
             if contains -- -x $argv; or contains -- --execute $argv; or contains -- -h $argv; or contains -- --help $argv
                 command jw $argv
                 return $status
@@ -312,7 +318,7 @@ fn posix_init(shell_name: &str) -> String {
     format!(
         r#"jw() {{
     case "$1" in
-        switch|s)
+        switch|s|\^|-)
             case " $* " in
                 *" -x "*|*" --execute "*|*" -h "*|*" --help "*)
                     command jw "$@"
