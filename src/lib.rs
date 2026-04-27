@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod config;
 pub mod links;
 pub mod shell;
 pub mod workspace;

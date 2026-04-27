@@ -43,6 +43,7 @@ complete -c jw -n __jw_needs_subcommand -s V -l version -d 'Print version'
 complete -c jw -n '__jw_using_subcommand switch s' -f -a '(__jw_workspace_candidates)'
 complete -c jw -n '__jw_using_subcommand switch s' -l at -r -d 'Create a new workspace at a revset'
 complete -c jw -n '__jw_using_subcommand switch s' -s b -l bookmark -r -d 'Create a bookmark in a new workspace'
+complete -c jw -n '__jw_using_subcommand switch s' -l no-bookmark -d 'Do not create a bookmark for a new workspace'
 complete -c jw -n '__jw_using_subcommand switch s' -s x -l execute -r -d 'Run a command after switching'
 complete -c jw -n '__jw_using_subcommand switch s' -l no-links -d 'Skip applying workspace links'
 complete -c jw -n '__jw_using_subcommand switch s' -s h -l help -d 'Print help'
@@ -123,6 +124,7 @@ _jw() {
           _arguments \
             '--at[Create a new workspace at a revset]:revset:' \
             '(-b --bookmark)'{-b,--bookmark}'[Create a bookmark in a new workspace]:bookmark:' \
+            '--no-bookmark[Do not create a bookmark for a new workspace]' \
             '(-x --execute)'{-x,--execute}'[Run a command after switching]:command:_command_names' \
             '--no-links[Skip applying workspace links]' \
             '(-h --help)'{-h,--help}'[Print help]' \
