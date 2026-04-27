@@ -8,6 +8,7 @@ const FISH_COMPLETIONS: &str = r#"function __jw_workspace_candidates
 end
 
 function __jw_subcommands
+    printf '%s\t%s\n' add 'Create one or more workspaces'
     printf '%s\t%s\n' switch 'Switch to or create a workspace'
     printf '%s\t%s\n' s 'Alias for switch'
     printf '%s\t%s\n' list 'List known workspaces'
@@ -40,6 +41,13 @@ complete -e -c jw
 complete -c jw -n __jw_needs_subcommand -f -a '(__jw_subcommands)'
 complete -c jw -n __jw_needs_subcommand -s h -l help -d 'Print help'
 complete -c jw -n __jw_needs_subcommand -s V -l version -d 'Print version'
+
+complete -c jw -n '__jw_using_subcommand add' -f -a '(__jw_workspace_candidates)'
+complete -c jw -n '__jw_using_subcommand add' -l at -r -d 'Create a new workspace at a revset'
+complete -c jw -n '__jw_using_subcommand add' -s b -l bookmark -r -d 'Create a bookmark in a new workspace'
+complete -c jw -n '__jw_using_subcommand add' -l no-bookmark -d 'Do not create a bookmark for a new workspace'
+complete -c jw -n '__jw_using_subcommand add' -l no-links -d 'Skip applying workspace links'
+complete -c jw -n '__jw_using_subcommand add' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand switch s' -f -a '(__jw_workspace_candidates)'
 complete -c jw -n '__jw_using_subcommand switch s' -l at -r -d 'Create a new workspace at a revset'
@@ -102,6 +110,7 @@ _jw() {
     command)
       local -a commands
       commands=(
+        'add:Create one or more workspaces'
         'switch:Switch to or create a workspace'
         's:Alias for switch'
         'list:List known workspaces'
@@ -130,8 +139,16 @@ _jw() {
             '(-x --execute)'{-x,--execute}'[Run a command after switching]:command:_command_names' \
             '--no-links[Skip applying workspace links]' \
             '(-h --help)'{-h,--help}'[Print help]' \
-            '1:workspace:_jw_workspace_candidates' \
-            '*::args:_files'
+            '*:workspace:_jw_workspace_candidates'
+          ;;
+        add)
+          _arguments \
+            '--at[Create a new workspace at a revset]:revset:' \
+            '(-b --bookmark)'{-b,--bookmark}'[Create a bookmark in a new workspace]:bookmark:' \
+            '--no-bookmark[Do not create a bookmark for a new workspace]' \
+            '--no-links[Skip applying workspace links]' \
+            '(-h --help)'{-h,--help}'[Print help]' \
+            '*:workspace:_jw_workspace_candidates'
           ;;
         path)
           _arguments \
@@ -142,7 +159,7 @@ _jw() {
           _arguments \
             '--keep-dir[Forget the workspace but keep its directory]' \
             '(-h --help)'{-h,--help}'[Print help]' \
-            '1:workspace:_jw_workspace_candidates'
+            '*:workspace:_jw_workspace_candidates'
           ;;
         list|l|ls|prune|root|current)
           _arguments '(-h --help)'{-h,--help}'[Print help]'
@@ -181,6 +198,7 @@ _jw() {
         help)
           local -a help_commands
           help_commands=(
+            'add:Create one or more workspaces'
             'switch:Switch to or create a workspace'
             's:Alias for switch'
             'list:List known workspaces'
