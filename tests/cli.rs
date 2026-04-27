@@ -286,6 +286,84 @@ fn previous_shorthand_switches_to_previous_workspace() {
 }
 
 #[test]
+fn current_uses_workspace_root_when_targets_share_working_copy() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let docs_root = repo.default_root.with_extension("docs");
+
+    run_in(
+        &repo.default_root,
+        [
+            "jj",
+            "workspace",
+            "add",
+            "--name",
+            "docs",
+            docs_root.to_str().unwrap(),
+        ],
+    )
+    .expect("add docs workspace");
+    let docs_change = current_change_id(&docs_root);
+    run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()]).expect("edit docs change");
+
+    repo.cmd_at(&repo.default_root)
+        .args(["current"])
+        .assert()
+        .success()
+        .stdout("default\n");
+    repo.cmd_at(&docs_root)
+        .args(["current"])
+        .assert()
+        .success()
+        .stdout("docs\n");
+}
+
+#[test]
+fn previous_shorthand_survives_shared_working_copy_target() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let docs_root = repo.default_root.with_extension("docs");
+    repo.cmd().args(["switch", "docs"]).assert().success();
+
+    let docs_change = current_change_id(&docs_root);
+    run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()]).expect("edit docs change");
+
+    repo.cmd_at(&docs_root)
+        .args(["switch", "default", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            repo.default_root.to_string_lossy().as_ref(),
+        ));
+    repo.cmd_at(&repo.default_root)
+        .args(["-", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            docs_root.to_string_lossy().as_ref(),
+        ));
+}
+
+#[test]
+fn previous_shorthand_rejects_multiline_state_record() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".jj").join("jw-prev-workspace"),
+        "default\ndocs\n",
+    )
+    .expect("write corrupt previous record");
+
+    repo.cmd()
+        .args(["-", "--print-path"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "previous workspace record is invalid",
+        ));
+}
+
+#[test]
 fn list_accepts_ls_alias() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -669,13 +747,31 @@ impl TestRepo {
     }
 
     fn current_workspace_name(&self) -> String {
+        let current_root = Command::new("jj")
+            .current_dir(&self.default_root)
+            .args(["workspace", "root"])
+            .output()
+            .expect("current workspace root");
+        assert!(
+            current_root.status.success(),
+            "jj workspace root failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&current_root.stdout),
+            String::from_utf8_lossy(&current_root.stderr)
+        );
+        let current_root = fs::canonicalize(
+            String::from_utf8_lossy(&current_root.stdout)
+                .trim()
+                .to_owned(),
+        )
+        .expect("canonicalize current root");
+
         let output = Command::new("jj")
             .current_dir(&self.default_root)
             .args([
                 "workspace",
                 "list",
                 "-T",
-                "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
+                "name ++ \"|\" ++ self.root() ++ \"\\n\"",
                 "--color=never",
             ])
             .output()
@@ -686,8 +782,30 @@ impl TestRepo {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| {
+                let (name, root) = line.split_once('|')?;
+                let root = fs::canonicalize(root.trim()).ok()?;
+                (root == current_root).then(|| name.to_owned())
+            })
+            .expect("current workspace name")
     }
+}
+
+fn current_change_id(cwd: &Path) -> String {
+    let output = Command::new("jj")
+        .current_dir(cwd)
+        .args(["log", "--no-graph", "-r", "@", "-T", "change_id.short()"])
+        .output()
+        .expect("current change id");
+    assert!(
+        output.status.success(),
+        "jj log failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn run_in<I, S>(cwd: &Path, args: I) -> anyhow::Result<()>
