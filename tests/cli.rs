@@ -1,5 +1,7 @@
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,6 +9,13 @@ use tempfile::TempDir;
 
 fn jj_available() -> bool {
     Command::new("jj")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn command_available(command: &str) -> bool {
+    Command::new(command)
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -361,6 +370,86 @@ fn previous_shorthand_rejects_multiline_state_record() {
         .stderr(predicate::str::contains(
             "previous workspace record is invalid",
         ));
+}
+
+#[test]
+fn fish_init_switches_default_and_previous_shorthands() {
+    skip_without_jj!();
+    if !command_available("fish") {
+        eprintln!("skipping test because `fish` is not installed");
+        return;
+    }
+
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    let output = Command::new("fish")
+        .current_dir(&feature_root)
+        .env("PATH", test_binary_path())
+        .env("XDG_CONFIG_HOME", &repo.config_home)
+        .args([
+            "--no-config",
+            "-c",
+            "jw shell init fish | source; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+        ])
+        .output()
+        .expect("run fish shell integration");
+
+    assert!(
+        output.status.success(),
+        "fish shell integration failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![path_string(&repo.default_root), path_string(&feature_root)]
+    );
+}
+
+#[test]
+fn zsh_init_switches_default_and_previous_shorthands() {
+    skip_without_jj!();
+    if !command_available("zsh") {
+        eprintln!("skipping test because `zsh` is not installed");
+        return;
+    }
+
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    let output = Command::new("zsh")
+        .current_dir(&feature_root)
+        .env("PATH", test_binary_path())
+        .env("XDG_CONFIG_HOME", &repo.config_home)
+        .args([
+            "-f",
+            "-c",
+            "eval \"$(jw shell init zsh)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+        ])
+        .output()
+        .expect("run zsh shell integration");
+
+    assert!(
+        output.status.success(),
+        "zsh shell integration failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![path_string(&repo.default_root), path_string(&feature_root)]
+    );
 }
 
 #[test]
@@ -806,6 +895,21 @@ fn current_change_id(cwd: &Path) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn test_binary_path() -> OsString {
+    let binary = assert_cmd::cargo::cargo_bin("jw");
+    let binary_dir = binary.parent().expect("binary has parent");
+    let mut paths = vec![binary_dir.to_path_buf()];
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    env::join_paths(paths).expect("join PATH")
+}
+
+fn path_string(path: &Path) -> String {
+    fs::canonicalize(path)
+        .expect("canonicalize path")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn run_in<I, S>(cwd: &Path, args: I) -> anyhow::Result<()>
