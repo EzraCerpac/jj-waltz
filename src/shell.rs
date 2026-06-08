@@ -8,10 +8,14 @@ const FISH_COMPLETIONS: &str = r#"function __jw_workspace_candidates
 end
 
 function __jw_subcommands
+    printf '%s\t%s\n' add 'Create one or more workspaces'
+    printf '%s\t%s\n' '^' 'Switch to default workspace'
+    printf '%s\t%s\n' '-' 'Switch to previous workspace'
     printf '%s\t%s\n' switch 'Switch to or create a workspace'
     printf '%s\t%s\n' s 'Alias for switch'
     printf '%s\t%s\n' list 'List known workspaces'
     printf '%s\t%s\n' l 'Alias for list'
+    printf '%s\t%s\n' ls 'Alias for list'
     printf '%s\t%s\n' path 'Print a workspace path'
     printf '%s\t%s\n' remove 'Forget a workspace'
     printf '%s\t%s\n' rm 'Alias for remove'
@@ -40,9 +44,17 @@ complete -c jw -n __jw_needs_subcommand -f -a '(__jw_subcommands)'
 complete -c jw -n __jw_needs_subcommand -s h -l help -d 'Print help'
 complete -c jw -n __jw_needs_subcommand -s V -l version -d 'Print version'
 
+complete -c jw -n '__jw_using_subcommand add' -f -a '(__jw_workspace_candidates)'
+complete -c jw -n '__jw_using_subcommand add' -l at -r -d 'Create a new workspace at a revset'
+complete -c jw -n '__jw_using_subcommand add' -s b -l bookmark -r -d 'Create a bookmark in a new workspace'
+complete -c jw -n '__jw_using_subcommand add' -l no-bookmark -d 'Do not create a bookmark for a new workspace'
+complete -c jw -n '__jw_using_subcommand add' -l no-links -d 'Skip applying workspace links'
+complete -c jw -n '__jw_using_subcommand add' -s h -l help -d 'Print help'
+
 complete -c jw -n '__jw_using_subcommand switch s' -f -a '(__jw_workspace_candidates)'
 complete -c jw -n '__jw_using_subcommand switch s' -l at -r -d 'Create a new workspace at a revset'
 complete -c jw -n '__jw_using_subcommand switch s' -s b -l bookmark -r -d 'Create a bookmark in a new workspace'
+complete -c jw -n '__jw_using_subcommand switch s' -l no-bookmark -d 'Do not create a bookmark for a new workspace'
 complete -c jw -n '__jw_using_subcommand switch s' -s x -l execute -r -d 'Run a command after switching'
 complete -c jw -n '__jw_using_subcommand switch s' -l no-links -d 'Skip applying workspace links'
 complete -c jw -n '__jw_using_subcommand switch s' -s h -l help -d 'Print help'
@@ -54,7 +66,7 @@ complete -c jw -n '__jw_using_subcommand remove rm' -f -a '(__jw_workspace_candi
 complete -c jw -n '__jw_using_subcommand remove rm' -l keep-dir -d 'Forget the workspace but keep its directory'
 complete -c jw -n '__jw_using_subcommand remove rm' -s h -l help -d 'Print help'
 
-complete -c jw -n '__jw_using_subcommand list l prune root current completions' -s h -l help -d 'Print help'
+complete -c jw -n '__jw_using_subcommand list l ls prune root current completions' -s h -l help -d 'Print help'
 
 complete -c jw -n '__jw_using_subcommand links' -f -a 'apply\tApply configured links to the current workspace'
 complete -c jw -n '__jw_using_subcommand links; and __fish_seen_subcommand_from apply' -s h -l help -d 'Print help'
@@ -100,10 +112,14 @@ _jw() {
     command)
       local -a commands
       commands=(
+        'add:Create one or more workspaces'
+        '^:Switch to default workspace'
+        '-:Switch to previous workspace'
         'switch:Switch to or create a workspace'
         's:Alias for switch'
         'list:List known workspaces'
         'l:Alias for list'
+        'ls:Alias for list'
         'path:Print a workspace path'
         'remove:Forget a workspace'
         'rm:Alias for remove'
@@ -119,15 +135,24 @@ _jw() {
       ;;
     args)
       case $words[2] in
-        switch|s)
+        switch|s|\^|-)
           _arguments \
             '--at[Create a new workspace at a revset]:revset:' \
             '(-b --bookmark)'{-b,--bookmark}'[Create a bookmark in a new workspace]:bookmark:' \
+            '--no-bookmark[Do not create a bookmark for a new workspace]' \
             '(-x --execute)'{-x,--execute}'[Run a command after switching]:command:_command_names' \
             '--no-links[Skip applying workspace links]' \
             '(-h --help)'{-h,--help}'[Print help]' \
-            '1:workspace:_jw_workspace_candidates' \
-            '*::args:_files'
+            '*:workspace:_jw_workspace_candidates'
+          ;;
+        add)
+          _arguments \
+            '--at[Create a new workspace at a revset]:revset:' \
+            '(-b --bookmark)'{-b,--bookmark}'[Create a bookmark in a new workspace]:bookmark:' \
+            '--no-bookmark[Do not create a bookmark for a new workspace]' \
+            '--no-links[Skip applying workspace links]' \
+            '(-h --help)'{-h,--help}'[Print help]' \
+            '*:workspace:_jw_workspace_candidates'
           ;;
         path)
           _arguments \
@@ -138,9 +163,9 @@ _jw() {
           _arguments \
             '--keep-dir[Forget the workspace but keep its directory]' \
             '(-h --help)'{-h,--help}'[Print help]' \
-            '1:workspace:_jw_workspace_candidates'
+            '*:workspace:_jw_workspace_candidates'
           ;;
-        list|l|prune|root|current)
+        list|l|ls|prune|root|current)
           _arguments '(-h --help)'{-h,--help}'[Print help]'
           ;;
         links)
@@ -177,10 +202,14 @@ _jw() {
         help)
           local -a help_commands
           help_commands=(
+            'add:Create one or more workspaces'
+            '^:Switch to default workspace'
+            '-:Switch to previous workspace'
             'switch:Switch to or create a workspace'
             's:Alias for switch'
             'list:List known workspaces'
             'l:Alias for list'
+            'ls:Alias for list'
             'path:Print a workspace path'
             'remove:Forget a workspace'
             'rm:Alias for remove'
@@ -265,7 +294,7 @@ fn fish_init() -> String {
     end
 
     switch $argv[1]
-        case switch s
+        case switch s '^' '-'
             if contains -- -x $argv; or contains -- --execute $argv; or contains -- -h $argv; or contains -- --help $argv
                 command jw $argv
                 return $status
@@ -289,7 +318,7 @@ fn posix_init(shell_name: &str) -> String {
     format!(
         r#"jw() {{
     case "$1" in
-        switch|s)
+        switch|s|\^|-)
             case " $* " in
                 *" -x "*|*" --execute "*|*" -h "*|*" --help "*)
                     command jw "$@"
