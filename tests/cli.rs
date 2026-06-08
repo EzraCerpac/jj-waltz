@@ -1,5 +1,7 @@
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,6 +9,13 @@ use tempfile::TempDir;
 
 fn jj_available() -> bool {
     Command::new("jj")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn command_available(command: &str) -> bool {
+    Command::new(command)
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -283,6 +292,164 @@ fn previous_shorthand_switches_to_previous_workspace() {
         .stdout(predicate::str::contains(
             repo.default_root.to_string_lossy().as_ref(),
         ));
+}
+
+#[test]
+fn current_uses_workspace_root_when_targets_share_working_copy() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let docs_root = repo.default_root.with_extension("docs");
+
+    run_in(
+        &repo.default_root,
+        [
+            "jj",
+            "workspace",
+            "add",
+            "--name",
+            "docs",
+            docs_root.to_str().unwrap(),
+        ],
+    )
+    .expect("add docs workspace");
+    let docs_change = current_change_id(&docs_root);
+    run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()]).expect("edit docs change");
+
+    repo.cmd_at(&repo.default_root)
+        .args(["current"])
+        .assert()
+        .success()
+        .stdout("default\n");
+    repo.cmd_at(&docs_root)
+        .args(["current"])
+        .assert()
+        .success()
+        .stdout("docs\n");
+}
+
+#[test]
+fn previous_shorthand_survives_shared_working_copy_target() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let docs_root = repo.default_root.with_extension("docs");
+    repo.cmd().args(["switch", "docs"]).assert().success();
+
+    let docs_change = current_change_id(&docs_root);
+    run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()]).expect("edit docs change");
+
+    repo.cmd_at(&docs_root)
+        .args(["switch", "default", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            repo.default_root.to_string_lossy().as_ref(),
+        ));
+    repo.cmd_at(&repo.default_root)
+        .args(["-", "--print-path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            docs_root.to_string_lossy().as_ref(),
+        ));
+}
+
+#[test]
+fn previous_shorthand_rejects_multiline_state_record() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".jj").join("jw-prev-workspace"),
+        "default\ndocs\n",
+    )
+    .expect("write corrupt previous record");
+
+    repo.cmd()
+        .args(["-", "--print-path"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "previous workspace record is invalid",
+        ));
+}
+
+#[test]
+fn fish_init_switches_default_and_previous_shorthands() {
+    skip_without_jj!();
+    if !command_available("fish") {
+        eprintln!("skipping test because `fish` is not installed");
+        return;
+    }
+
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    let output = Command::new("fish")
+        .current_dir(&feature_root)
+        .env("PATH", test_binary_path())
+        .env("XDG_CONFIG_HOME", &repo.config_home)
+        .args([
+            "--no-config",
+            "-c",
+            "jw shell init fish | source; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+        ])
+        .output()
+        .expect("run fish shell integration");
+
+    assert!(
+        output.status.success(),
+        "fish shell integration failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![path_string(&repo.default_root), path_string(&feature_root)]
+    );
+}
+
+#[test]
+fn zsh_init_switches_default_and_previous_shorthands() {
+    skip_without_jj!();
+    if !command_available("zsh") {
+        eprintln!("skipping test because `zsh` is not installed");
+        return;
+    }
+
+    let repo = TestRepo::new().expect("create test repo");
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    let output = Command::new("zsh")
+        .current_dir(&feature_root)
+        .env("PATH", test_binary_path())
+        .env("XDG_CONFIG_HOME", &repo.config_home)
+        .args([
+            "-f",
+            "-c",
+            "eval \"$(jw shell init zsh)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+        ])
+        .output()
+        .expect("run zsh shell integration");
+
+    assert!(
+        output.status.success(),
+        "zsh shell integration failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![path_string(&repo.default_root), path_string(&feature_root)]
+    );
 }
 
 #[test]
@@ -669,13 +836,27 @@ impl TestRepo {
     }
 
     fn current_workspace_name(&self) -> String {
+        let current_root = Command::new("jj")
+            .current_dir(&self.default_root)
+            .args(["workspace", "root"])
+            .output()
+            .expect("current workspace root");
+        assert!(
+            current_root.status.success(),
+            "jj workspace root failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&current_root.stdout),
+            String::from_utf8_lossy(&current_root.stderr)
+        );
+        let current_root = fs::canonicalize(String::from_utf8_lossy(&current_root.stdout).trim())
+            .expect("canonicalize current root");
+
         let output = Command::new("jj")
             .current_dir(&self.default_root)
             .args([
                 "workspace",
                 "list",
                 "-T",
-                "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
+                "name ++ \"\\n\"",
                 "--color=never",
             ])
             .output()
@@ -686,8 +867,62 @@ impl TestRepo {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        let names = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        names
+            .into_iter()
+            .find(|name| {
+                let output = Command::new("jj")
+                    .current_dir(&self.default_root)
+                    .args(["workspace", "root", "--name", name])
+                    .output()
+                    .expect("workspace root by name");
+                if !output.status.success() {
+                    return false;
+                }
+                let Ok(root) = fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim())
+                else {
+                    return false;
+                };
+                root == current_root
+            })
+            .expect("current workspace name")
     }
+}
+
+fn current_change_id(cwd: &Path) -> String {
+    let output = Command::new("jj")
+        .current_dir(cwd)
+        .args(["log", "--no-graph", "-r", "@", "-T", "change_id.short()"])
+        .output()
+        .expect("current change id");
+    assert!(
+        output.status.success(),
+        "jj log failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn test_binary_path() -> OsString {
+    let binary = assert_cmd::cargo::cargo_bin("jw");
+    let binary_dir = binary.parent().expect("binary has parent");
+    let mut paths = vec![binary_dir.to_path_buf()];
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    env::join_paths(paths).expect("join PATH")
+}
+
+fn path_string(path: &Path) -> String {
+    fs::canonicalize(path)
+        .expect("canonicalize path")
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn run_in<I, S>(cwd: &Path, args: I) -> anyhow::Result<()>
