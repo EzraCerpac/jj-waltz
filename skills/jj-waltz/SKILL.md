@@ -13,10 +13,12 @@ This skill is specific to this repository's behavior. Do not invent capabilities
 
 Ground your answers in the real command surface:
 
-- `jw switch <name>` and alias `jw s <name>`
-- `jw list`
+- `jw add <name>...`
+- `jw switch <name>...` and alias `jw s <name>...`
+- `jw ^` and `jw -` as aliases for `jw s ^` and `jw s -`
+- `jw list` and aliases `jw l`, `jw ls`
 - `jw path <name>`
-- `jw remove [name]`
+- `jw remove [name]...`
 - `jw prune`
 - `jw root`
 - `jw current`
@@ -29,7 +31,7 @@ Important options and tokens:
 - `--at <revset>` creates a new workspace at a revset
 - `--bookmark <name>` creates a bookmark in a new workspace
 - `--execute <command>` runs a command after switching instead of changing the current shell directory
-- `--no-links` skips link application during `switch`
+- `--no-links` skips link application during `add` or `switch`
 - `@` means current workspace
 - `-` means previous workspace
 - `^` and `default` resolve to the default workspace
@@ -67,10 +69,13 @@ For troubleshooting, inspect first and then recommend the next command. For work
 
 Use this path whenever the user wants a new workspace, asks to jump into another one, or describes a workflow that clearly maps to workspace creation:
 
+- `jw add <name>...` creates workspaces without switching.
 - `jw switch <name>` creates the workspace if it does not already exist.
+- `jw switch <name>...` creates any missing workspaces and switches to the last one.
 - `jw switch --at <revset> <name>` creates it at a revset.
 - `jw switch --bookmark <bookmark> <name>` creates a bookmark in the new workspace.
 - `jw switch -x <command> <name>` runs a command after switching instead of relying on shell `cd`.
+- `--bookmark` is single-workspace only; use `bookmark_template` for batch creation.
 
 If the user needs an editor or agent launch, prefer the built-in `--execute` workflow over ad hoc chained shell commands.
 
@@ -154,9 +159,9 @@ For link problems, suggest checks in this order:
 
 When users need to understand or clean up workspace state:
 
-- `jw list` shows known workspaces and marks current, previous, and default entries
-- `jw remove <name>` forgets a workspace and deletes its directory by default
-- `jw remove --keep-dir <name>` forgets it but leaves the directory in place
+- `jw list`/`jw l`/`jw ls` shows known workspaces and marks current, previous, and default entries
+- `jw remove <name>...` forgets workspaces and deletes their directories by default
+- `jw remove --keep-dir <name>...` forgets them but leaves directories in place
 - `jw prune` forgets missing workspaces
 
 Warn about the important safeguards:
@@ -212,7 +217,7 @@ User: `what does jw switch - do, and how do i get back to the default workspace?
 Response shape:
 
 - explain `-`, `@`, `^`, and `default`
-- show `jw current`, `jw switch -`, and `jw switch default`
+- show `jw current`, `jw -`, and `jw ^`
 
 **Example 4**
 

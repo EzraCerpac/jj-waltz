@@ -14,12 +14,16 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 
 ## Features
 
+- `jw add <name>...` creates one or more JJ workspaces without switching
 - `jw switch <name>` creates or switches to a JJ workspace
+- `jw switch <name>...` creates any missing workspaces and switches to the last one
 - `jw s <name>` short alias for the main workflow
+- `jw ^` and `jw -` switch to the default and previous workspaces
 - preserve the current subdirectory when switching between sibling workspaces
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
-- `jw list`, `jw path`, `jw remove`, `jw prune`, `jw root`, `jw current`
+- `jw list` (`jw l`, `jw ls`), `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, `jw current`
 - `--execute` support for jumping into editors or agents after switching
+- optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
@@ -59,7 +63,8 @@ For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep i
 
 ## Shell setup
 
-Initialize your shell so `jw switch` can change the current shell directory:
+Initialize your shell so `jw switch`, `jw ^`, and `jw -` can change the
+current shell directory:
 
 ```bash
 # bash
@@ -71,6 +76,9 @@ eval "$(jw shell init zsh)"
 # fish
 jw shell init fish | source
 ```
+
+Without shell initialization, the raw `jw` binary can only print the target path
+or status; it cannot change the directory of the parent shell process.
 
 To generate completions manually:
 
@@ -84,11 +92,35 @@ jw shell completions bash
 
 ```bash
 jw switch feature-api
+jw add frontend tests docs
+jw switch frontend tests docs
 jw switch -x opencode feature-ui
-jw switch default
-jw switch -
-jw list
+jw ^
+jw -
+jw ls
+jw remove frontend tests
 ```
+
+## Config
+
+`jw` reads user config from `$XDG_CONFIG_HOME/jj-waltz/config.toml`, or
+`~/.config/jj-waltz/config.toml` when `XDG_CONFIG_HOME` is not set.
+
+To create a bookmark automatically whenever `jw switch` creates a workspace:
+
+```toml
+[workspace]
+create_bookmark = true
+bookmark_template = "{workspace}"
+```
+
+`bookmark_template` defaults to `{workspace}`. The `{workspace}` token is replaced
+with the resolved workspace name, so templates like `wip/{workspace}` are valid.
+
+For one command, `jw switch --bookmark custom-name feature-a` overrides the config,
+and `jw switch --no-bookmark feature-a` suppresses configured bookmark creation.
+Explicit `--bookmark` is single-workspace only; for batch `add` or `switch`, use
+`bookmark_template`.
 
 ## AI usage note
 
