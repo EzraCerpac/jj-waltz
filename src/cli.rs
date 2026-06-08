@@ -1,10 +1,12 @@
+use crate::config::{self, Config};
 use crate::links;
 use crate::shell::{self, ShellKind};
-use crate::workspace::{self, SwitchOptions};
+use crate::workspace::{self, AddOptions, SwitchOptions};
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Parser)]
@@ -22,9 +24,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Create one or more workspaces")]
+    Add(AddCommand),
     #[command(alias = "s", about = "Switch to or create a workspace")]
     Switch(SwitchCommand),
-    #[command(alias = "l", about = "List known workspaces")]
+    #[command(aliases = ["l", "ls"], about = "List known workspaces")]
     List,
     #[command(about = "Print a workspace path")]
     Path(PathCommand),
@@ -45,9 +49,9 @@ enum Commands {
 }
 
 #[derive(Debug, Args)]
-struct SwitchCommand {
-    #[arg(value_name = "NAME")]
-    name: String,
+struct AddCommand {
+    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    names: Vec<String>,
     #[arg(
         long,
         value_name = "REVSET",
@@ -62,6 +66,39 @@ struct SwitchCommand {
     )]
     bookmark: Option<String>,
     #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Do not create a bookmark for a new workspace"
+    )]
+    no_bookmark: bool,
+    #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
+    no_links: bool,
+}
+
+#[derive(Debug, Args)]
+struct SwitchCommand {
+    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    names: Vec<String>,
+    #[arg(
+        long,
+        value_name = "REVSET",
+        help = "Create a new workspace at a revset"
+    )]
+    at: Option<String>,
+    #[arg(
+        short,
+        long,
+        value_name = "BOOKMARK",
+        help = "Create a bookmark in a new workspace"
+    )]
+    bookmark: Option<String>,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Do not create a bookmark for a new workspace"
+    )]
+    no_bookmark: bool,
+    #[arg(
         short = 'x',
         long,
         value_name = "COMMAND",
@@ -72,7 +109,7 @@ struct SwitchCommand {
     print_path: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
     no_links: bool,
-    #[arg(trailing_var_arg = true)]
+    #[arg(last = true)]
     execute_args: Vec<String>,
 }
 
@@ -97,7 +134,7 @@ struct PathCommand {
 #[derive(Debug, Args)]
 struct RemoveCommand {
     #[arg(value_name = "NAME")]
-    name: Option<String>,
+    names: Vec<String>,
     #[arg(long, action = ArgAction::SetTrue, help = "Forget the workspace but keep its directory")]
     keep_dir: bool,
 }
@@ -150,9 +187,10 @@ impl From<ShellArg> for ShellKind {
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalized_args());
 
     match cli.command {
+        Commands::Add(cmd) => run_add(cmd),
         Commands::Switch(cmd) => run_switch(cmd),
         Commands::List => run_list(),
         Commands::Path(cmd) => run_path(cmd),
@@ -166,31 +204,103 @@ pub fn run() -> Result<()> {
     }
 }
 
+fn normalized_args() -> Vec<OsString> {
+    let mut args = std::env::args_os().collect::<Vec<_>>();
+    if matches!(args.get(1).and_then(|arg| arg.to_str()), Some("^" | "-")) {
+        let target = args[1].clone();
+        args[1] = OsString::from("switch");
+        args.insert(2, target);
+    }
+    args
+}
+
+fn run_add(cmd: AddCommand) -> Result<()> {
+    if cmd.bookmark.is_some() && cmd.no_bookmark {
+        bail!("--bookmark and --no-bookmark cannot be used together")
+    }
+    if cmd.bookmark.is_some() && cmd.names.len() > 1 {
+        bail!("--bookmark can only be used with a single workspace")
+    }
+
+    for name in &cmd.names {
+        let bookmark = effective_bookmark(name, cmd.bookmark.as_deref(), cmd.no_bookmark)?;
+        let result = workspace::add_workspace(
+            name,
+            &AddOptions {
+                at_revset: cmd.at.clone(),
+                bookmark,
+            },
+        )
+        .with_context(|| format!("failed to add workspace {name}"))?;
+
+        if !cmd.no_links {
+            apply_links_for_path(&result.path, false)?;
+        }
+
+        println!("Created workspace: {}", result.workspace);
+        println!("  path: {}", result.path.display());
+        if let Some(bookmark) = result.bookmark {
+            println!("  bookmark: {bookmark}");
+        }
+    }
+
+    Ok(())
+}
+
 fn run_switch(cmd: SwitchCommand) -> Result<()> {
     if cmd.execute.is_none() && !cmd.execute_args.is_empty() {
         bail!("arguments after -- require --execute")
     }
+    if cmd.bookmark.is_some() && cmd.no_bookmark {
+        bail!("--bookmark and --no-bookmark cannot be used together")
+    }
+    if cmd.bookmark.is_some() && cmd.names.len() > 1 {
+        bail!("--bookmark can only be used with a single workspace")
+    }
+
+    let (final_name, intermediate_names) = cmd
+        .names
+        .split_last()
+        .expect("clap requires at least one workspace name");
+
+    for name in intermediate_names {
+        if workspace::workspace_exists(&workspace::resolve_workspace_token(name)?)? {
+            continue;
+        }
+        let bookmark = effective_bookmark(name, None, cmd.no_bookmark)?;
+        let result = workspace::add_workspace(
+            name,
+            &AddOptions {
+                at_revset: cmd.at.clone(),
+                bookmark,
+            },
+        )
+        .with_context(|| format!("failed to add workspace {name}"))?;
+        if !cmd.no_links {
+            apply_links_for_path(&result.path, false)?;
+        }
+        if !cmd.print_path {
+            println!("Created workspace: {}", result.workspace);
+            println!("  path: {}", result.path.display());
+            if let Some(bookmark) = result.bookmark {
+                println!("  bookmark: {bookmark}");
+            }
+        }
+    }
+
+    let bookmark = effective_bookmark(final_name, cmd.bookmark.as_deref(), cmd.no_bookmark)?;
 
     let result = workspace::switch_workspace(
-        &cmd.name,
+        final_name,
         &SwitchOptions {
             at_revset: cmd.at,
-            bookmark: cmd.bookmark.clone(),
+            bookmark,
             preserve_subdir: true,
         },
     )?;
 
     if !cmd.no_links {
-        let config_root =
-            workspace::default_workspace_root().unwrap_or_else(|_| result.path.clone());
-        let links_report =
-            links::apply_workspace_links_with_config_root(&config_root, &result.path)?;
-        if !cmd.print_path && links_report.has_entries() {
-            println!(
-                "Links: {} created, {} already satisfied, {} missing target",
-                links_report.linked, links_report.satisfied, links_report.skipped_missing_target
-            );
-        }
+        apply_links_for_path(&result.path, cmd.print_path)?;
     }
 
     if cmd.print_path {
@@ -222,6 +332,30 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         println!("  bookmark: {bookmark}");
     }
     Ok(())
+}
+
+fn effective_bookmark(
+    workspace_name: &str,
+    explicit_bookmark: Option<&str>,
+    no_bookmark: bool,
+) -> Result<Option<String>> {
+    if no_bookmark {
+        return Ok(None);
+    }
+    if let Some(bookmark) = explicit_bookmark {
+        return Ok(Some(bookmark.to_owned()));
+    }
+
+    let config = Config::load()?;
+    if !config.workspace.create_bookmark {
+        return Ok(None);
+    }
+
+    let workspace = workspace::resolve_workspace_token(workspace_name)?;
+    Ok(Some(config::bookmark_from_template(
+        &config.workspace.bookmark_template,
+        &workspace,
+    )))
 }
 
 fn run_list() -> Result<()> {
@@ -257,10 +391,35 @@ fn run_path(cmd: PathCommand) -> Result<()> {
 
 fn run_remove(cmd: RemoveCommand) -> Result<()> {
     let delete_dir = !cmd.keep_dir;
-    let (name, path) = workspace::remove_workspace(cmd.name.as_deref(), delete_dir)?;
+    if cmd.names.is_empty() {
+        let (name, path) = workspace::remove_workspace(None, delete_dir)?;
+        print_remove_result(&name, &path, delete_dir);
+        return Ok(());
+    }
+
+    for name in &cmd.names {
+        let (removed_name, path) = workspace::remove_workspace(Some(name), delete_dir)
+            .with_context(|| format!("failed to remove workspace {name}"))?;
+        print_remove_result(&removed_name, &path, delete_dir);
+    }
+    Ok(())
+}
+
+fn print_remove_result(name: &str, path: &Path, delete_dir: bool) {
     println!("Forgot workspace: {name}");
     if delete_dir {
         println!("Deleted directory: {}", path.display());
+    }
+}
+
+fn apply_links_for_path(path: &Path, quiet: bool) -> Result<()> {
+    let config_root = workspace::default_workspace_root().unwrap_or_else(|_| path.to_path_buf());
+    let links_report = links::apply_workspace_links_with_config_root(&config_root, path)?;
+    if !quiet && links_report.has_entries() {
+        println!(
+            "Links: {} created, {} already satisfied, {} missing target",
+            links_report.linked, links_report.satisfied, links_report.skipped_missing_target
+        );
     }
     Ok(())
 }
@@ -304,7 +463,7 @@ fn run_links(cmd: LinksCommand) -> Result<()> {
     }
 }
 
-fn run_execute(cwd: &PathBuf, command: &str, args: &[String]) -> Result<()> {
+fn run_execute(cwd: &Path, command: &str, args: &[String]) -> Result<()> {
     let status = if cfg!(windows) {
         let mut full = String::from(command);
         for arg in args {
