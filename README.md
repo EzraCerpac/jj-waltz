@@ -63,7 +63,8 @@ For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep i
 
 ## Shell setup
 
-Initialize your shell so `jw switch` can change the current shell directory:
+Initialize your shell so `jw switch`, `jw ^`, and `jw -` can change the
+current shell directory:
 
 ```bash
 # bash
@@ -75,6 +76,9 @@ eval "$(jw shell init zsh)"
 # fish
 jw shell init fish | source
 ```
+
+Without shell initialization, the raw `jw` binary can only print the target path
+or status; it cannot change the directory of the parent shell process.
 
 To generate completions manually:
 

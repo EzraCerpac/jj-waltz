@@ -43,34 +43,39 @@ pub struct AddResult {
 }
 
 pub fn current_workspace_name() -> Result<String> {
-    let output = run_jj(&[
-        "workspace",
-        "list",
-        "-T",
-        "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
-        "--color=never",
-    ])?;
-    let name = trimmed_stdout(output)?;
-    if name.is_empty() {
-        bail!("could not determine current workspace")
+    let current_root = canonicalize_dir(&workspace_root_current()?)?;
+    let mut matches = workspace_roots()?
+        .into_iter()
+        .filter_map(|entry| match canonicalize_dir(&entry.root) {
+            Ok(root) if root == current_root => Some(entry.name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    match matches.len() {
+        0 => bail!(
+            "could not determine current workspace for root {}",
+            current_root.display()
+        ),
+        1 => Ok(matches.remove(0)),
+        _ => bail!(
+            "multiple workspaces match current root {}: {}",
+            current_root.display(),
+            matches.join(", ")
+        ),
     }
-    Ok(name)
 }
 
 pub fn workspace_entries() -> Result<Vec<WorkspaceEntry>> {
     let current = current_workspace_name().ok();
-    let mut entries = Vec::new();
-
-    for name in workspace_names()? {
-        let root = workspace_root_by_name(&name).ok();
-        entries.push(WorkspaceEntry {
-            is_current: current.as_deref() == Some(name.as_str()),
-            name,
-            root,
-        });
-    }
-
-    Ok(entries)
+    Ok(workspace_roots()?
+        .into_iter()
+        .map(|entry| WorkspaceEntry {
+            is_current: current.as_deref() == Some(entry.name.as_str()),
+            name: entry.name,
+            root: Some(entry.root),
+        })
+        .collect())
 }
 
 pub fn workspace_root_by_name(name: &str) -> Result<PathBuf> {
@@ -271,10 +276,21 @@ pub fn previous_workspace_name() -> Result<String> {
     let state_path = workspace_state_file(&root);
     let contents =
         fs::read_to_string(&state_path).with_context(|| "no previous workspace recorded")?;
-    let name = contents.trim();
-    if name.is_empty() {
+    let names = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
         bail!("no previous workspace recorded")
     }
+    if names.len() != 1 {
+        bail!(
+            "previous workspace record is invalid: {}",
+            state_path.display()
+        )
+    }
+    let name = names[0];
     if workspace_exists(name)? {
         Ok(name.to_owned())
     } else {
@@ -412,6 +428,23 @@ fn workspace_names() -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect())
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceRoot {
+    name: String,
+    root: PathBuf,
+}
+
+fn workspace_roots() -> Result<Vec<WorkspaceRoot>> {
+    workspace_names()?
+        .into_iter()
+        .map(|name| {
+            let root = workspace_root_by_name(&name)
+                .with_context(|| format!("failed to resolve workspace root for {name}"))?;
+            Ok(WorkspaceRoot { name, root })
+        })
+        .collect()
 }
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf> {
