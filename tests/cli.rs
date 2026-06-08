@@ -847,12 +847,8 @@ impl TestRepo {
             String::from_utf8_lossy(&current_root.stdout),
             String::from_utf8_lossy(&current_root.stderr)
         );
-        let current_root = fs::canonicalize(
-            String::from_utf8_lossy(&current_root.stdout)
-                .trim()
-                .to_owned(),
-        )
-        .expect("canonicalize current root");
+        let current_root = fs::canonicalize(String::from_utf8_lossy(&current_root.stdout).trim())
+            .expect("canonicalize current root");
 
         let output = Command::new("jj")
             .current_dir(&self.default_root)
@@ -860,7 +856,7 @@ impl TestRepo {
                 "workspace",
                 "list",
                 "-T",
-                "name ++ \"|\" ++ self.root() ++ \"\\n\"",
+                "name ++ \"\\n\"",
                 "--color=never",
             ])
             .output()
@@ -871,12 +867,29 @@ impl TestRepo {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8_lossy(&output.stdout)
+        let names = String::from_utf8_lossy(&output.stdout)
             .lines()
-            .find_map(|line| {
-                let (name, root) = line.split_once('|')?;
-                let root = fs::canonicalize(root.trim()).ok()?;
-                (root == current_root).then(|| name.to_owned())
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        names
+            .into_iter()
+            .find(|name| {
+                let output = Command::new("jj")
+                    .current_dir(&self.default_root)
+                    .args(["workspace", "root", "--name", name])
+                    .output()
+                    .expect("workspace root by name");
+                if !output.status.success() {
+                    return false;
+                }
+                let Ok(root) = fs::canonicalize(String::from_utf8_lossy(&output.stdout).trim())
+                else {
+                    return false;
+                };
+                root == current_root
             })
             .expect("current workspace name")
     }
