@@ -437,24 +437,12 @@ struct WorkspaceRoot {
 }
 
 fn workspace_roots() -> Result<Vec<WorkspaceRoot>> {
-    let output = run_jj(&[
-        "workspace",
-        "list",
-        "-T",
-        "name ++ \"|\" ++ self.root() ++ \"\\n\"",
-        "--color=never",
-    ])?;
-
-    trimmed_stdout(output)?
-        .lines()
-        .map(|line| {
-            let (name, root) = line
-                .split_once('|')
-                .ok_or_else(|| anyhow!("invalid workspace list entry: {line}"))?;
-            Ok(WorkspaceRoot {
-                name: name.trim().to_owned(),
-                root: PathBuf::from(root.trim()),
-            })
+    workspace_names()?
+        .into_iter()
+        .map(|name| {
+            let root = workspace_root_by_name(&name)
+                .with_context(|| format!("failed to resolve workspace root for {name}"))?;
+            Ok(WorkspaceRoot { name, root })
         })
         .collect()
 }
