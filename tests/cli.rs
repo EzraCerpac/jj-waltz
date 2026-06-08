@@ -656,6 +656,52 @@ fn switch_applies_workspace_links_for_data_directory() {
 }
 
 #[test]
+fn switch_auto_ignores_workspace_link_sources_in_git_exclude() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join(".codegraph")).expect("create codegraph directory");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \".codegraph\"\ntarget = \"../repo/.codegraph\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    let feature_root = repo.default_root.with_extension("feature-a");
+    assert!(
+        fs::symlink_metadata(feature_root.join(".codegraph"))
+            .expect("metadata")
+            .file_type()
+            .is_symlink()
+    );
+    let status = output_in(&feature_root, ["jj", "status", "--no-pager"]).expect("jj status");
+    assert!(!status.contains(".codegraph"), "{status}");
+    assert_eq!(
+        exclude_count(&repo.default_root, "/.codegraph"),
+        1,
+        "exclude should contain one /.codegraph entry"
+    );
+}
+
+#[test]
+fn switch_does_not_duplicate_existing_git_exclude_entry_for_links() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join(".codegraph")).expect("create codegraph directory");
+    fs::write(repo.default_root.join(".git/info/exclude"), "/.codegraph\n").expect("seed exclude");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \".codegraph\"\ntarget = \"../repo/.codegraph\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+    assert_eq!(exclude_count(&repo.default_root, "/.codegraph"), 1);
+}
+
+#[test]
 fn switch_uses_default_workspace_link_config() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -923,6 +969,37 @@ fn path_string(path: &Path) -> String {
         .expect("canonicalize path")
         .to_string_lossy()
         .into_owned()
+}
+
+fn exclude_count(repo_root: &Path, pattern: &str) -> usize {
+    fs::read_to_string(repo_root.join(".git/info/exclude"))
+        .expect("read git exclude")
+        .lines()
+        .filter(|line| line.trim() == pattern)
+        .count()
+}
+
+fn output_in<I, S>(cwd: &Path, args: I) -> anyhow::Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let values = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let (program, rest) = values.split_first().expect("program");
+    let output = Command::new(program).current_dir(cwd).args(rest).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        anyhow::bail!(
+            "command failed: {:?}\nstdout: {}\nstderr: {}",
+            values,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
 }
 
 fn run_in<I, S>(cwd: &Path, args: I) -> anyhow::Result<()>

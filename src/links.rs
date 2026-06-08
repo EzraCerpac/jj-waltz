@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const LINKS_FILE: &str = ".jwlinks.toml";
 const LINKS_LOCAL_FILE: &str = ".jwlinks.local.toml";
@@ -22,6 +24,7 @@ impl LinkApplyReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LinkRule {
     source: PathBuf,
+    source_rel: PathBuf,
     target: PathBuf,
     required: bool,
 }
@@ -49,10 +52,11 @@ pub fn apply_workspace_links_with_config_root(
     workspace_root: &Path,
 ) -> Result<LinkApplyReport> {
     let rules = load_rules(config_root, workspace_root)?;
+    let git_exclude = git_root(workspace_root).map(|root| root.join("info").join("exclude"));
     let mut report = LinkApplyReport::default();
 
     for rule in rules {
-        apply_rule(workspace_root, &rule, &mut report)?;
+        apply_rule(workspace_root, &rule, git_exclude.as_deref(), &mut report)?;
     }
 
     Ok(report)
@@ -110,13 +114,19 @@ fn normalize_rule(workspace_root: &Path, raw: LinkRuleRaw) -> Result<LinkRule> {
     };
 
     Ok(LinkRule {
-        source: workspace_root.join(source_rel),
+        source: workspace_root.join(&source_rel),
+        source_rel,
         target,
         required: raw.required,
     })
 }
 
-fn apply_rule(workspace_root: &Path, rule: &LinkRule, report: &mut LinkApplyReport) -> Result<()> {
+fn apply_rule(
+    workspace_root: &Path,
+    rule: &LinkRule,
+    git_exclude: Option<&Path>,
+    report: &mut LinkApplyReport,
+) -> Result<()> {
     if !rule.target.exists() {
         if rule.required {
             bail!(
@@ -128,6 +138,8 @@ fn apply_rule(workspace_root: &Path, rule: &LinkRule, report: &mut LinkApplyRepo
         report.skipped_missing_target += 1;
         return Ok(());
     }
+
+    ignore_link_source(git_exclude, rule)?;
 
     if !rule.source.exists() {
         if let Some(parent) = rule.source.parent() {
@@ -174,6 +186,61 @@ fn apply_rule(workspace_root: &Path, rule: &LinkRule, report: &mut LinkApplyRepo
         display_in_workspace(workspace_root, &rule.source),
         rule.target.display()
     )
+}
+
+fn ignore_link_source(git_exclude: Option<&Path>, rule: &LinkRule) -> Result<()> {
+    let Some(git_exclude) = git_exclude else {
+        return Ok(());
+    };
+    let pattern = format!(
+        "/{}",
+        rule.source_rel.to_string_lossy().trim_start_matches('/')
+    );
+    append_once(git_exclude, &pattern)
+}
+
+fn git_root(workspace_root: &Path) -> Option<PathBuf> {
+    let output = Command::new("jj")
+        .current_dir(workspace_root)
+        .args(["git", "root"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?;
+    let root = root.trim();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+fn append_once(path: &Path, pattern: &str) -> Result<()> {
+    let existing = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("failed to read {}", path.display())),
+    };
+
+    if existing.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(pattern);
+    updated.push('\n');
+
+    fs::write(path, updated).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn same_existing_path(path_a: &Path, path_b: &Path) -> Result<bool> {
