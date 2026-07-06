@@ -44,6 +44,18 @@ brew install EzraCerpac/tap/jj-waltz
 cargo install --git https://github.com/EzraCerpac/jj-waltz --locked
 ```
 
+### Herdr plugin
+
+Install the bundled Herdr UI to create and remove `jw` workspaces from Herdr:
+
+```bash
+herdr plugin install EzraCerpac/jj-waltz/plugins/herdr
+```
+
+The plugin builds the `jw` binary from the same repository revision and delegates all
+workspace paths, links, bookmarks, and removal checks to it. See
+[`plugins/herdr`](plugins/herdr) for keybindings and local development.
+
 ## Workspace links
 
 If you keep large ignored data in one workspace and want it accessible from others,

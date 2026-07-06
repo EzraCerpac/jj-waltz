@@ -1,0 +1,39 @@
+id = "ezracerpac.jj-waltz"
+name = "jj-waltz"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Create and remove jj-waltz workspaces from Herdr."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/build.sh"]
+
+[[actions]]
+id = "new"
+title = "New jw workspace"
+contexts = ["workspace"]
+command = ["./target/release/herdr-jj-waltz", "open", "workspace"]
+
+[[actions]]
+id = "new-tab"
+title = "New jw workspace in tab"
+contexts = ["workspace"]
+command = ["./target/release/herdr-jj-waltz", "open", "tab"]
+
+[[actions]]
+id = "remove"
+title = "Remove jw workspace"
+contexts = ["workspace"]
+command = ["./target/release/herdr-jj-waltz", "open", "remove"]
+
+[[panes]]
+id = "create"
+title = "New jw workspace"
+placement = "overlay"
+command = ["./target/release/herdr-jj-waltz", "create"]
+
+[[panes]]
+id = "remove"
+title = "Remove jw workspace"
+placement = "overlay"
+command = ["./target/release/herdr-jj-waltz", "remove"]
