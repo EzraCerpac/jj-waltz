@@ -7,6 +7,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
+struct ShellCase {
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+    execute_args: &'static [&'static str],
+}
+
+const POWERSHELL_SWITCH_TEST_ARGS: &[&str] = &[
+    "-NoLogo",
+    "-NoProfile",
+    "-Command",
+    "jw shell init powershell | Out-String | Invoke-Expression; jw '^' | Out-Null; (Get-Location).Path; jw '-' | Out-Null; (Get-Location).Path",
+];
+
+const POWERSHELL_EXECUTE_TEST_ARGS: &[&str] = &[
+    "-NoLogo",
+    "-NoProfile",
+    "-Command",
+    "jw shell init powershell | Out-String | Invoke-Expression; jw switch feature-a '--execute=pwd'; jw switch feature-a '-xpwd'",
+];
+
 fn jj_available() -> bool {
     Command::new("jj")
         .arg("--version")
@@ -63,6 +84,36 @@ fn add_creates_multiple_workspaces_without_switching() {
     assert!(repo.default_root.with_extension("feature-a").is_dir());
     assert!(repo.default_root.with_extension("feature-b").is_dir());
     assert_eq!(repo.current_workspace_name(), "default");
+}
+
+#[test]
+fn add_rolls_back_earlier_workspaces_when_later_token_resolution_fails() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["add", "feature-a", "-"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no previous workspace recorded"));
+
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    assert!(!repo.default_root.with_extension("feature-a").exists());
+}
+
+#[test]
+fn switch_rolls_back_intermediate_workspaces_when_final_token_resolution_fails() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["switch", "feature-a", "-"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no previous workspace recorded"));
+
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    assert!(!repo.default_root.with_extension("feature-a").exists());
 }
 
 #[test]
@@ -373,83 +424,147 @@ fn previous_shorthand_rejects_multiline_state_record() {
 }
 
 #[test]
-fn fish_init_switches_default_and_previous_shorthands() {
+fn installed_shell_init_adapters_switch_default_and_previous_shorthands() {
     skip_without_jj!();
-    if !command_available("fish") {
-        eprintln!("skipping test because `fish` is not installed");
-        return;
+
+    let cases = [
+        ShellCase {
+            name: "bash",
+            program: "bash",
+            args: &[
+                "--noprofile",
+                "--norc",
+                "-c",
+                "eval \"$(jw shell init bash)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+            ],
+            execute_args: &[
+                "--noprofile",
+                "--norc",
+                "-c",
+                "eval \"$(jw shell init bash)\"; jw switch feature-a --execute=pwd; jw switch feature-a -xpwd",
+            ],
+        },
+        ShellCase {
+            name: "elvish",
+            program: "elvish",
+            args: &[
+                "-norc",
+                "-c",
+                "eval (jw shell init elvish | slurp); jw '^' > /dev/null; pwd; jw '-' > /dev/null; pwd",
+            ],
+            execute_args: &[
+                "-norc",
+                "-c",
+                "eval (jw shell init elvish | slurp); jw switch feature-a '--execute=pwd'; jw switch feature-a '-xpwd'",
+            ],
+        },
+        ShellCase {
+            name: "fish",
+            program: "fish",
+            args: &[
+                "--no-config",
+                "-c",
+                "jw shell init fish | source; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+            ],
+            execute_args: &[
+                "--no-config",
+                "-c",
+                "jw shell init fish | source; jw switch feature-a --execute=pwd; jw switch feature-a -xpwd",
+            ],
+        },
+        ShellCase {
+            name: "powershell",
+            program: "powershell",
+            args: POWERSHELL_SWITCH_TEST_ARGS,
+            execute_args: POWERSHELL_EXECUTE_TEST_ARGS,
+        },
+        ShellCase {
+            name: "powershell",
+            program: "pwsh",
+            args: POWERSHELL_SWITCH_TEST_ARGS,
+            execute_args: POWERSHELL_EXECUTE_TEST_ARGS,
+        },
+        ShellCase {
+            name: "zsh",
+            program: "zsh",
+            args: &[
+                "-f",
+                "-c",
+                "eval \"$(jw shell init zsh)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+            ],
+            execute_args: &[
+                "-f",
+                "-c",
+                "eval \"$(jw shell init zsh)\"; jw switch feature-a --execute=pwd; jw switch feature-a -xpwd",
+            ],
+        },
+    ];
+
+    for case in cases {
+        if !command_available(case.program) {
+            eprintln!(
+                "skipping {} because `{}` is not installed",
+                case.name, case.program
+            );
+            continue;
+        }
+
+        let repo = TestRepo::new().expect("create test repo");
+        let feature_root = repo.default_root.with_extension("feature-a");
+        repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+        let output = Command::new(case.program)
+            .current_dir(&feature_root)
+            .env("PATH", test_binary_path())
+            .env("XDG_CONFIG_HOME", &repo.config_home)
+            .args(case.args)
+            .output()
+            .unwrap_or_else(|error| panic!("run {} shell integration: {error}", case.name));
+
+        assert!(
+            output.status.success(),
+            "{} shell integration failed\nstdout: {}\nstderr: {}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![path_string(&repo.default_root), path_string(&feature_root)],
+            "{} shell integration returned wrong directories",
+            case.name
+        );
+
+        let execute = Command::new(case.program)
+            .current_dir(&repo.default_root)
+            .env("PATH", test_binary_path())
+            .env("XDG_CONFIG_HOME", &repo.config_home)
+            .args(case.execute_args)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run {} attached execute integration: {error}", case.name)
+            });
+        assert!(
+            execute.status.success(),
+            "{} attached execute integration failed\nstdout: {}\nstderr: {}",
+            case.name,
+            String::from_utf8_lossy(&execute.stdout),
+            String::from_utf8_lossy(&execute.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&execute.stdout)
+                .lines()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>(),
+            vec![path_string(&feature_root), path_string(&feature_root)],
+            "{} shell adapter did not pass attached execute forms through",
+            case.name
+        );
     }
-
-    let repo = TestRepo::new().expect("create test repo");
-    let feature_root = repo.default_root.with_extension("feature-a");
-    repo.cmd().args(["switch", "feature-a"]).assert().success();
-
-    let output = Command::new("fish")
-        .current_dir(&feature_root)
-        .env("PATH", test_binary_path())
-        .env("XDG_CONFIG_HOME", &repo.config_home)
-        .args([
-            "--no-config",
-            "-c",
-            "jw shell init fish | source; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
-        ])
-        .output()
-        .expect("run fish shell integration");
-
-    assert!(
-        output.status.success(),
-        "fish shell integration failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lines = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        lines,
-        vec![path_string(&repo.default_root), path_string(&feature_root)]
-    );
-}
-
-#[test]
-fn zsh_init_switches_default_and_previous_shorthands() {
-    skip_without_jj!();
-    if !command_available("zsh") {
-        eprintln!("skipping test because `zsh` is not installed");
-        return;
-    }
-
-    let repo = TestRepo::new().expect("create test repo");
-    let feature_root = repo.default_root.with_extension("feature-a");
-    repo.cmd().args(["switch", "feature-a"]).assert().success();
-
-    let output = Command::new("zsh")
-        .current_dir(&feature_root)
-        .env("PATH", test_binary_path())
-        .env("XDG_CONFIG_HOME", &repo.config_home)
-        .args([
-            "-f",
-            "-c",
-            "eval \"$(jw shell init zsh)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
-        ])
-        .output()
-        .expect("run zsh shell integration");
-
-    assert!(
-        output.status.success(),
-        "zsh shell integration failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lines = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        lines,
-        vec![path_string(&repo.default_root), path_string(&feature_root)]
-    );
 }
 
 #[test]
@@ -465,51 +580,41 @@ fn list_accepts_ls_alias() {
 }
 
 #[test]
-fn completions_command_generates_fish_script() {
+fn list_reports_missing_checkout_without_hiding_other_root_errors() {
     skip_without_jj!();
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .args(["shell", "completions", "fish"])
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd().args(["add", "feature-a"]).assert().success();
+    let workspace = repo.default_root.with_extension("feature-a");
+    fs::rename(
+        &workspace,
+        repo.default_root.with_extension("feature-a.gone"),
+    )
+    .expect("move checkout away");
+
+    repo.cmd()
+        .args(["list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("__jw_workspace_candidates"))
-        .stdout(predicate::str::contains(
-            "add 'Create one or more workspaces'",
-        ))
-        .stdout(predicate::str::contains("-l keep-dir"))
-        .stdout(predicate::str::contains(
-            "'^' 'Switch to default workspace'",
-        ))
-        .stdout(predicate::str::contains(
-            "'-' 'Switch to previous workspace'",
-        ))
-        .stdout(predicate::str::contains("ls 'Alias for list'"))
-        .stdout(predicate::str::contains(
-            "switch 'Switch to or create a workspace'",
-        ));
+        .stdout(predicate::str::contains("feature-a\t(missing)"));
 }
 
 #[test]
-fn completions_command_generates_zsh_script() {
-    skip_without_jj!();
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .args(["shell", "completions", "zsh"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("_jw_workspace_candidates"))
-        .stdout(predicate::str::contains(
-            "add:Create one or more workspaces",
-        ))
-        .stdout(predicate::str::contains(
-            "--keep-dir[Forget the workspace but keep its directory]",
-        ))
-        .stdout(predicate::str::contains("^:Switch to default workspace"))
-        .stdout(predicate::str::contains("-:Switch to previous workspace"))
-        .stdout(predicate::str::contains("ls:Alias for list"))
-        .stdout(predicate::str::contains(
-            "switch:Switch to or create a workspace",
-        ));
+fn completions_command_generates_clap_registration_for_every_shell() {
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        Command::cargo_bin("jw")
+            .expect("binary")
+            .args(["shell", "completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("_JW_COMPLETE"));
+
+        Command::cargo_bin("jw")
+            .expect("binary")
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("_JW_COMPLETE"));
+    }
 }
 
 #[test]
@@ -540,6 +645,10 @@ fn remove_prompts_before_deleting_associated_bookmark() {
         .args(["switch", "--bookmark", "custom-marker", "feature-a"])
         .assert()
         .success();
+    let feature_root = repo.default_root.with_extension("feature-a");
+    fs::write(feature_root.join("work.txt"), "work\n").expect("write workspace file");
+    run_in(&feature_root, ["jj", "file", "track", "work.txt"]).expect("track workspace file");
+    run_in(&feature_root, ["jj", "commit", "-m", "workspace work"]).expect("commit workspace work");
 
     let mut remove = repo.cmd();
     remove.args(["remove", "feature-a"]);
@@ -664,7 +773,7 @@ fn remove_keep_dir_preserves_multiple_workspace_directories() {
 }
 
 #[test]
-fn remove_batch_stops_at_first_error_after_completed_removals() {
+fn remove_batch_validates_every_workspace_before_mutating() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
     let feature_a = repo.default_root.with_extension("feature-a");
@@ -679,30 +788,102 @@ fn remove_batch_stops_at_first_error_after_completed_removals() {
         .args(["remove", "feature-a", "missing", "feature-b"])
         .assert()
         .failure()
-        .stdout(predicate::str::contains("Forgot workspace: feature-a"))
+        .stdout(predicate::str::contains("Forgot workspace:").not())
         .stdout(predicate::str::contains("Forgot workspace: feature-b").not())
         .stderr(predicate::str::contains(
             "failed to remove workspace missing",
         ));
 
-    assert!(!feature_a.exists());
+    assert!(feature_a.is_dir());
     assert!(feature_b.is_dir());
 }
 
 #[test]
-fn completion_helper_lists_workspace_candidates() {
+fn remove_batch_rejects_duplicate_workspace_before_mutating() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let feature = repo.default_root.with_extension("feature-a");
+    repo.cmd().args(["add", "feature-a"]).assert().success();
+
+    repo.cmd()
+        .args(["remove", "feature-a", "feature-a"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Forgot workspace:").not())
+        .stderr(predicate::str::contains(
+            "workspace listed more than once: feature-a",
+        ));
+
+    assert!(feature.is_dir());
+    assert!(repo.workspace_names().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn clap_completion_combines_cli_metadata_and_workspace_candidates() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
 
     repo.cmd().args(["switch", "feature-a"]).assert().success();
 
     repo.cmd()
-        .args(["shell", "complete-workspaces"])
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "sw"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("feature-a\tExisting workspace"))
+        .stdout(predicate::str::contains(
+            "switch\tSwitch to or create a workspace",
+        ));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "switch", "fea"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feature-a\tExisting workspace"));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "switch", ""])
+        .assert()
+        .success()
         .stdout(predicate::str::contains("@\tCurrent workspace"))
+        .stdout(predicate::str::contains("-\tPrevious workspace"))
         .stdout(predicate::str::contains("^\tDefault workspace"));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "remove", "--k"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "--keep-dir\tForget the workspace but keep its directory",
+        ));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "-"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "-\tSwitch to or create a workspace",
+        ));
+}
+
+#[test]
+fn clap_completion_reports_workspace_discovery_errors() {
+    skip_without_jj!();
+    let directory = TempDir::new().expect("create temporary directory");
+
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .current_dir(directory.path())
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "switch", ""])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "jw: failed to complete workspaces",
+        ));
 }
 
 #[test]
@@ -781,6 +962,74 @@ fn switch_rolls_back_workspace_before_recording_previous_on_link_failure() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no previous workspace recorded"));
+}
+
+#[test]
+fn switch_rolls_back_links_when_workspace_state_cannot_be_recorded() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create link target");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"nested/data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+    repo.cmd()
+        .args(["add", "--no-links", "feature-a"])
+        .assert()
+        .success();
+    let feature_root = repo.default_root.with_extension("feature-a");
+    fs::create_dir(feature_root.join(".jj/jw-prev-workspace")).expect("block target state file");
+
+    repo.cmd()
+        .args(["switch", "feature-a"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "failed to inspect workspace state",
+        ));
+
+    assert!(!repo.default_root.join(".jj/jw-prev-workspace").exists());
+    assert!(!feature_root.join("nested/data").exists());
+    assert!(!feature_root.join("nested").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn switch_restores_source_state_when_target_state_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd().args(["add", "feature-a"]).assert().success();
+    let source_state = repo.default_root.join(".jj/jw-prev-workspace");
+    let target_state = repo
+        .default_root
+        .with_extension("feature-a")
+        .join(".jj/jw-prev-workspace");
+    fs::write(&source_state, "older\n").expect("write source state");
+    fs::write(&target_state, "target-old\n").expect("write target state");
+    let mut permissions = fs::metadata(&target_state)
+        .expect("target state metadata")
+        .permissions();
+    permissions.set_mode(0o444);
+    fs::set_permissions(&target_state, permissions).expect("make target state readonly");
+
+    repo.cmd()
+        .args(["switch", "--no-links", "feature-a"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to record workspace state"));
+
+    let mut permissions = fs::metadata(&target_state)
+        .expect("target state metadata")
+        .permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(&target_state, permissions).expect("restore target permissions");
+    assert_eq!(
+        fs::read_to_string(source_state).expect("read restored source state"),
+        "older\n"
+    );
 }
 
 #[test]

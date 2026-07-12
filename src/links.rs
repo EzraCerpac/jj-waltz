@@ -15,6 +15,23 @@ pub struct LinkApplyReport {
     pub skipped_missing_target: usize,
 }
 
+#[derive(Debug)]
+pub(crate) struct LinkApplication {
+    report: LinkApplyReport,
+    created_links: Vec<CreatedLink>,
+    created_directories: Vec<PathBuf>,
+}
+
+impl LinkApplication {
+    pub(crate) fn into_report(self) -> LinkApplyReport {
+        self.report
+    }
+
+    pub(crate) fn rollback(self) -> Result<()> {
+        rollback(&self.created_links, &self.created_directories)
+    }
+}
+
 impl LinkApplyReport {
     pub fn has_entries(&self) -> bool {
         self.linked > 0 || self.satisfied > 0 || self.skipped_missing_target > 0
@@ -26,6 +43,12 @@ struct LinkRule {
     source: PathBuf,
     target: PathBuf,
     required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreatedLink {
+    source: PathBuf,
+    target: PathBuf,
 }
 
 #[derive(Debug)]
@@ -53,6 +76,13 @@ struct LinkRuleRaw {
 ///
 /// Every rule is validated and preflighted before any directory or symlink is created.
 pub fn apply_workspace_links(config_root: &Path, workspace_root: &Path) -> Result<LinkApplyReport> {
+    apply_workspace_links_reversible(config_root, workspace_root).map(LinkApplication::into_report)
+}
+
+pub(crate) fn apply_workspace_links_reversible(
+    config_root: &Path,
+    workspace_root: &Path,
+) -> Result<LinkApplication> {
     let rules = load_rules(config_root, workspace_root)?;
     LinkPlan::build(workspace_root, rules)?.apply()
 }
@@ -204,7 +234,7 @@ impl LinkPlan {
         })
     }
 
-    fn apply(self) -> Result<LinkApplyReport> {
+    fn apply(self) -> Result<LinkApplication> {
         let mut created_directories = Vec::new();
         let mut created_links = Vec::new();
 
@@ -230,10 +260,17 @@ impl LinkPlan {
                     &created_directories,
                 ));
             }
-            created_links.push(rule.source.clone());
+            created_links.push(CreatedLink {
+                source: rule.source.clone(),
+                target: rule.target.clone(),
+            });
         }
 
-        Ok(self.report)
+        Ok(LinkApplication {
+            report: self.report,
+            created_links,
+            created_directories,
+        })
     }
 }
 
@@ -322,7 +359,7 @@ fn create_planned_directory(path: &Path) -> Result<bool> {
 
 fn error_after_rollback(
     error: Error,
-    created_links: &[PathBuf],
+    created_links: &[CreatedLink],
     created_directories: &[PathBuf],
 ) -> Error {
     match rollback(created_links, created_directories) {
@@ -333,12 +370,15 @@ fn error_after_rollback(
     }
 }
 
-fn rollback(created_links: &[PathBuf], created_directories: &[PathBuf]) -> Result<()> {
+fn rollback(created_links: &[CreatedLink], created_directories: &[PathBuf]) -> Result<()> {
     let mut failures = Vec::new();
 
     for link in created_links.iter().rev() {
         if let Err(error) = remove_created_symlink(link) {
-            failures.push(format!("failed to remove {}: {error}", link.display()));
+            failures.push(format!(
+                "failed to remove {}: {error}",
+                link.source.display()
+            ));
         }
     }
     for directory in created_directories.iter().rev() {
@@ -357,15 +397,22 @@ fn rollback(created_links: &[PathBuf], created_directories: &[PathBuf]) -> Resul
     }
 }
 
-fn remove_created_symlink(path: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
+fn remove_created_symlink(link: &CreatedLink) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(&link.source)?;
     if !metadata.file_type().is_symlink() {
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
             "path is no longer the symlink created by jw",
         ));
     }
-    remove_symlink(path)
+    let target = fs::read_link(&link.source)?;
+    if target != link.target {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "symlink target changed after jw created it",
+        ));
+    }
+    remove_symlink(&link.source)
 }
 
 fn same_existing_path(path_a: &Path, path_b: &Path) -> Result<bool> {
@@ -475,10 +522,14 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("create temp directory");
         let replaced_link = tempdir.path().join("replaced-link");
         fs::write(&replaced_link, "not jw's link").expect("create replacement file");
+        let created_link = CreatedLink {
+            source: replaced_link.clone(),
+            target: tempdir.path().join("expected-target"),
+        };
 
         let error = error_after_rollback(
             anyhow!("link creation failed"),
-            std::slice::from_ref(&replaced_link),
+            std::slice::from_ref(&created_link),
             &[],
         );
         let message = error.to_string();
@@ -489,6 +540,33 @@ mod tests {
         assert_eq!(
             fs::read_to_string(replaced_link).expect("read replacement file"),
             "not jw's link"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_preserves_symlink_replaced_after_creation() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let source = tempdir.path().join("link");
+        let expected_target = tempdir.path().join("expected");
+        let replacement_target = tempdir.path().join("replacement");
+        fs::create_dir_all(&expected_target).expect("create expected target");
+        fs::create_dir_all(&replacement_target).expect("create replacement target");
+        create_symlink(&expected_target, &source).expect("create original link");
+        let created_link = CreatedLink {
+            source: source.clone(),
+            target: expected_target,
+        };
+
+        remove_symlink(&source).expect("remove original link");
+        create_symlink(&replacement_target, &source).expect("create replacement link");
+
+        let error = rollback(std::slice::from_ref(&created_link), &[])
+            .expect_err("changed link must not be removed");
+        assert!(error.to_string().contains("symlink target changed"));
+        assert_eq!(
+            fs::read_link(&source).expect("read replacement link"),
+            replacement_target
         );
     }
 }

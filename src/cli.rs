@@ -1,10 +1,12 @@
 use crate::lifecycle::{self, CreatedWorkspace, CreationPolicy};
 use crate::links;
-use crate::shell::{self, ShellKind};
+use crate::shell::{self, Shell};
 use crate::workspace;
 use anyhow::{Context, Result, bail};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use std::ffi::OsString;
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{ArgValueCompleter, CompletionCandidate};
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -26,7 +28,10 @@ pub struct Cli {
 enum Commands {
     #[command(about = "Create one or more workspaces")]
     Add(AddCommand),
-    #[command(alias = "s", about = "Switch to or create a workspace")]
+    #[command(
+        visible_aliases = shell::SWITCH_ALIASES,
+        about = "Switch to or create a workspace"
+    )]
     Switch(SwitchCommand),
     #[command(aliases = ["l", "ls"], about = "List known workspaces")]
     List,
@@ -50,7 +55,12 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct AddCommand {
-    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    #[arg(
+        value_name = "NAME",
+        num_args = 1..,
+        required = true,
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(
         long,
@@ -77,7 +87,12 @@ struct AddCommand {
 
 #[derive(Debug, Args)]
 struct SwitchCommand {
-    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    #[arg(
+        value_name = "NAME",
+        num_args = 1..,
+        required = true,
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(
         long,
@@ -127,13 +142,19 @@ enum LinksSubcommand {
 
 #[derive(Debug, Args)]
 struct PathCommand {
-    #[arg(value_name = "NAME")]
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     name: String,
 }
 
 #[derive(Debug, Args)]
 struct RemoveCommand {
-    #[arg(value_name = "NAME")]
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(long, action = ArgAction::SetTrue, help = "Forget the workspace but keep its directory")]
     keep_dir: bool,
@@ -141,14 +162,14 @@ struct RemoveCommand {
         long,
         conflicts_with = "keep_bookmark",
         action = ArgAction::SetTrue,
-        help = "Delete bookmarks pointing at the workspace without prompting"
+        help = "Delete associated bookmarks without prompting"
     )]
     delete_bookmark: bool,
     #[arg(
         long,
         conflicts_with = "delete_bookmark",
         action = ArgAction::SetTrue,
-        help = "Keep bookmarks pointing at the workspace without prompting"
+        help = "Keep associated bookmarks without prompting"
     )]
     keep_bookmark: bool,
 }
@@ -156,7 +177,7 @@ struct RemoveCommand {
 #[derive(Debug, Args)]
 struct CompletionCommand {
     #[arg(value_enum)]
-    shell: ShellArg,
+    shell: Shell,
 }
 
 #[derive(Debug, Args)]
@@ -169,38 +190,16 @@ struct ShellCommand {
 enum ShellSubcommand {
     Init(ShellInitCommand),
     Completions(CompletionCommand),
-    #[command(hide = true)]
-    CompleteWorkspaces,
 }
 
 #[derive(Debug, Args)]
 struct ShellInitCommand {
     #[arg(value_enum)]
-    shell: ShellArg,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum ShellArg {
-    Bash,
-    Elvish,
-    Fish,
-    Powershell,
-    Zsh,
-}
-
-impl From<ShellArg> for ShellKind {
-    fn from(value: ShellArg) -> Self {
-        match value {
-            ShellArg::Bash => ShellKind::Bash,
-            ShellArg::Elvish => ShellKind::Elvish,
-            ShellArg::Fish => ShellKind::Fish,
-            ShellArg::Powershell => ShellKind::Powershell,
-            ShellArg::Zsh => ShellKind::Zsh,
-        }
-    }
+    shell: Shell,
 }
 
 pub fn run() -> Result<()> {
+    shell::complete_if_requested(Cli::command);
     let cli = Cli::parse_from(normalized_args());
 
     match cli.command {
@@ -214,13 +213,17 @@ pub fn run() -> Result<()> {
         Commands::Current => print_line(workspace::current_workspace_name()?),
         Commands::Shell(cmd) => run_shell(cmd),
         Commands::Links(cmd) => run_links(cmd),
-        Commands::Completions(cmd) => run_completions(cmd.shell.into()),
+        Commands::Completions(cmd) => run_completions(cmd.shell),
     }
 }
 
 fn normalized_args() -> Vec<OsString> {
     let mut args = std::env::args_os().collect::<Vec<_>>();
-    if matches!(args.get(1).and_then(|arg| arg.to_str()), Some("^" | "-")) {
+    if args
+        .get(1)
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|arg| shell::SWITCH_SHORTHANDS.contains(&arg))
+    {
         let target = args[1].clone();
         args[1] = OsString::from("switch");
         args.insert(2, target);
@@ -342,30 +345,48 @@ fn run_path(cmd: PathCommand) -> Result<()> {
 
 fn run_remove(cmd: RemoveCommand) -> Result<()> {
     let delete_dir = !cmd.keep_dir;
-    if cmd.names.is_empty() {
-        remove_one(None, delete_dir, &cmd)?;
-        return Ok(());
+    let inventory = workspace::WorkspaceInventory::load()?;
+    let plans = if cmd.names.is_empty() {
+        vec![workspace::plan_remove_workspace(
+            &inventory, None, delete_dir,
+        )?]
+    } else {
+        cmd.names
+            .iter()
+            .map(|name| {
+                workspace::plan_remove_workspace(&inventory, Some(name), delete_dir)
+                    .with_context(|| format!("failed to remove workspace {name}"))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let mut planned = HashSet::new();
+    for plan in &plans {
+        if !planned.insert(plan.workspace.as_str()) {
+            bail!("workspace listed more than once: {}", plan.workspace)
+        }
     }
 
-    for name in &cmd.names {
-        remove_one(Some(name), delete_dir, &cmd)
-            .with_context(|| format!("failed to remove workspace {name}"))?;
+    let mut choices = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let delete_bookmarks = choose_bookmark_removal(&plan, &cmd)?;
+        choices.push((plan, delete_bookmarks));
+    }
+    for (plan, delete_bookmarks) in choices {
+        let result = workspace::execute_remove_workspace(plan, delete_bookmarks)?;
+        print_remove_result(&result);
     }
     Ok(())
 }
 
-fn remove_one(token: Option<&str>, delete_dir: bool, cmd: &RemoveCommand) -> Result<()> {
-    let plan = workspace::plan_remove_workspace(token, delete_dir)?;
-    let delete_bookmarks = if plan.bookmarks.is_empty() || cmd.keep_bookmark {
+fn choose_bookmark_removal(plan: &workspace::RemovalPlan, cmd: &RemoveCommand) -> Result<bool> {
+    Ok(if plan.bookmarks.is_empty() || cmd.keep_bookmark {
         false
     } else if cmd.delete_bookmark {
         true
     } else {
         prompt_delete_bookmarks(&plan.bookmarks)?
-    };
-    let result = workspace::execute_remove_workspace(plan, delete_bookmarks)?;
-    print_remove_result(&result);
-    Ok(())
+    })
 }
 
 fn prompt_delete_bookmarks(bookmarks: &[String]) -> Result<bool> {
@@ -399,12 +420,6 @@ fn print_remove_result(result: &workspace::RemovalResult) {
     }
 }
 
-fn workspace_links_for_path(path: &Path) -> Result<links::LinkApplyReport> {
-    let config_root = workspace::default_workspace_root()
-        .context("failed to locate default workspace link configuration")?;
-    links::apply_workspace_links(&config_root, path)
-}
-
 fn run_prune() -> Result<()> {
     let removed = workspace::prune_missing_workspaces()?;
     for name in &removed {
@@ -416,25 +431,26 @@ fn run_prune() -> Result<()> {
 
 fn run_shell(cmd: ShellCommand) -> Result<()> {
     match cmd.command {
-        ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell.into())?),
-        ShellSubcommand::Completions(cmd) => run_completions(cmd.shell.into()),
-        ShellSubcommand::CompleteWorkspaces => run_complete_workspaces(),
+        ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell)?),
+        ShellSubcommand::Completions(cmd) => run_completions(cmd.shell),
     }
 }
 
-fn run_completions(shell: ShellKind) -> Result<()> {
-    let mut command = Cli::command();
+fn run_completions(shell: Shell) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    shell::write_completions(shell, &mut command, &mut handle)?;
+    shell::write_completions(shell, &mut handle)?;
     Ok(())
 }
 
 fn run_links(cmd: LinksCommand) -> Result<()> {
     match cmd.command {
         LinksSubcommand::Apply => {
-            let root = workspace::workspace_root_current()?;
-            let report = workspace_links_for_path(&root)?;
+            let inventory = workspace::WorkspaceInventory::load()?;
+            let config_root = inventory
+                .root(inventory.default_name()?)
+                .context("failed to locate default workspace link configuration")?;
+            let report = links::apply_workspace_links(&config_root, inventory.current_root())?;
             println!(
                 "Links: {} created, {} already satisfied, {} missing target",
                 report.linked, report.satisfied, report.skipped_missing_target
@@ -490,10 +506,21 @@ fn print_line(value: impl std::fmt::Display) -> Result<()> {
     Ok(())
 }
 
-fn run_complete_workspaces() -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    for (candidate, description) in workspace::completion_workspace_candidates()? {
-        writeln!(stdout, "{candidate}\t{description}").context("failed to write stdout")?;
-    }
-    Ok(())
+fn complete_workspaces(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy();
+    let candidates = match workspace::completion_workspace_candidates() {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            eprintln!("jw: failed to complete workspaces: {error:#}");
+            return Vec::new();
+        }
+    };
+
+    candidates
+        .into_iter()
+        .filter(|(candidate, _)| candidate.starts_with(current.as_ref()))
+        .map(|(candidate, description)| {
+            CompletionCandidate::new(candidate).help(Some(description.into()))
+        })
+        .collect()
 }

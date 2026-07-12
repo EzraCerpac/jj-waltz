@@ -61,12 +61,14 @@ impl WorkspaceInventory {
         let names = workspace_names()?;
         let mut entries = names
             .iter()
-            .map(|name| WorkspaceEntry {
-                name: name.clone(),
-                root: workspace_root_by_name_direct(name).ok(),
-                is_current: false,
+            .map(|name| {
+                Ok(WorkspaceEntry {
+                    name: name.clone(),
+                    root: workspace_root_by_name_direct(name)?,
+                    is_current: false,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         let matches = entries
             .iter()
@@ -108,7 +110,7 @@ impl WorkspaceInventory {
             None
         };
 
-        let (previous, previous_error) = read_previous_workspace(&current_root, &names);
+        let (previous, previous_error) = read_previous_workspace(&current_root, &names)?;
 
         Ok(Self {
             entries,
@@ -181,6 +183,14 @@ impl WorkspaceInventory {
             ' '
         }
     }
+
+    pub fn record_created(&mut self, result: &AddResult) {
+        self.entries.push(WorkspaceEntry {
+            name: result.workspace.clone(),
+            root: Some(result.path.clone()),
+            is_current: false,
+        });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,40 +213,25 @@ pub fn current_workspace_name() -> Result<String> {
     Ok(WorkspaceInventory::load()?.current)
 }
 
-pub fn workspace_entries() -> Result<Vec<WorkspaceEntry>> {
-    Ok(WorkspaceInventory::load()?.entries)
-}
-
-pub fn workspace_root_by_name(name: &str) -> Result<PathBuf> {
-    WorkspaceInventory::load()?.root(name)
-}
-
-fn workspace_root_by_name_direct(name: &str) -> Result<PathBuf> {
+fn workspace_root_by_name_direct(name: &str) -> Result<Option<PathBuf>> {
     let output = Command::new("jj")
         .args(["workspace", "root", "--name", name])
         .output()
         .with_context(|| "failed to execute `jj workspace root`".to_string())?;
 
     if output.status.success() {
-        return Ok(PathBuf::from(trimmed_stdout(output)?));
+        return Ok(Some(PathBuf::from(trimmed_stdout(output)?)));
     }
-    bail!(stderr_message(output, "workspace not found"));
-}
-
-pub fn workspace_exists(name: &str) -> Result<bool> {
-    Ok(WorkspaceInventory::load()?.contains(name))
-}
-
-pub fn resolve_workspace_token(token: &str) -> Result<String> {
-    if matches!(token, "@" | "-" | "^" | "default") {
-        WorkspaceInventory::load()?.resolve(token)
+    let message = stderr_message(output, "workspace root lookup failed");
+    let missing_checkout = message.contains("Cannot resolve absolute workspace path")
+        && (message.contains("No such file or directory")
+            || message.contains("os error 2")
+            || message.contains("os error 3"));
+    if missing_checkout {
+        Ok(None)
     } else {
-        Ok(token.to_owned())
+        bail!("failed to resolve workspace root for {name}: {message}")
     }
-}
-
-pub fn default_workspace_name() -> Result<String> {
-    Ok(WorkspaceInventory::load()?.default_name()?.to_owned())
 }
 
 pub fn workspace_root_current() -> Result<PathBuf> {
@@ -244,8 +239,11 @@ pub fn workspace_root_current() -> Result<PathBuf> {
     Ok(PathBuf::from(trimmed_stdout(output)?))
 }
 
-pub fn switch_workspace(target: &str, options: &SwitchOptions) -> Result<SwitchResult> {
-    let inventory = WorkspaceInventory::load()?;
+pub fn switch_workspace(
+    inventory: &WorkspaceInventory,
+    target: &str,
+    options: &SwitchOptions,
+) -> Result<SwitchResult> {
     let current_name = inventory.current_name().to_owned();
     let current_root = inventory.current_root().to_path_buf();
     let current_dir = env::current_dir().context("failed to determine current directory")?;
@@ -262,12 +260,13 @@ pub fn switch_workspace(target: &str, options: &SwitchOptions) -> Result<SwitchR
     let (target_path, created, bookmark) = if inventory.contains(&resolved_name) {
         (inventory.root(&resolved_name)?, false, None)
     } else {
-        let result = add_workspace_by_name(
+        let result = add_workspace_by_name_with_inventory(
             &resolved_name,
             &AddOptions {
                 at_revset: options.at_revset.clone(),
                 bookmark: options.bookmark.clone(),
             },
+            inventory,
         )?;
         (result.path, true, result.bookmark)
     };
@@ -292,18 +291,16 @@ pub fn record_switch(result: &SwitchResult) -> Result<()> {
     )
 }
 
-pub fn add_workspace(target: &str, options: &AddOptions) -> Result<AddResult> {
-    let inventory = WorkspaceInventory::load()?;
+pub fn add_workspace(
+    inventory: &WorkspaceInventory,
+    target: &str,
+    options: &AddOptions,
+) -> Result<AddResult> {
     let name = inventory.resolve(target)?;
     if inventory.contains(&name) {
         bail!("workspace already exists: {name}")
     }
-    add_workspace_by_name_with_inventory(&name, options, &inventory)
-}
-
-pub fn default_workspace_root() -> Result<PathBuf> {
-    let inventory = WorkspaceInventory::load()?;
-    inventory.root(inventory.default_name()?)
+    add_workspace_by_name_with_inventory(&name, options, inventory)
 }
 
 pub fn path_for_workspace(token: &str) -> Result<PathBuf> {
@@ -312,8 +309,11 @@ pub fn path_for_workspace(token: &str) -> Result<PathBuf> {
     inventory.root(&name)
 }
 
-pub fn plan_remove_workspace(token: Option<&str>, delete_dir: bool) -> Result<RemovalPlan> {
-    let inventory = WorkspaceInventory::load()?;
+pub fn plan_remove_workspace(
+    inventory: &WorkspaceInventory,
+    token: Option<&str>,
+    delete_dir: bool,
+) -> Result<RemovalPlan> {
     let name = match token {
         Some(value) => inventory.resolve(value)?,
         None => inventory.current_name().to_owned(),
@@ -343,11 +343,11 @@ pub fn execute_remove_workspace(
     run_jj(&["workspace", "forget", &plan.workspace])?;
 
     let mut deleted_bookmarks = Vec::new();
-    if delete_bookmarks {
-        for bookmark in &plan.bookmarks {
-            run_jj(&["bookmark", "delete", bookmark])?;
-            deleted_bookmarks.push(bookmark.clone());
-        }
+    if delete_bookmarks && !plan.bookmarks.is_empty() {
+        let mut args = vec!["bookmark".to_owned(), "delete".to_owned()];
+        args.extend(plan.bookmarks.iter().cloned());
+        run_jj_owned(&args)?;
+        deleted_bookmarks.clone_from(&plan.bookmarks);
     }
 
     let deleted_dir = plan.delete_dir && plan.path.is_dir();
@@ -366,11 +366,6 @@ pub fn execute_remove_workspace(
         deleted_dir,
         deleted_bookmarks,
     })
-}
-
-fn add_workspace_by_name(name: &str, options: &AddOptions) -> Result<AddResult> {
-    let inventory = WorkspaceInventory::load()?;
-    add_workspace_by_name_with_inventory(name, options, &inventory)
 }
 
 fn add_workspace_by_name_with_inventory(
@@ -473,10 +468,6 @@ pub fn prune_missing_workspaces() -> Result<Vec<String>> {
     Ok(removed)
 }
 
-pub fn previous_workspace_name() -> Result<String> {
-    Ok(WorkspaceInventory::load()?.previous_name()?.to_owned())
-}
-
 pub fn completion_workspace_candidates() -> Result<Vec<(String, String)>> {
     let inventory = WorkspaceInventory::load()?;
 
@@ -512,16 +503,67 @@ fn remember_previous_workspace(
         return Ok(());
     }
 
-    fs::write(workspace_state_file(from_root), format!("{to_name}\n"))
-        .with_context(|| "failed to record previous workspace")?;
-
+    let mut updates = vec![(
+        workspace_state_file(from_root),
+        format!("{to_name}\n").into_bytes(),
+    )];
     let to_state_dir = to_root.join(".jj");
     if to_state_dir.is_dir() {
-        fs::write(workspace_state_file(to_root), format!("{from_name}\n"))
-            .with_context(|| "failed to record target previous workspace")?;
+        updates.push((
+            workspace_state_file(to_root),
+            format!("{from_name}\n").into_bytes(),
+        ));
+    }
+
+    let originals = updates
+        .iter()
+        .map(|(path, _)| read_optional_file(path))
+        .collect::<Result<Vec<_>>>()?;
+    for (index, (path, contents)) in updates.iter().enumerate() {
+        if let Err(error) = fs::write(path, contents) {
+            let rollback_errors = updates[..=index]
+                .iter()
+                .zip(&originals[..=index])
+                .rev()
+                .filter_map(|((path, _), original)| restore_file(path, original.as_deref()).err())
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>();
+            if rollback_errors.is_empty() {
+                return Err(error).with_context(|| {
+                    format!("failed to record workspace state at {}", path.display())
+                });
+            }
+            bail!(
+                "failed to record workspace state at {}: {error}; state rollback also failed: {}",
+                path.display(),
+                rollback_errors.join("; ")
+            )
+        }
     }
 
     Ok(())
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect workspace state {}", path.display())),
+    }
+}
+
+fn restore_file(path: &Path, contents: Option<&[u8]>) -> Result<()> {
+    match contents {
+        Some(contents) => fs::write(path, contents)
+            .with_context(|| format!("failed to restore workspace state {}", path.display())),
+        None => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to remove workspace state {}", path.display())),
+        },
+    }
 }
 
 fn workspace_state_file(root: &Path) -> PathBuf {
@@ -570,12 +612,20 @@ fn workspace_base_root(current_root: &Path, current_name: &str) -> Result<PathBu
     Ok(parent.join(base))
 }
 
-fn read_previous_workspace(root: &Path, names: &[String]) -> (Option<String>, Option<String>) {
+fn read_previous_workspace(
+    root: &Path,
+    names: &[String],
+) -> Result<(Option<String>, Option<String>)> {
     let state_path = workspace_state_file(root);
     let contents = match fs::read_to_string(&state_path) {
         Ok(contents) => contents,
-        Err(_) => {
-            return (None, Some("no previous workspace recorded".to_owned()));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, Some("no previous workspace recorded".to_owned())));
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to read workspace state {}", state_path.display())
+            });
         }
     };
     let recorded = contents
@@ -584,21 +634,21 @@ fn read_previous_workspace(root: &Path, names: &[String]) -> (Option<String>, Op
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     if recorded.is_empty() {
-        return (None, Some("no previous workspace recorded".to_owned()));
+        return Ok((None, Some("no previous workspace recorded".to_owned())));
     }
     if recorded.len() != 1 {
-        return (
+        return Ok((
             None,
             Some(format!(
                 "previous workspace record is invalid: {}",
                 state_path.display()
             )),
-        );
+        ));
     }
     if names.iter().any(|name| name == recorded[0]) {
-        (Some(recorded[0].to_owned()), None)
+        Ok((Some(recorded[0].to_owned()), None))
     } else {
-        (None, Some("no previous workspace recorded".to_owned()))
+        Ok((None, Some("no previous workspace recorded".to_owned())))
     }
 }
 
@@ -642,26 +692,43 @@ fn workspace_names() -> Result<Vec<String>> {
 }
 
 fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
-    let recorded = fs::read_to_string(workspace_bookmark_file(root))
-        .ok()
-        .and_then(|contents| {
+    let bookmark_path = workspace_bookmark_file(root);
+    let recorded = match fs::read_to_string(&bookmark_path) {
+        Ok(contents) => {
             let names = contents
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>();
-            (names.len() == 1).then(|| names[0].to_owned())
-        });
-    let revset = format!("{name}@");
-    let output = run_jj_owned(&[
-        "bookmark".to_owned(),
-        "list".to_owned(),
-        "-r".to_owned(),
-        revset,
+            if names.len() != 1 {
+                bail!(
+                    "workspace bookmark record is invalid: {}",
+                    bookmark_path.display()
+                )
+            }
+            Some(names[0].to_owned())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read workspace bookmark {}",
+                    bookmark_path.display()
+                )
+            });
+        }
+    };
+    let mut args = vec!["bookmark".to_owned(), "list".to_owned()];
+    if recorded.is_none() {
+        args.push("-r".to_owned());
+        args.push(format!("{name}@"));
+    }
+    args.extend([
         "-T".to_owned(),
         "name ++ \"\\n\"".to_owned(),
         "--color=never".to_owned(),
-    ])?;
+    ]);
+    let output = run_jj_owned(&args)?;
     let candidates = trimmed_stdout(output)?
         .lines()
         .map(str::trim)
