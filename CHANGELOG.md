@@ -1,5 +1,9 @@
 # Changelog
 
+## Version 0.3.1 (2026-07-12)
+
+- Add a static x86_64 Linux release for older-glibc systems such as CerpacNAS.
+
 ## Version 0.3.0 (2026-07-12)
 
 - Make workspace creation and switching transactional, including rollback of
