@@ -190,4 +190,29 @@ mod tests {
         assert!(matches!(error, RemovalError::Close(_)));
         assert_eq!(effects.steps, [Step::RemoveWorkspace, Step::CloseContainer]);
     }
+
+    #[test]
+    fn marker_cleanup_failure_reports_recovery_path_after_removal() {
+        let marker = Path::new("/state/workspace-w2.json");
+        let target = CloseTarget::Workspace("w2".to_owned());
+        let mut effects = FakeEffects {
+            fail_at: Some(Step::ClearMarker),
+            ..FakeEffects::default()
+        };
+
+        let error = execute_removal(plan(&target, Some(marker)), &mut effects).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RemovalError::Marker { ref path, .. } if path == marker
+        ));
+        assert_eq!(
+            effects.steps,
+            [
+                Step::RemoveWorkspace,
+                Step::CloseContainer,
+                Step::ClearMarker
+            ]
+        );
+    }
 }
