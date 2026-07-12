@@ -127,6 +127,20 @@ jw ls
 jw remove frontend tests
 ```
 
+## Removing workspaces
+
+When a workspace has a bookmark created by `jw`, `jw remove` asks before deleting
+that bookmark. The safe default is to keep it. Scripts can choose explicitly:
+
+```bash
+jw remove --delete-bookmark feature-api
+jw remove --keep-bookmark feature-api
+```
+
+Removal is planned before mutation, so default/current-workspace checks and bookmark
+choices happen before the workspace is forgotten. `--keep-dir` forgets the workspace
+without deleting its directory.
+
 ## Config
 
 `jw` reads user config from `$XDG_CONFIG_HOME/jj-waltz/config.toml`, or

@@ -32,6 +32,8 @@ Important options and tokens:
 - `--bookmark <name>` creates a bookmark in a new workspace
 - `--execute <command>` runs a command after switching instead of changing the current shell directory
 - `--no-links` skips link application during `add` or `switch`
+- `--delete-bookmark` removes an associated bookmark without prompting during `remove`
+- `--keep-bookmark` preserves an associated bookmark without prompting during `remove`
 - `@` means current workspace
 - `-` means previous workspace
 - `^` and `default` resolve to the default workspace
@@ -164,12 +166,15 @@ When users need to understand or clean up workspace state:
 - `jw list`/`jw l`/`jw ls` shows known workspaces and marks current, previous, and default entries
 - `jw remove <name>...` forgets workspaces and deletes their directories by default
 - `jw remove --keep-dir <name>...` forgets them but leaves directories in place
+- `jw remove` asks before deleting a bookmark that `jw` associated with the workspace
+- `--delete-bookmark` and `--keep-bookmark` make that choice explicit for scripts
 - `jw prune` forgets missing workspaces
 
 Warn about the important safeguards:
 
 - removing `default` is refused
 - deleting the current workspace directory is refused until the user switches away first
+- declining or skipping the bookmark prompt preserves the bookmark
 
 ## Response format
 
