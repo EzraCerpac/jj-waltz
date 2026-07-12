@@ -24,27 +24,58 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            plugins/herdr -> target
       - name: Format check
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path plugins/herdr/Cargo.toml --all --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo clippy --locked --manifest-path plugins/herdr/Cargo.toml --all-targets --all-features -- -D warnings
 
   test:
+    name: test (jj ${{ matrix.jj_version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        jj_version: ["0.39.0", "0.43.0"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install jj
+        env:
+          JJ_VERSION: ${{ matrix.jj_version }}
         run: |
           mkdir -p /tmp/jj-install
-          curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jj-vcs/jj/releases/download/v0.39.0/jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz \
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
             | tar -xzf - -C /tmp/jj-install
           install /tmp/jj-install/jj /usr/local/bin/jj
+          jj --version
       - name: Check lockfile
-        run: cargo check
+        run: cargo check --locked
       - name: Test
-        run: cargo test
+        run: cargo test --locked
+
+  herdr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/herdr -> target
+      - name: Check lockfile
+        run: cargo check --locked --manifest-path plugins/herdr/Cargo.toml
+      - name: Test
+        run: cargo test --locked --manifest-path plugins/herdr/Cargo.toml
+      - name: Build
+        run: cargo build --locked --manifest-path plugins/herdr/Cargo.toml
 
   build:
     strategy:

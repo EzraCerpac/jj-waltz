@@ -47,4 +47,6 @@ description = "remove jw workspace"
 
 `remove` asks for confirmation, refuses the default JJ workspace, delegates deletion
 to `jw remove`, then closes the containing Herdr workspace or tab. Bookmarks follow
-normal `jw remove` behavior.
+normal `jw remove` behavior. The container marker is cleared only after Herdr reports
+a successful close. A failed or process-ending close may leave a stale marker, which
+is safe because markers are trusted only when their recorded checkout root matches.
