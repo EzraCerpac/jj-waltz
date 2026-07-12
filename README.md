@@ -59,7 +59,7 @@ workspace paths, links, bookmarks, and removal checks to it. See
 ## Workspace links
 
 If you keep large ignored data in one workspace and want it accessible from others,
-define links in `.jwlinks.toml`:
+define links in the default workspace's `.jwlinks.toml`:
 
 ```toml
 [[link]]
@@ -69,7 +69,13 @@ required = true
 ```
 
 When you run `jw switch`, `jw` creates symlinks in the target workspace unless you pass
-`--no-links`. You can also run `jw links apply` manually.
+`--no-links`. You can also run `jw links apply` manually from any workspace; it still
+uses the default workspace's configuration. Relative targets resolve from the workspace
+receiving the links.
+
+Sources must stay inside the receiving workspace. Absolute sources and parent traversal
+such as `../outside` are rejected. All rules are checked before `jw` changes the filesystem,
+so a later conflict does not leave earlier links behind.
 
 For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep ignored).
 

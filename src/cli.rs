@@ -413,8 +413,7 @@ fn print_remove_result(name: &str, path: &Path, delete_dir: bool) {
 }
 
 fn apply_links_for_path(path: &Path, quiet: bool) -> Result<()> {
-    let config_root = workspace::default_workspace_root().unwrap_or_else(|_| path.to_path_buf());
-    let links_report = links::apply_workspace_links_with_config_root(&config_root, path)?;
+    let links_report = workspace_links_for_path(path)?;
     if !quiet && links_report.has_entries() {
         println!(
             "Links: {} created, {} already satisfied, {} missing target",
@@ -422,6 +421,12 @@ fn apply_links_for_path(path: &Path, quiet: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn workspace_links_for_path(path: &Path) -> Result<links::LinkApplyReport> {
+    let config_root = workspace::default_workspace_root()
+        .context("failed to locate default workspace link configuration")?;
+    links::apply_workspace_links(&config_root, path)
 }
 
 fn run_prune() -> Result<()> {
@@ -453,7 +458,7 @@ fn run_links(cmd: LinksCommand) -> Result<()> {
     match cmd.command {
         LinksSubcommand::Apply => {
             let root = workspace::workspace_root_current()?;
-            let report = links::apply_workspace_links(&root)?;
+            let report = workspace_links_for_path(&root)?;
             println!(
                 "Links: {} created, {} already satisfied, {} missing target",
                 report.linked, report.satisfied, report.skipped_missing_target
