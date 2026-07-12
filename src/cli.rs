@@ -1,10 +1,11 @@
 use crate::config::{self, Config};
 use crate::links;
-use crate::shell::{self, ShellKind};
+use crate::shell::{self, Shell};
 use crate::workspace::{self, AddOptions, SwitchOptions};
 use anyhow::{Context, Result, bail};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use std::ffi::OsString;
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{ArgValueCompleter, CompletionCandidate};
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -26,7 +27,10 @@ pub struct Cli {
 enum Commands {
     #[command(about = "Create one or more workspaces")]
     Add(AddCommand),
-    #[command(alias = "s", about = "Switch to or create a workspace")]
+    #[command(
+        visible_aliases = shell::SWITCH_ALIASES,
+        about = "Switch to or create a workspace"
+    )]
     Switch(SwitchCommand),
     #[command(aliases = ["l", "ls"], about = "List known workspaces")]
     List,
@@ -50,7 +54,12 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct AddCommand {
-    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    #[arg(
+        value_name = "NAME",
+        num_args = 1..,
+        required = true,
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(
         long,
@@ -77,7 +86,12 @@ struct AddCommand {
 
 #[derive(Debug, Args)]
 struct SwitchCommand {
-    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    #[arg(
+        value_name = "NAME",
+        num_args = 1..,
+        required = true,
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(
         long,
@@ -127,13 +141,19 @@ enum LinksSubcommand {
 
 #[derive(Debug, Args)]
 struct PathCommand {
-    #[arg(value_name = "NAME")]
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     name: String,
 }
 
 #[derive(Debug, Args)]
 struct RemoveCommand {
-    #[arg(value_name = "NAME")]
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(long, action = ArgAction::SetTrue, help = "Forget the workspace but keep its directory")]
     keep_dir: bool,
@@ -142,7 +162,7 @@ struct RemoveCommand {
 #[derive(Debug, Args)]
 struct CompletionCommand {
     #[arg(value_enum)]
-    shell: ShellArg,
+    shell: Shell,
 }
 
 #[derive(Debug, Args)]
@@ -155,38 +175,16 @@ struct ShellCommand {
 enum ShellSubcommand {
     Init(ShellInitCommand),
     Completions(CompletionCommand),
-    #[command(hide = true)]
-    CompleteWorkspaces,
 }
 
 #[derive(Debug, Args)]
 struct ShellInitCommand {
     #[arg(value_enum)]
-    shell: ShellArg,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum ShellArg {
-    Bash,
-    Elvish,
-    Fish,
-    Powershell,
-    Zsh,
-}
-
-impl From<ShellArg> for ShellKind {
-    fn from(value: ShellArg) -> Self {
-        match value {
-            ShellArg::Bash => ShellKind::Bash,
-            ShellArg::Elvish => ShellKind::Elvish,
-            ShellArg::Fish => ShellKind::Fish,
-            ShellArg::Powershell => ShellKind::Powershell,
-            ShellArg::Zsh => ShellKind::Zsh,
-        }
-    }
+    shell: Shell,
 }
 
 pub fn run() -> Result<()> {
+    shell::complete_if_requested(Cli::command);
     let cli = Cli::parse_from(normalized_args());
 
     match cli.command {
@@ -200,13 +198,17 @@ pub fn run() -> Result<()> {
         Commands::Current => print_line(workspace::current_workspace_name()?),
         Commands::Shell(cmd) => run_shell(cmd),
         Commands::Links(cmd) => run_links(cmd),
-        Commands::Completions(cmd) => run_completions(cmd.shell.into()),
+        Commands::Completions(cmd) => run_completions(cmd.shell),
     }
 }
 
 fn normalized_args() -> Vec<OsString> {
     let mut args = std::env::args_os().collect::<Vec<_>>();
-    if matches!(args.get(1).and_then(|arg| arg.to_str()), Some("^" | "-")) {
+    if args
+        .get(1)
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|arg| shell::SWITCH_SHORTHANDS.contains(&arg))
+    {
         let target = args[1].clone();
         args[1] = OsString::from("switch");
         args.insert(2, target);
@@ -435,17 +437,15 @@ fn run_prune() -> Result<()> {
 
 fn run_shell(cmd: ShellCommand) -> Result<()> {
     match cmd.command {
-        ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell.into())?),
-        ShellSubcommand::Completions(cmd) => run_completions(cmd.shell.into()),
-        ShellSubcommand::CompleteWorkspaces => run_complete_workspaces(),
+        ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell)?),
+        ShellSubcommand::Completions(cmd) => run_completions(cmd.shell),
     }
 }
 
-fn run_completions(shell: ShellKind) -> Result<()> {
-    let mut command = Cli::command();
+fn run_completions(shell: Shell) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    shell::write_completions(shell, &mut command, &mut handle)?;
+    shell::write_completions(shell, &mut handle)?;
     Ok(())
 }
 
@@ -509,10 +509,21 @@ fn print_line(value: impl std::fmt::Display) -> Result<()> {
     Ok(())
 }
 
-fn run_complete_workspaces() -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    for (candidate, description) in workspace::completion_workspace_candidates()? {
-        writeln!(stdout, "{candidate}\t{description}").context("failed to write stdout")?;
-    }
-    Ok(())
+fn complete_workspaces(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy();
+    let candidates = match workspace::completion_workspace_candidates() {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            eprintln!("jw: failed to complete workspaces: {error:#}");
+            return Vec::new();
+        }
+    };
+
+    candidates
+        .into_iter()
+        .filter(|(candidate, _)| candidate.starts_with(current.as_ref()))
+        .map(|(candidate, description)| {
+            CompletionCandidate::new(candidate).help(Some(description.into()))
+        })
+        .collect()
 }

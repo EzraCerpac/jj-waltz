@@ -87,6 +87,12 @@ eval "$(jw shell init zsh)"
 
 # fish
 jw shell init fish | source
+
+# elvish
+eval (jw shell init elvish | slurp)
+
+# PowerShell
+jw shell init powershell | Out-String | Invoke-Expression
 ```
 
 Without shell initialization, the raw `jw` binary can only print the target path
@@ -98,6 +104,8 @@ To generate completions manually:
 jw shell completions fish
 jw shell completions zsh
 jw shell completions bash
+jw shell completions elvish
+jw shell completions powershell
 ```
 
 ## Quick start

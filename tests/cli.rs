@@ -7,6 +7,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
+struct ShellCase {
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+const POWERSHELL_SWITCH_TEST_ARGS: &[&str] = &[
+    "-NoLogo",
+    "-NoProfile",
+    "-Command",
+    "jw shell init powershell | Out-String | Invoke-Expression; jw '^' | Out-Null; (Get-Location).Path; jw '-' | Out-Null; (Get-Location).Path",
+];
+
 fn jj_available() -> bool {
     Command::new("jj")
         .arg("--version")
@@ -373,83 +386,98 @@ fn previous_shorthand_rejects_multiline_state_record() {
 }
 
 #[test]
-fn fish_init_switches_default_and_previous_shorthands() {
+fn installed_shell_init_adapters_switch_default_and_previous_shorthands() {
     skip_without_jj!();
-    if !command_available("fish") {
-        eprintln!("skipping test because `fish` is not installed");
-        return;
+
+    let cases = [
+        ShellCase {
+            name: "bash",
+            program: "bash",
+            args: &[
+                "--noprofile",
+                "--norc",
+                "-c",
+                "eval \"$(jw shell init bash)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+            ],
+        },
+        ShellCase {
+            name: "elvish",
+            program: "elvish",
+            args: &[
+                "-norc",
+                "-c",
+                "eval (jw shell init elvish | slurp); jw '^' > /dev/null; pwd; jw '-' > /dev/null; pwd",
+            ],
+        },
+        ShellCase {
+            name: "fish",
+            program: "fish",
+            args: &[
+                "--no-config",
+                "-c",
+                "jw shell init fish | source; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+            ],
+        },
+        ShellCase {
+            name: "powershell",
+            program: "powershell",
+            args: POWERSHELL_SWITCH_TEST_ARGS,
+        },
+        ShellCase {
+            name: "powershell",
+            program: "pwsh",
+            args: POWERSHELL_SWITCH_TEST_ARGS,
+        },
+        ShellCase {
+            name: "zsh",
+            program: "zsh",
+            args: &[
+                "-f",
+                "-c",
+                "eval \"$(jw shell init zsh)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
+            ],
+        },
+    ];
+
+    for case in cases {
+        if !command_available(case.program) {
+            eprintln!(
+                "skipping {} because `{}` is not installed",
+                case.name, case.program
+            );
+            continue;
+        }
+
+        let repo = TestRepo::new().expect("create test repo");
+        let feature_root = repo.default_root.with_extension("feature-a");
+        repo.cmd().args(["switch", "feature-a"]).assert().success();
+
+        let output = Command::new(case.program)
+            .current_dir(&feature_root)
+            .env("PATH", test_binary_path())
+            .env("XDG_CONFIG_HOME", &repo.config_home)
+            .args(case.args)
+            .output()
+            .unwrap_or_else(|error| panic!("run {} shell integration: {error}", case.name));
+
+        assert!(
+            output.status.success(),
+            "{} shell integration failed\nstdout: {}\nstderr: {}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            vec![path_string(&repo.default_root), path_string(&feature_root)],
+            "{} shell integration returned wrong directories",
+            case.name
+        );
     }
-
-    let repo = TestRepo::new().expect("create test repo");
-    let feature_root = repo.default_root.with_extension("feature-a");
-    repo.cmd().args(["switch", "feature-a"]).assert().success();
-
-    let output = Command::new("fish")
-        .current_dir(&feature_root)
-        .env("PATH", test_binary_path())
-        .env("XDG_CONFIG_HOME", &repo.config_home)
-        .args([
-            "--no-config",
-            "-c",
-            "jw shell init fish | source; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
-        ])
-        .output()
-        .expect("run fish shell integration");
-
-    assert!(
-        output.status.success(),
-        "fish shell integration failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lines = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        lines,
-        vec![path_string(&repo.default_root), path_string(&feature_root)]
-    );
-}
-
-#[test]
-fn zsh_init_switches_default_and_previous_shorthands() {
-    skip_without_jj!();
-    if !command_available("zsh") {
-        eprintln!("skipping test because `zsh` is not installed");
-        return;
-    }
-
-    let repo = TestRepo::new().expect("create test repo");
-    let feature_root = repo.default_root.with_extension("feature-a");
-    repo.cmd().args(["switch", "feature-a"]).assert().success();
-
-    let output = Command::new("zsh")
-        .current_dir(&feature_root)
-        .env("PATH", test_binary_path())
-        .env("XDG_CONFIG_HOME", &repo.config_home)
-        .args([
-            "-f",
-            "-c",
-            "eval \"$(jw shell init zsh)\"; jw ^ >/dev/null; pwd; jw - >/dev/null; pwd",
-        ])
-        .output()
-        .expect("run zsh shell integration");
-
-    assert!(
-        output.status.success(),
-        "zsh shell integration failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lines = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        lines,
-        vec![path_string(&repo.default_root), path_string(&feature_root)]
-    );
 }
 
 #[test]
@@ -465,51 +493,22 @@ fn list_accepts_ls_alias() {
 }
 
 #[test]
-fn completions_command_generates_fish_script() {
-    skip_without_jj!();
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .args(["shell", "completions", "fish"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("__jw_workspace_candidates"))
-        .stdout(predicate::str::contains(
-            "add 'Create one or more workspaces'",
-        ))
-        .stdout(predicate::str::contains("-l keep-dir"))
-        .stdout(predicate::str::contains(
-            "'^' 'Switch to default workspace'",
-        ))
-        .stdout(predicate::str::contains(
-            "'-' 'Switch to previous workspace'",
-        ))
-        .stdout(predicate::str::contains("ls 'Alias for list'"))
-        .stdout(predicate::str::contains(
-            "switch 'Switch to or create a workspace'",
-        ));
-}
+fn completions_command_generates_clap_registration_for_every_shell() {
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        Command::cargo_bin("jw")
+            .expect("binary")
+            .args(["shell", "completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("_JW_COMPLETE"));
 
-#[test]
-fn completions_command_generates_zsh_script() {
-    skip_without_jj!();
-    Command::cargo_bin("jw")
-        .expect("binary")
-        .args(["shell", "completions", "zsh"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("_jw_workspace_candidates"))
-        .stdout(predicate::str::contains(
-            "add:Create one or more workspaces",
-        ))
-        .stdout(predicate::str::contains(
-            "--keep-dir[Forget the workspace but keep its directory]",
-        ))
-        .stdout(predicate::str::contains("^:Switch to default workspace"))
-        .stdout(predicate::str::contains("-:Switch to previous workspace"))
-        .stdout(predicate::str::contains("ls:Alias for list"))
-        .stdout(predicate::str::contains(
-            "switch:Switch to or create a workspace",
-        ));
+        Command::cargo_bin("jw")
+            .expect("binary")
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("_JW_COMPLETE"));
+    }
 }
 
 #[test]
@@ -603,19 +602,71 @@ fn remove_batch_stops_at_first_error_after_completed_removals() {
 }
 
 #[test]
-fn completion_helper_lists_workspace_candidates() {
+fn clap_completion_combines_cli_metadata_and_workspace_candidates() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
 
     repo.cmd().args(["switch", "feature-a"]).assert().success();
 
     repo.cmd()
-        .args(["shell", "complete-workspaces"])
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "sw"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("feature-a\tExisting workspace"))
+        .stdout(predicate::str::contains(
+            "switch\tSwitch to or create a workspace",
+        ));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "switch", "fea"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feature-a\tExisting workspace"));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "switch", ""])
+        .assert()
+        .success()
         .stdout(predicate::str::contains("@\tCurrent workspace"))
+        .stdout(predicate::str::contains("-\tPrevious workspace"))
         .stdout(predicate::str::contains("^\tDefault workspace"));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "remove", "--k"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "--keep-dir\tForget the workspace but keep its directory",
+        ));
+
+    repo.cmd()
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "-"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "-\tSwitch to or create a workspace",
+        ));
+}
+
+#[test]
+fn clap_completion_reports_workspace_discovery_errors() {
+    skip_without_jj!();
+    let directory = TempDir::new().expect("create temporary directory");
+
+    Command::cargo_bin("jw")
+        .expect("binary")
+        .current_dir(directory.path())
+        .env("_JW_COMPLETE", "fish")
+        .args(["--", "jw", "switch", ""])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "jw: failed to complete workspaces",
+        ));
 }
 
 #[test]
