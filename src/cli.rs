@@ -399,6 +399,12 @@ fn print_remove_result(result: &workspace::RemovalResult) {
     }
 }
 
+fn workspace_links_for_path(path: &Path) -> Result<links::LinkApplyReport> {
+    let config_root = workspace::default_workspace_root()
+        .context("failed to locate default workspace link configuration")?;
+    links::apply_workspace_links(&config_root, path)
+}
+
 fn run_prune() -> Result<()> {
     let removed = workspace::prune_missing_workspaces()?;
     for name in &removed {
@@ -428,7 +434,7 @@ fn run_links(cmd: LinksCommand) -> Result<()> {
     match cmd.command {
         LinksSubcommand::Apply => {
             let root = workspace::workspace_root_current()?;
-            let report = links::apply_workspace_links(&root)?;
+            let report = workspace_links_for_path(&root)?;
             println!(
                 "Links: {} created, {} already satisfied, {} missing target",
                 report.linked, report.satisfied, report.skipped_missing_target

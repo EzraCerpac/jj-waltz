@@ -6,6 +6,8 @@
 //! Modal rendering is adapted from Nathan Flurry's MIT-licensed
 //! `herdr-plugin-jj-workspace`; see `LICENSE-THIRD-PARTY`.
 
+mod removal;
+
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -29,6 +31,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use serde::{Deserialize, Serialize};
+
+use removal::{CloseTarget, RemovalEffects, RemovalPlan, execute_removal};
 
 type Result<T> = std::result::Result<T, AppError>;
 
@@ -232,24 +236,47 @@ fn cmd_remove() -> Result<()> {
         return Ok(());
     }
 
-    jw_output(&["remove", &name], &default_root).map_err(AppError::pane)?;
-    let mut close = Command::new(herdr_bin());
-    match &target {
-        CloseTarget::Workspace(id) => {
-            close.args(["workspace", "close", id]);
-        }
-        CloseTarget::Tab(id) => {
-            close.args(["tab", "close", id]);
-        }
+    let mut effects = CommandRemovalEffects;
+    execute_removal(
+        RemovalPlan {
+            name: &name,
+            default_root: &default_root,
+            target: &target,
+            marker: marker.as_deref(),
+        },
+        &mut effects,
+    )
+    .map_err(|error| AppError::pane(error.to_string()))
+}
+
+struct CommandRemovalEffects;
+
+impl RemovalEffects for CommandRemovalEffects {
+    fn remove_workspace(
+        &mut self,
+        name: &str,
+        default_root: &Path,
+    ) -> std::result::Result<(), String> {
+        jw_output(&["remove", name], default_root).map(|_| ())
     }
-    if let Some(marker) = marker {
-        let _ = fs::remove_file(marker);
+
+    fn close_container(&mut self, target: &CloseTarget) -> std::result::Result<(), String> {
+        let mut close = Command::new(herdr_bin());
+        match target {
+            CloseTarget::Workspace(id) => {
+                close.args(["workspace", "close", id]);
+            }
+            CloseTarget::Tab(id) => {
+                close.args(["tab", "close", id]);
+            }
+        }
+        checked_status(close, "close removed checkout in Herdr")
     }
-    checked_status(close, "close removed checkout in Herdr").map_err(|error| {
-        AppError::pane(format!(
-            "JJ workspace was removed, but Herdr close failed: {error}"
-        ))
-    })
+
+    fn clear_marker(&mut self, marker: &Path) -> std::result::Result<(), String> {
+        fs::remove_file(marker)
+            .map_err(|error| format!("cannot remove {}: {error}", marker.display()))
+    }
 }
 
 fn required_path_env(name: &str) -> Result<PathBuf> {
@@ -333,21 +360,6 @@ fn canonical(path: &Path) -> std::result::Result<PathBuf, String> {
 
 fn is_default_workspace(root: &Path, default_root: &Path) -> bool {
     root == default_root
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum CloseTarget {
-    Workspace(String),
-    Tab(String),
-}
-
-impl CloseTarget {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Workspace(_) => "Herdr workspace",
-            Self::Tab(_) => "Herdr tab",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

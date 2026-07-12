@@ -834,6 +834,33 @@ fn switch_uses_default_workspace_link_config() {
 }
 
 #[test]
+fn links_apply_uses_default_workspace_config_from_non_default_workspace() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd()
+        .args(["switch", "feature-a", "--no-links"])
+        .assert()
+        .success();
+
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(
+        repo.default_root.join(".jwlinks.local.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write default workspace links config");
+
+    let feature_root = repo.default_root.with_extension("feature-a");
+    repo.cmd_at(&feature_root)
+        .args(["links", "apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links: 1 created"));
+
+    let metadata = fs::symlink_metadata(feature_root.join("data")).expect("link metadata");
+    assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
 fn switch_accepts_existing_directory_when_it_matches_target() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");

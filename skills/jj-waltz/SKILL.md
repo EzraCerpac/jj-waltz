@@ -132,7 +132,9 @@ Use link troubleshooting whenever the user mentions shared ignored directories, 
 Ground your advice in the actual behavior:
 
 - `.jwlinks.toml` and `.jwlinks.local.toml` are both supported.
+- Both files are owned by the default workspace, including when `jw links apply` runs elsewhere.
 - `.jwlinks.local.toml` can override entries from `.jwlinks.toml` with the same `source`.
+- Relative `source` paths must stay inside the receiving workspace; absolute paths and `..` are rejected.
 - Relative `target` paths are interpreted from the workspace root.
 - `required = true` turns a missing target into an error.
 - A missing optional target is skipped, not linked.
@@ -150,7 +152,7 @@ required = true
 
 For link problems, suggest checks in this order:
 
-1. inspect the relevant `.jwlinks.toml` or `.jwlinks.local.toml`
+1. inspect `.jwlinks.toml` or `.jwlinks.local.toml` in the default workspace
 2. verify whether the target exists
 3. inspect the source path inside the workspace to see whether it is absent, already correct, or conflicting
 4. rerun `jw links apply` or `jw switch <name>` once the underlying issue is fixed

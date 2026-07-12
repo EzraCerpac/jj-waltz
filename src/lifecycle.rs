@@ -176,8 +176,9 @@ fn apply_links(path: &Path, enabled: bool) -> Result<Option<LinkApplyReport>> {
     if !enabled {
         return Ok(None);
     }
-    let config_root = workspace::default_workspace_root().unwrap_or_else(|_| path.to_path_buf());
-    links::apply_workspace_links_with_config_root(&config_root, path).map(Some)
+    let config_root = workspace::default_workspace_root()
+        .context("failed to locate default workspace link configuration")?;
+    links::apply_workspace_links(&config_root, path).map(Some)
 }
 
 fn rollback_after(error: Error, created: &[CreatedWorkspace]) -> Error {
