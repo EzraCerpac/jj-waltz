@@ -532,6 +532,93 @@ fn remove_deletes_workspace_directory_by_default() {
 }
 
 #[test]
+fn remove_prompts_before_deleting_associated_bookmark() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["switch", "--bookmark", "custom-marker", "feature-a"])
+        .assert()
+        .success();
+
+    let mut remove = repo.cmd();
+    remove.args(["remove", "feature-a"]);
+    assert_cmd::Command::from_std(remove)
+        .write_stdin("y\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Delete associated bookmark 'custom-marker'? [y/N]",
+        ))
+        .stdout(predicate::str::contains("Deleted bookmark: custom-marker"));
+
+    assert!(!repo.bookmarks().contains(&"custom-marker".to_owned()));
+}
+
+#[test]
+fn remove_keeps_associated_bookmark_when_prompt_is_declined() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["switch", "--bookmark", "wip/feature-a", "feature-a"])
+        .assert()
+        .success();
+
+    let mut remove = repo.cmd();
+    remove.args(["remove", "feature-a"]);
+    assert_cmd::Command::from_std(remove)
+        .write_stdin("n\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted bookmark:").not());
+
+    assert!(repo.bookmarks().contains(&"wip/feature-a".to_owned()));
+}
+
+#[test]
+fn remove_bookmark_flags_support_noninteractive_callers() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["add", "--bookmark", "wip/feature-a", "feature-a"])
+        .assert()
+        .success();
+    repo.cmd()
+        .args(["remove", "--keep-bookmark", "feature-a"])
+        .assert()
+        .success();
+    assert!(repo.bookmarks().contains(&"wip/feature-a".to_owned()));
+
+    repo.cmd()
+        .args(["add", "--bookmark", "wip/feature-b", "feature-b"])
+        .assert()
+        .success();
+    repo.cmd()
+        .args(["remove", "--delete-bookmark", "feature-b"])
+        .assert()
+        .success();
+    assert!(!repo.bookmarks().contains(&"wip/feature-b".to_owned()));
+}
+
+#[test]
+fn remove_does_not_treat_unrelated_bookmark_at_same_commit_as_associated() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd().args(["add", "feature-a"]).assert().success();
+    repo.run_jj(["bookmark", "create", "unrelated", "-r", "feature-a@"]);
+    repo.cmd()
+        .args(["remove", "--delete-bookmark", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted bookmark:").not());
+
+    assert!(repo.bookmarks().contains(&"unrelated".to_owned()));
+}
+
+#[test]
 fn remove_deletes_multiple_workspace_directories_by_default() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -653,6 +740,62 @@ fn switch_applies_workspace_links_for_data_directory() {
         .join("data");
     let metadata = fs::symlink_metadata(&workspace_data).expect("metadata");
     assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
+fn add_rolls_back_workspace_when_required_link_is_missing() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let workspace_root = repo.default_root.with_extension("feature-a");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/missing\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd()
+        .args(["add", "feature-a"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required link target is missing"));
+
+    assert!(!workspace_root.exists());
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn switch_rolls_back_workspace_before_recording_previous_on_link_failure() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/missing\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd().args(["switch", "feature-a"]).assert().failure();
+
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    repo.cmd()
+        .arg("-")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no previous workspace recorded"));
+}
+
+#[test]
+fn add_cleans_workspace_when_bookmark_creation_fails() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let workspace_root = repo.default_root.with_extension("feature-a");
+
+    repo.cmd()
+        .args(["add", "--bookmark", "", "feature-a"])
+        .assert()
+        .failure();
+
+    assert!(!workspace_root.exists());
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
 }
 
 #[test]
@@ -824,6 +967,32 @@ impl TestRepo {
         assert!(
             output.status.success(),
             "jj bookmark list failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn workspace_names(&self) -> Vec<String> {
+        let output = Command::new("jj")
+            .current_dir(&self.default_root)
+            .args([
+                "workspace",
+                "list",
+                "-T",
+                "name ++ \"\\n\"",
+                "--color=never",
+            ])
+            .output()
+            .expect("list workspaces");
+        assert!(
+            output.status.success(),
+            "jj workspace list failed\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
