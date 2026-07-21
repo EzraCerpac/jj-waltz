@@ -4,9 +4,8 @@
 interfaces. Callers should not reproduce Jujutsu command grammar, lifecycle order,
 link validation, or shell switching policy.
 
-This document separates current modules from milestone-zero contracts. A contract
-describes where behavior belongs; it does not make an unimplemented CLI command
-available.
+This document separates milestone-zero behavior from later publication and forge
+work. The current command surface remains authoritative in `jw --help`.
 
 ## Product boundary
 
@@ -30,6 +29,13 @@ offline.
 - `lifecycle` owns creation policy and ordered add/switch workflows. It loads user
   config once, applies links, records successful switches, and rolls back failed
   creations.
+- `jj` is the only production adapter that starts JJ. It owns frozen operation
+  queries, version compatibility, process policy, and typed command errors.
+- `observe` refreshes selected working copies, captures one final operation, and
+  derives `list`/`status` snapshots without renderer subprocesses.
+- `snapshot` defines schema-versioned JSON values and semantic status types.
+- `metadata` persists repository-scoped managed-workspace intent.
+- `doctor` runs independent read-only checks and always produces a complete report.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
 - `links` owns config merging, path confinement, preflight, and filesystem changes.
@@ -87,8 +93,7 @@ creation base and the explicit input to JJ. Zero or multiple parents are
 ambiguous and fail before mutation. A user who deliberately wants to continue
 from a merge working copy can select the single revision explicitly with
 `--at @`. Any other `--at <revset>` must likewise resolve to exactly one commit.
-This is an architecture contract until its implementation and tests land; the
-README feature list remains the shipped-behavior reference.
+Creation, switching, metadata provenance, and rollback implement this contract.
 
 ## Repository-scoped metadata
 
@@ -105,8 +110,10 @@ jj-waltz/
     workspace-<stable 128-bit id>.json
 ```
 
-`manifest.json` records schema version 1, a deterministic `repo-<id>` derived from
-the normalized canonical repository-config path, and that path for diagnostics.
+`manifest.json` records schema version 1 and a deterministic `repo-<id>` initially
+derived from the normalized canonical repository-config path. Once created, the
+manifest is authoritative, so moving the whole repository config directory and
+its adjacent `jj-waltz` store preserves repository identity.
 Each schema-versioned workspace record can be written, repaired, or removed
 independently and contains only `jw` lifecycle intent such as creation time,
 creation operation ID, immutable creation base, associated bookmark, and intended
@@ -115,11 +122,9 @@ replacement. Parse or identity errors are diagnostics, never permission to
 silently reset the store. No secrets or forge tokens belong here.
 
 This location is repository-scoped, shared by sibling workspaces, uncommitted,
-and avoids undocumented `.jj` layouts. Current limitation: moving or relinking a
-repository can change the canonical repository-config path and therefore its
-derived identity. A copied old manifest is rejected on identity mismatch; `jw`
-does not automatically discover, adopt, or relink it. Preserve the old store
-until identity is verified. Explicit migration or rediscovery is future work.
+and avoids undocumented `.jj` layouts. Moving only a checkout while leaving its
+repository config or copying a detached metadata store is not automatic
+migration; `jw` never searches arbitrary paths or silently adopts an old store.
 
 ## JSON schema version 1
 
@@ -147,6 +152,12 @@ new schema version. Human output is not governed by this machine contract.
 
 Mutation plans use the same versioned-envelope rule. ANSI escapes never appear
 in JSON.
+
+`doctor` deliberately uses a separate schema-versioned envelope. A repository
+snapshot requires one resolved trunk, while doctor must serialize useful checks
+when trunk resolves to zero or multiple revisions, metadata is corrupt, or a
+workspace path is missing. CLI rendering completes before an unhealthy doctor
+returns a failing exit status.
 
 ## Failure order
 

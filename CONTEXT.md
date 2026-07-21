@@ -92,3 +92,22 @@ by itself a claim that a command exposing that concept already exists.
 - JSON stdout contains only its versioned document; diagnostics use stderr.
 - Herdr provenance survives until Herdr close succeeds.
 - Shell adapters implement the same switching behavior.
+
+## Milestone-zero command contract
+
+- `jw list`, `jw l`, and `jw ls` keep the historical human output and fast path.
+  `--format=json` opts into a schema-versioned repository snapshot; its default
+  refresh is `current`, with `none` and `all` available explicitly.
+- `jw status [workspace]` selects `@` by default and derives human or JSON output
+  from one snapshot. `--refresh=none` does not reconcile a working copy and marks
+  its state unknown unless a hazard such as staleness is known.
+- `jw doctor` uses a separate versioned report. Every check renders even when
+  another fails, and an unhealthy report exits nonzero only after stdout is
+  complete.
+- `jw adopt NAME --base REVSET [--bookmark BOOKMARK]` adds managed metadata for
+  an existing usable workspace. It never moves revisions or bookmarks and never
+  refreshes a working copy. Creation-base and current-revision facts are reported;
+  stack analysis remains milestone-one work.
+- New workspace creation resolves an exact base before mutation. Implicit creation
+  requires exactly one `parents(@)` revision. A merge working copy therefore needs
+  an explicit exact base such as `--at @`.

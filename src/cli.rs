@@ -1,12 +1,19 @@
-use crate::lifecycle::{self, CreatedWorkspace, CreationPolicy};
+use crate::config::Config;
+use crate::doctor::DoctorEngine;
+use crate::jj::JjClient;
+use crate::lifecycle::{self, AdoptionRequest, CreatedWorkspace, CreationPolicy};
 use crate::links;
+use crate::observe::{ObservationEngine, RefreshMode, resolve_workspace_token};
 use crate::shell::{self, Shell};
+use crate::snapshot::{SnapshotEnvelope, WorkingCopyStatus};
 use crate::workspace;
 use anyhow::{Context, Result, bail};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{ArgValueCompleter, CompletionCandidate};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -34,7 +41,13 @@ enum Commands {
     )]
     Switch(SwitchCommand),
     #[command(aliases = ["l", "ls"], about = "List known workspaces")]
-    List,
+    List(ListCommand),
+    #[command(about = "Explain one workspace's semantic state")]
+    Status(StatusCommand),
+    #[command(about = "Diagnose repository and workspace configuration")]
+    Doctor(DoctorCommand),
+    #[command(about = "Record an existing workspace as managed")]
+    Adopt(AdoptCommand),
     #[command(about = "Print a workspace path")]
     Path(PathCommand),
     #[command(alias = "rm", about = "Forget a workspace")]
@@ -140,6 +153,86 @@ enum LinksSubcommand {
     Apply,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Plain,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ListRefresh {
+    None,
+    Current,
+    All,
+}
+
+impl From<ListRefresh> for RefreshMode {
+    fn from(value: ListRefresh) -> Self {
+        match value {
+            ListRefresh::None => Self::None,
+            ListRefresh::Current => Self::Current,
+            ListRefresh::All => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StatusRefresh {
+    None,
+    Current,
+}
+
+impl From<StatusRefresh> for RefreshMode {
+    fn from(value: StatusRefresh) -> Self {
+        match value {
+            StatusRefresh::None => Self::None,
+            StatusRefresh::Current => Self::Current,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct ListCommand {
+    #[arg(long, value_enum, default_value_t)]
+    format: OutputFormat,
+    #[arg(long, value_enum)]
+    refresh: Option<ListRefresh>,
+}
+
+#[derive(Debug, Args)]
+struct StatusCommand {
+    #[arg(
+        value_name = "WORKSPACE",
+        default_value = "@",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
+    workspace: String,
+    #[arg(long, value_enum, default_value_t)]
+    format: OutputFormat,
+    #[arg(long, value_enum, default_value = "current")]
+    refresh: StatusRefresh,
+}
+
+#[derive(Debug, Args)]
+struct DoctorCommand {
+    #[arg(long, value_enum, default_value_t)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct AdoptCommand {
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
+    name: String,
+    #[arg(long, value_name = "REVSET", required = true)]
+    base: String,
+    #[arg(long, value_name = "BOOKMARK")]
+    bookmark: Option<String>,
+}
+
 #[derive(Debug, Args)]
 struct PathCommand {
     #[arg(
@@ -205,7 +298,10 @@ pub fn run() -> Result<()> {
     match cli.command {
         Commands::Add(cmd) => run_add(cmd),
         Commands::Switch(cmd) => run_switch(cmd),
-        Commands::List => run_list(),
+        Commands::List(cmd) => run_list(cmd),
+        Commands::Status(cmd) => run_status(cmd),
+        Commands::Doctor(cmd) => run_doctor(cmd),
+        Commands::Adopt(cmd) => run_adopt(cmd),
         Commands::Path(cmd) => run_path(cmd),
         Commands::Remove(cmd) => run_remove(cmd),
         Commands::Prune => run_prune(),
@@ -323,7 +419,24 @@ fn print_links_report(report: Option<&links::LinkApplyReport>, quiet: bool) {
     }
 }
 
-fn run_list() -> Result<()> {
+fn run_list(cmd: ListCommand) -> Result<()> {
+    if cmd.format == OutputFormat::Plain {
+        if cmd.refresh.is_some() {
+            bail!("--refresh requires --format=json for `jw list`");
+        }
+        return run_list_plain();
+    }
+
+    let config = Config::load()?;
+    validate_trunk_revset(&config.trunk.revset)?;
+    let envelope = ObservationEngine::new(JjClient::current()?, config.trunk.revset)?
+        .capture_list(cmd.refresh.unwrap_or(ListRefresh::Current).into())?;
+    write_json(&envelope)
+}
+
+// Compatibility contract: plain list remains the pre-snapshot implementation. In particular, it
+// does not load config, metadata, or trunk and therefore keeps its exact historical output.
+fn run_list_plain() -> Result<()> {
     let inventory = workspace::WorkspaceInventory::load()?;
     for entry in inventory.entries() {
         let marker = inventory.marker(&entry.name);
@@ -336,6 +449,165 @@ fn run_list() -> Result<()> {
         println!("{marker} {}\t{path}", entry.name);
     }
 
+    Ok(())
+}
+
+fn run_status(cmd: StatusCommand) -> Result<()> {
+    let config = Config::load()?;
+    validate_trunk_revset(&config.trunk.revset)?;
+    let envelope = ObservationEngine::new(JjClient::current()?, config.trunk.revset)?
+        .capture_status(&cmd.workspace, cmd.refresh.into())?;
+    match cmd.format {
+        OutputFormat::Json => write_json(&envelope),
+        OutputFormat::Plain => write_text(&render_status_plain(&envelope)),
+    }
+}
+
+fn run_doctor(cmd: DoctorCommand) -> Result<()> {
+    let config = Config::load()?;
+    let report = DoctorEngine::current(config.trunk.revset)?.run();
+    match cmd.format {
+        OutputFormat::Json => write_json(&report)?,
+        OutputFormat::Plain => write_text(&report.render_plain())?,
+    }
+    if report.has_errors() {
+        bail!("doctor found repository errors")
+    }
+    Ok(())
+}
+
+fn run_adopt(cmd: AdoptCommand) -> Result<()> {
+    let current_client = JjClient::current()?;
+    let resolved = resolve_workspace_token(&current_client, &cmd.name)?;
+    let path = resolved
+        .path
+        .filter(|path| path.is_dir())
+        .with_context(|| format!("workspace path is missing or unusable: {}", resolved.name))?;
+
+    // Freeze current revision before writing metadata. Both queries ignore the working copy and do
+    // not create JJ operations.
+    let workspace_client = JjClient::new(&path);
+    let operation_id = workspace_client.operation_id()?;
+    let current_revision = workspace_client.resolve_one_at(&operation_id, "@")?;
+    let result = lifecycle::adopt_workspace(&AdoptionRequest {
+        workspace_name: resolved.name.clone(),
+        workspace_root: path.clone(),
+        base_revset: cmd.base,
+        bookmark: cmd.bookmark,
+    })?;
+
+    let bookmark = result
+        .metadata
+        .associated_bookmark
+        .as_deref()
+        .unwrap_or("(none)");
+    let output = format!(
+        "Adopted workspace: {}\n  path: {}\n  creation base: {}\n  frozen operation: {}\n  current revision: {} ({})\n  bookmark: {}\n  stack analysis: deferred to milestone 1\n",
+        result.metadata.workspace_name,
+        path.display(),
+        result.metadata.creation_base_commit_id,
+        result.metadata.creation_operation_id,
+        current_revision.commit_id,
+        current_revision.change_id,
+        bookmark,
+    );
+    write_text(&output)
+}
+
+fn validate_trunk_revset(revset: &str) -> Result<()> {
+    if revset.trim().is_empty() {
+        bail!("configured trunk revset is blank; set `[trunk].revset` to an exact-one revset")
+    }
+    Ok(())
+}
+
+fn render_status_plain(envelope: &SnapshotEnvelope) -> String {
+    let workspace = envelope
+        .workspaces
+        .first()
+        .expect("status envelope contains one workspace");
+    let mut output = String::new();
+    writeln!(output, "workspace: {}", workspace.name).expect("write string");
+    writeln!(
+        output,
+        "path: {}",
+        workspace
+            .path
+            .as_deref()
+            .map_or_else(|| "(missing)".into(), |path| path.display().to_string())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "roles: current={} previous={} default={}",
+        workspace.role.current, workspace.role.previous, workspace.role.default
+    )
+    .expect("write string");
+    writeln!(output, "management: {:?}", workspace.management).expect("write string");
+    writeln!(
+        output,
+        "working copy: {}{}",
+        describe_working_copy(workspace.working_copy),
+        if workspace.working_copy_refreshed {
+            " (refreshed)"
+        } else {
+            " (not refreshed)"
+        }
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "revision: {} ({}) {}",
+        workspace.commit_id, workspace.change_id, workspace.description
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "trunk: {} ({})",
+        envelope.repository.trunk.commit_id, envelope.repository.trunk.revset
+    )
+    .expect("write string");
+    if workspace.hazards.is_empty() {
+        output.push_str("hazards: none\n");
+    } else {
+        output.push_str("hazards:\n");
+        for hazard in &workspace.hazards {
+            writeln!(output, "  {:?}: {}", hazard.id, hazard.message).expect("write string");
+        }
+    }
+    output
+}
+
+fn describe_working_copy(status: WorkingCopyStatus) -> String {
+    match status {
+        WorkingCopyStatus::Empty => "empty".to_owned(),
+        WorkingCopyStatus::Modified {
+            files,
+            added,
+            removed,
+        } => format!("modified ({files} files, +{added}/-{removed})"),
+        WorkingCopyStatus::Conflicted { conflicts } => {
+            format!("conflicted ({conflicts} files)")
+        }
+        WorkingCopyStatus::Stale => "stale".to_owned(),
+        WorkingCopyStatus::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn write_json(value: &impl Serialize) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value).context("failed to serialize JSON output")?;
+    bytes.push(b'\n');
+    write_bytes(&bytes)
+}
+
+fn write_text(value: &str) -> Result<()> {
+    write_bytes(value.as_bytes())
+}
+
+fn write_bytes(bytes: &[u8]) -> Result<()> {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    handle.write_all(bytes).context("failed to write stdout")?;
     Ok(())
 }
 

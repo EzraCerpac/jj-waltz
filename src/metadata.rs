@@ -72,6 +72,7 @@ impl WorkspaceMetadataStore {
         &self.repository_id
     }
 
+    #[cfg(test)]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -148,6 +149,7 @@ impl WorkspaceMetadataStore {
     }
 
     /// Atomically replaces one workspace record and returns its prior value.
+    #[cfg(test)]
     pub fn upsert(
         &self,
         metadata: &ManagedWorkspaceMetadata,
@@ -170,6 +172,7 @@ impl WorkspaceMetadataStore {
         Ok(previous)
     }
 
+    #[cfg(test)]
     pub fn remove(&self, workspace_name: &str) -> Result<Option<ManagedWorkspaceMetadata>> {
         let previous = self.get(workspace_name)?;
         if previous.is_none() {

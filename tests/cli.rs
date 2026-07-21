@@ -351,7 +351,7 @@ fn current_uses_workspace_root_when_targets_share_working_copy() {
     let repo = TestRepo::new().expect("create test repo");
     let docs_root = repo.default_root.with_extension("docs");
 
-    run_in(
+    repo.run_in(
         &repo.default_root,
         [
             "jj",
@@ -363,8 +363,9 @@ fn current_uses_workspace_root_when_targets_share_working_copy() {
         ],
     )
     .expect("add docs workspace");
-    let docs_change = current_change_id(&docs_root);
-    run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()]).expect("edit docs change");
+    let docs_change = repo.current_change_id(&docs_root);
+    repo.run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()])
+        .expect("edit docs change");
 
     repo.cmd_at(&repo.default_root)
         .args(["current"])
@@ -385,8 +386,9 @@ fn previous_shorthand_survives_shared_working_copy_target() {
     let docs_root = repo.default_root.with_extension("docs");
     repo.cmd().args(["switch", "docs"]).assert().success();
 
-    let docs_change = current_change_id(&docs_root);
-    run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()]).expect("edit docs change");
+    let docs_change = repo.current_change_id(&docs_root);
+    repo.run_in(&repo.default_root, ["jj", "edit", docs_change.as_str()])
+        .expect("edit docs change");
 
     repo.cmd_at(&docs_root)
         .args(["switch", "default", "--print-path"])
@@ -647,8 +649,10 @@ fn remove_prompts_before_deleting_associated_bookmark() {
         .success();
     let feature_root = repo.default_root.with_extension("feature-a");
     fs::write(feature_root.join("work.txt"), "work\n").expect("write workspace file");
-    run_in(&feature_root, ["jj", "file", "track", "work.txt"]).expect("track workspace file");
-    run_in(&feature_root, ["jj", "commit", "-m", "workspace work"]).expect("commit workspace work");
+    repo.run_in(&feature_root, ["jj", "file", "track", "work.txt"])
+        .expect("track workspace file");
+    repo.run_in(&feature_root, ["jj", "commit", "-m", "workspace work"])
+        .expect("commit workspace work");
 
     let mut remove = repo.cmd();
     remove.args(["remove", "feature-a"]);
@@ -942,6 +946,7 @@ fn add_rolls_back_workspace_when_required_link_is_missing() {
 
     assert!(!workspace_root.exists());
     assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    assert!(repo.metadata_record_paths().is_empty());
 }
 
 #[test]
@@ -957,6 +962,7 @@ fn switch_rolls_back_workspace_before_recording_previous_on_link_failure() {
     repo.cmd().args(["switch", "feature-a"]).assert().failure();
 
     assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    assert!(repo.metadata_record_paths().is_empty());
     repo.cmd()
         .arg("-")
         .assert()
@@ -1168,8 +1174,10 @@ fn switch_reapplies_links_after_intermediate_commits_and_workspace_hops() {
     repo.cmd().args(["switch", "feature-a"]).assert().success();
     let feature_a_root = repo.default_root.with_extension("feature-a");
     fs::write(feature_a_root.join("feature.txt"), "feature-a\n").expect("write feature file");
-    run_in(&feature_a_root, ["jj", "file", "track", "feature.txt"]).expect("track file");
-    run_in(&feature_a_root, ["jj", "commit", "-m", "feature-a commit"]).expect("commit change");
+    repo.run_in(&feature_a_root, ["jj", "file", "track", "feature.txt"])
+        .expect("track file");
+    repo.run_in(&feature_a_root, ["jj", "commit", "-m", "feature-a commit"])
+        .expect("commit change");
 
     repo.cmd_at(&feature_a_root)
         .args(["switch", "default"])
@@ -1182,6 +1190,289 @@ fn switch_reapplies_links_after_intermediate_commits_and_workspace_hops() {
     assert!(metadata.file_type().is_symlink());
 }
 
+#[test]
+fn plain_list_aliases_keep_legacy_bytes_and_ignore_semantic_config() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let baseline = repo.command_output(&["list"]);
+    assert!(baseline.status.success());
+    assert!(baseline.stderr.is_empty());
+
+    for alias in ["l", "ls"] {
+        let output = repo.command_output(&[alias]);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, baseline.stdout, "alias {alias}");
+        assert_eq!(output.stderr, baseline.stderr, "alias {alias}");
+    }
+
+    repo.write_config("[trunk]\nrevset = \"\"\n");
+    let metadata_root = repo.metadata_root();
+    fs::create_dir_all(&metadata_root).expect("create metadata root");
+    fs::write(metadata_root.join("manifest.json"), b"{not json\n").expect("write corrupt metadata");
+
+    let output = repo.command_output(&["list"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, baseline.stdout);
+    assert_eq!(output.stderr, baseline.stderr);
+}
+
+#[test]
+fn list_json_is_versioned_frozen_ansi_free_and_unmanaged() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let output = repo.command_output(&["list", "--format=json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(!output.stdout.contains(&0x1b));
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid list JSON");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["command"], "list");
+    assert_eq!(value["repository"]["trunk"]["revset"], "trunk()");
+    assert!(
+        value["repository"]["operation_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(value["workspaces"][0]["management"], "unmanaged");
+    assert_eq!(value["workspaces"][0]["working_copy_refreshed"], true);
+}
+
+#[test]
+fn status_refresh_none_is_read_only_and_aliases_resolve() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(repo.default_root.join("dirty.txt"), "not snapshotted\n")
+        .expect("write dirty working-copy file");
+    let before = repo.operation_id();
+
+    for token in ["@", "default", "^"] {
+        let output = repo.command_output(&["status", token, "--format=json", "--refresh=none"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid status JSON");
+        assert_eq!(value["command"], "status");
+        assert_eq!(value["workspaces"][0]["name"], "default");
+        assert_eq!(value["workspaces"][0]["working_copy_refreshed"], false);
+        assert_eq!(value["workspaces"][0]["working_copy"]["state"], "unknown");
+    }
+
+    assert_eq!(repo.operation_id(), before);
+}
+
+#[test]
+fn status_refresh_current_classifies_modified_working_copy() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(repo.default_root.join("work.txt"), "new work\n").expect("write work");
+
+    let output = repo.command_output(&["status", "--format=json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid status JSON");
+    assert_eq!(value["workspaces"][0]["working_copy_refreshed"], true);
+    assert_eq!(value["workspaces"][0]["working_copy"]["state"], "modified");
+    assert!(
+        value["workspaces"][0]["working_copy"]["files"]
+            .as_u64()
+            .is_some_and(|files| files >= 1)
+    );
+}
+
+#[test]
+fn list_and_status_reject_non_exact_trunk_before_stdout() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    for revset in ["none()", "all()"] {
+        repo.write_config(&format!("[trunk]\nrevset = \"{revset}\"\n"));
+        for args in [
+            &["list", "--format=json"][..],
+            &["status", "--format=json", "--refresh=none"][..],
+        ] {
+            let output = repo.command_output(args);
+            assert!(!output.status.success(), "{revset} {args:?}");
+            assert!(output.stdout.is_empty(), "{revset} {args:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("exactly one revision"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn doctor_serializes_bad_trunk_and_corrupt_metadata_before_failure() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config("[trunk]\nrevset = \"none()\"\n");
+
+    let output = repo.command_output(&["doctor", "--format=json"]);
+    assert!(!output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid doctor JSON");
+    assert_eq!(value["command"], "doctor");
+    assert_eq!(value["healthy"], false);
+    assert!(value["summary"]["errors"].as_u64().unwrap() >= 1);
+
+    repo.write_config("[trunk]\nrevset = \"trunk()\"\n");
+    let metadata_root = repo.metadata_root();
+    fs::create_dir_all(&metadata_root).expect("create metadata root");
+    let manifest = metadata_root.join("manifest.json");
+    let corrupt = b"{still corrupt\n";
+    fs::write(&manifest, corrupt).expect("write corrupt metadata");
+    let output = repo.command_output(&["doctor", "--format=json"]);
+    assert!(!output.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid corrupt-metadata report");
+    assert_eq!(value["healthy"], false);
+    assert!(
+        value["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["code"] == "metadata-integrity" && entry["state"] == "failed" })
+    );
+    assert_eq!(
+        fs::read(&manifest).expect("read unchanged manifest"),
+        corrupt
+    );
+}
+
+#[test]
+fn creation_metadata_records_exact_base_prebookmark_operation_and_removal_cleans_it() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let expected_base = repo.revision_commit_id("@-");
+
+    let output = repo.command_output(&[
+        "add",
+        "feature-a",
+        "--no-links",
+        "--bookmark",
+        "wip/feature-a",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let creation_operation = repo.operation_id();
+    let status = repo.command_output(&["status", "feature-a", "--format=json", "--refresh=none"]);
+    assert!(status.status.success());
+    let value: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("valid managed status");
+    let workspace = &value["workspaces"][0];
+    assert_eq!(workspace["management"], "managed");
+    assert_eq!(workspace["creation_base_commit_id"], expected_base);
+    assert!(
+        workspace["creation_operation_id"]
+            .as_str()
+            .is_some_and(|operation| !operation.is_empty() && operation != creation_operation)
+    );
+    assert_eq!(workspace["associated_bookmark"], "wip/feature-a");
+
+    repo.cmd()
+        .args(["remove", "feature-a", "--keep-bookmark"])
+        .assert()
+        .success();
+    assert!(repo.metadata_record_paths().is_empty());
+}
+
+#[test]
+fn merge_working_copy_requires_explicit_creation_base() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.run_jj(["new", "root()", "-m", "left"]);
+    let left = repo.revision_commit_id("@");
+    repo.run_jj(["new", "root()", "-m", "right"]);
+    let right = repo.revision_commit_id("@");
+    repo.run_jj(["new", &left, &right, "-m", "merge"]);
+    let merge = repo.revision_commit_id("@");
+    let before = repo.operation_id();
+
+    let implicit = repo.command_output(&["add", "implicit", "--no-links"]);
+    assert!(!implicit.status.success());
+    assert!(String::from_utf8_lossy(&implicit.stderr).contains("use --at @"));
+    assert_eq!(repo.operation_id(), before);
+    assert!(!repo.workspace_names().contains(&"implicit".to_owned()));
+
+    let explicit = repo.command_output(&[
+        "add",
+        "explicit",
+        "--at",
+        "@",
+        "--no-links",
+        "--no-bookmark",
+    ]);
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let status = repo.command_output(&["status", "explicit", "--format=json", "--refresh=none"]);
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    assert_eq!(value["workspaces"][0]["creation_base_commit_id"], merge);
+}
+
+#[test]
+fn adopt_records_intent_without_changing_jj_state() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let legacy_root = repo.default_root.with_extension("legacy");
+    repo.run_jj([
+        "workspace",
+        "add",
+        "--name",
+        "legacy",
+        legacy_root.to_str().unwrap(),
+    ]);
+    fs::write(legacy_root.join(".jj/jw-bookmark"), "broken\nmarker\n")
+        .expect("write invalid legacy marker");
+    let operation = repo.operation_id();
+    let revision = repo.revision_commit_id("legacy@");
+    let bookmarks = repo.bookmarks();
+
+    let output = repo.command_output(&[
+        "adopt",
+        "legacy",
+        "--base",
+        "legacy@-",
+        "--bookmark",
+        "declared",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("stack analysis: deferred to milestone 1")
+    );
+    assert_eq!(repo.operation_id(), operation);
+    assert_eq!(repo.revision_commit_id("legacy@"), revision);
+    assert_eq!(repo.bookmarks(), bookmarks);
+
+    let status = repo.command_output(&["status", "legacy", "--format=json", "--refresh=none"]);
+    assert!(status.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
+    assert_eq!(value["workspaces"][0]["management"], "managed");
+    assert_eq!(value["workspaces"][0]["associated_bookmark"], "declared");
+}
+
 struct TestRepo {
     _tempdir: TempDir,
     default_root: PathBuf,
@@ -1192,15 +1483,25 @@ impl TestRepo {
     fn new() -> anyhow::Result<Self> {
         let tempdir = tempfile::tempdir()?;
         let default_root = tempdir.path().join("repo");
+        let config_home = tempdir.path().join("config");
+        fs::create_dir_all(&config_home)?;
 
         run_in(
             tempdir.path(),
+            &config_home,
             ["jj", "git", "init", default_root.to_str().unwrap()],
         )?;
         fs::write(default_root.join("README.md"), "hello\n")?;
-        run_in(&default_root, ["jj", "file", "track", "root:README.md"])?;
-        run_in(&default_root, ["jj", "commit", "-m", "initial"])?;
-        let config_home = tempdir.path().join("config");
+        run_in(
+            &default_root,
+            &config_home,
+            ["jj", "file", "track", "root:README.md"],
+        )?;
+        run_in(
+            &default_root,
+            &config_home,
+            ["jj", "commit", "-m", "initial"],
+        )?;
 
         Ok(Self {
             _tempdir: tempdir,
@@ -1220,12 +1521,107 @@ impl TestRepo {
         cmd
     }
 
+    fn command_output(&self, args: &[&str]) -> std::process::Output {
+        self.cmd().args(args).output().expect("execute jw command")
+    }
+
     fn run_jj<const N: usize>(&self, args: [&str; N]) {
-        run_in(
+        self.run_in(
             &self.default_root,
             std::iter::once("jj").chain(args).collect::<Vec<_>>(),
         )
         .expect("jj command succeeds");
+    }
+
+    fn run_in<I, S>(&self, cwd: &Path, args: I) -> anyhow::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        run_in(cwd, &self.config_home, args)
+    }
+
+    fn jj_command_at(&self, cwd: &Path) -> Command {
+        let mut command = Command::new("jj");
+        command
+            .current_dir(cwd)
+            .env("XDG_CONFIG_HOME", &self.config_home);
+        command
+    }
+
+    fn jj_stdout(&self, cwd: &Path, args: &[&str]) -> String {
+        let output = self
+            .jj_command_at(cwd)
+            .args(args)
+            .output()
+            .expect("execute jj command");
+        assert!(
+            output.status.success(),
+            "jj {args:?} failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("UTF-8 jj output")
+            .trim()
+            .to_owned()
+    }
+
+    fn operation_id(&self) -> String {
+        self.jj_stdout(
+            &self.default_root,
+            &[
+                "--at-operation",
+                "@",
+                "--ignore-working-copy",
+                "operation",
+                "log",
+                "--limit=1",
+                "--no-graph",
+                "-T",
+                "id",
+            ],
+        )
+    }
+
+    fn revision_commit_id(&self, revset: &str) -> String {
+        self.jj_stdout(
+            &self.default_root,
+            &[
+                "--ignore-working-copy",
+                "log",
+                "-r",
+                revset,
+                "--no-graph",
+                "-T",
+                "commit_id",
+            ],
+        )
+    }
+
+    fn metadata_root(&self) -> PathBuf {
+        let config_path = PathBuf::from(self.jj_stdout(
+            &self.default_root,
+            &["--ignore-working-copy", "config", "path", "--repo"],
+        ));
+        config_path
+            .parent()
+            .expect("repository config path has parent")
+            .join("jj-waltz")
+    }
+
+    fn metadata_record_paths(&self) -> Vec<PathBuf> {
+        let directory = self.metadata_root().join("workspaces");
+        let Ok(entries) = fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        entries
+            .map(|entry| entry.expect("read metadata entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect()
     }
 
     fn write_config(&self, contents: &str) {
@@ -1235,8 +1631,8 @@ impl TestRepo {
     }
 
     fn bookmarks(&self) -> Vec<String> {
-        let output = Command::new("jj")
-            .current_dir(&self.default_root)
+        let output = self
+            .jj_command_at(&self.default_root)
             .args(["bookmark", "list", "-T", "name ++ \"\\n\"", "--color=never"])
             .output()
             .expect("list bookmarks");
@@ -1255,8 +1651,8 @@ impl TestRepo {
     }
 
     fn workspace_names(&self) -> Vec<String> {
-        let output = Command::new("jj")
-            .current_dir(&self.default_root)
+        let output = self
+            .jj_command_at(&self.default_root)
             .args([
                 "workspace",
                 "list",
@@ -1281,8 +1677,8 @@ impl TestRepo {
     }
 
     fn current_workspace_name(&self) -> String {
-        let current_root = Command::new("jj")
-            .current_dir(&self.default_root)
+        let current_root = self
+            .jj_command_at(&self.default_root)
             .args(["workspace", "root"])
             .output()
             .expect("current workspace root");
@@ -1295,8 +1691,8 @@ impl TestRepo {
         let current_root = fs::canonicalize(String::from_utf8_lossy(&current_root.stdout).trim())
             .expect("canonicalize current root");
 
-        let output = Command::new("jj")
-            .current_dir(&self.default_root)
+        let output = self
+            .jj_command_at(&self.default_root)
             .args([
                 "workspace",
                 "list",
@@ -1322,8 +1718,8 @@ impl TestRepo {
         names
             .into_iter()
             .find(|name| {
-                let output = Command::new("jj")
-                    .current_dir(&self.default_root)
+                let output = self
+                    .jj_command_at(&self.default_root)
                     .args(["workspace", "root", "--name", name])
                     .output()
                     .expect("workspace root by name");
@@ -1338,21 +1734,21 @@ impl TestRepo {
             })
             .expect("current workspace name")
     }
-}
 
-fn current_change_id(cwd: &Path) -> String {
-    let output = Command::new("jj")
-        .current_dir(cwd)
-        .args(["log", "--no-graph", "-r", "@", "-T", "change_id.short()"])
-        .output()
-        .expect("current change id");
-    assert!(
-        output.status.success(),
-        "jj log failed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    fn current_change_id(&self, cwd: &Path) -> String {
+        let output = self
+            .jj_command_at(cwd)
+            .args(["log", "--no-graph", "-r", "@", "-T", "change_id.short()"])
+            .output()
+            .expect("current change id");
+        assert!(
+            output.status.success(),
+            "jj log failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
 }
 
 fn test_binary_path() -> OsString {
@@ -1370,7 +1766,7 @@ fn path_string(path: &Path) -> String {
         .into_owned()
 }
 
-fn run_in<I, S>(cwd: &Path, args: I) -> anyhow::Result<()>
+fn run_in<I, S>(cwd: &Path, config_home: &Path, args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -1380,7 +1776,11 @@ where
         .map(|arg| arg.as_ref().to_owned())
         .collect::<Vec<_>>();
     let (program, rest) = values.split_first().expect("program");
-    let output = Command::new(program).current_dir(cwd).args(rest).output()?;
+    let output = Command::new(program)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", config_home)
+        .args(rest)
+        .output()?;
     if output.status.success() {
         Ok(())
     } else {
