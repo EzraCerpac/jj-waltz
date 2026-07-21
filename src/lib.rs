@@ -1,5 +1,6 @@
 pub mod cli;
 pub(crate) mod config;
+pub mod doctor;
 pub mod jj;
 pub(crate) mod lifecycle;
 pub mod links;
