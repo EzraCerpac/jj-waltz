@@ -1,8 +1,8 @@
+use crate::jj::JjClient;
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const PREVIOUS_WORKSPACE_FILE: &str = "jw-prev-workspace";
 const WORKSPACE_BOOKMARK_FILE: &str = "jw-bookmark";
@@ -232,15 +232,17 @@ pub fn current_workspace_name() -> Result<String> {
 }
 
 fn workspace_root_by_name_direct(name: &str) -> Result<Option<PathBuf>> {
-    let output = Command::new("jj")
-        .args(["workspace", "root", "--name", name])
-        .output()
-        .with_context(|| "failed to execute `jj workspace root`".to_string())?;
+    let output = JjClient::current()?.run_unchecked(["workspace", "root", "--name", name])?;
 
-    if output.status.success() {
-        return Ok(Some(PathBuf::from(trimmed_stdout(output)?)));
+    if output.success() {
+        return Ok(Some(PathBuf::from(output.trimmed_stdout()?)));
     }
-    let message = stderr_message(output, "workspace root lookup failed");
+    let message = output.stderr();
+    let message = if message.is_empty() {
+        "workspace root lookup failed".to_owned()
+    } else {
+        message
+    };
     let missing_checkout = message.contains("Cannot resolve absolute workspace path")
         && (message.contains("No such file or directory")
             || message.contains("os error 2")
@@ -254,8 +256,8 @@ fn workspace_root_by_name_direct(name: &str) -> Result<Option<PathBuf>> {
 }
 
 pub fn workspace_root_current() -> Result<PathBuf> {
-    let output = run_jj(&["workspace", "root"])?;
-    Ok(PathBuf::from(trimmed_stdout(output)?))
+    let output = JjClient::current()?.run(["workspace", "root"])?;
+    Ok(PathBuf::from(output.trimmed_stdout()?))
 }
 
 pub fn switch_workspace(
@@ -359,13 +361,13 @@ pub fn execute_remove_workspace(
     plan: RemovalPlan,
     delete_bookmarks: bool,
 ) -> Result<RemovalResult> {
-    run_jj(&["workspace", "forget", &plan.workspace])?;
+    JjClient::current()?.run(["workspace", "forget", &plan.workspace])?;
 
     let mut deleted_bookmarks = Vec::new();
     if delete_bookmarks && !plan.bookmarks.is_empty() {
         let mut args = vec!["bookmark".to_owned(), "delete".to_owned()];
         args.extend(plan.bookmarks.iter().cloned());
-        run_jj_owned(&args)?;
+        JjClient::current()?.run(&args)?;
         deleted_bookmarks.clone_from(&plan.bookmarks);
     }
 
@@ -411,16 +413,10 @@ fn add_workspace_by_name_with_inventory(
     }
 
     args.push(path.display().to_string());
-    run_jj_owned(&args)?;
+    JjClient::current()?.run(&args)?;
 
     if let Some(bookmark) = &options.bookmark {
-        let output = Command::new("jj")
-            .current_dir(&path)
-            .args(["bookmark", "create", bookmark, "-r", "@"])
-            .output()
-            .with_context(|| "failed to create bookmark".to_string())?;
-        if !output.status.success() {
-            let error = stderr_message(output, "failed to create bookmark");
+        if let Err(error) = JjClient::new(&path).run(["bookmark", "create", bookmark, "-r", "@"]) {
             let cleanup = rollback_workspace_parts(name, &path, None).err();
             if let Some(cleanup) = cleanup {
                 bail!("{error}; cleanup also failed: {cleanup}")
@@ -451,11 +447,11 @@ pub fn rollback_added_workspace(result: &AddResult) -> Result<()> {
 
 fn rollback_workspace_parts(name: &str, path: &Path, bookmark: Option<&str>) -> Result<()> {
     let mut errors = Vec::new();
-    if let Err(error) = run_jj(&["workspace", "forget", name]) {
+    if let Err(error) = JjClient::current()?.run(["workspace", "forget", name]) {
         errors.push(format!("forget workspace: {error}"));
     }
     if let Some(bookmark) = bookmark
-        && let Err(error) = run_jj(&["bookmark", "delete", bookmark])
+        && let Err(error) = JjClient::current()?.run(["bookmark", "delete", bookmark])
     {
         errors.push(format!("delete bookmark {bookmark}: {error}"));
     }
@@ -478,7 +474,7 @@ pub fn prune_missing_workspaces() -> Result<Vec<String>> {
         match &entry.root {
             Some(path) if path.is_dir() => {}
             _ => {
-                run_jj(&["workspace", "forget", &entry.name])?;
+                JjClient::current()?.run(["workspace", "forget", &entry.name])?;
                 removed.push(entry.name);
             }
         }
@@ -694,15 +690,10 @@ fn validate_workspace_name(name: &str) -> Result<()> {
 }
 
 fn workspace_names() -> Result<Vec<String>> {
-    let output = run_jj(&[
-        "workspace",
-        "list",
-        "-T",
-        "name ++ \"\\n\"",
-        "--color=never",
-    ])?;
+    let output = JjClient::current()?.run(["workspace", "list", "-T", "name ++ \"\\n\""])?;
 
-    Ok(trimmed_stdout(output)?
+    Ok(output
+        .trimmed_stdout()?
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -711,14 +702,13 @@ fn workspace_names() -> Result<Vec<String>> {
 }
 
 fn current_workspace_names_by_target() -> Result<Vec<String>> {
-    let output = run_jj(&[
+    let output = JjClient::current()?.run([
         "workspace",
         "list",
         "-T",
         "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
-        "--color=never",
     ])?;
-    let stdout = trimmed_stdout(output)?;
+    let stdout = output.trimmed_stdout()?;
     let names = stdout
         .lines()
         .map(str::trim)
@@ -760,13 +750,10 @@ fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
         args.push("-r".to_owned());
         args.push(format!("{name}@"));
     }
-    args.extend([
-        "-T".to_owned(),
-        "name ++ \"\\n\"".to_owned(),
-        "--color=never".to_owned(),
-    ]);
-    let output = run_jj_owned(&args)?;
-    let candidates = trimmed_stdout(output)?
+    args.extend(["-T".to_owned(), "name ++ \"\\n\"".to_owned()]);
+    let output = JjClient::current()?.run(&args)?;
+    let candidates = output
+        .trimmed_stdout()?
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -788,47 +775,6 @@ fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
 fn canonicalize_dir(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("failed to resolve {}", path.display()))
-}
-
-fn run_jj(args: &[&str]) -> Result<std::process::Output> {
-    let output = Command::new("jj")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to execute `jj {}`", args.join(" ")))?;
-
-    if output.status.success() {
-        Ok(output)
-    } else {
-        bail!(stderr_message(output, "jj command failed"))
-    }
-}
-
-fn run_jj_owned(args: &[String]) -> Result<std::process::Output> {
-    let output = Command::new("jj")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to execute `jj {}`", args.join(" ")))?;
-
-    if output.status.success() {
-        Ok(output)
-    } else {
-        bail!(stderr_message(output, "jj command failed"))
-    }
-}
-
-fn trimmed_stdout(output: std::process::Output) -> Result<String> {
-    String::from_utf8(output.stdout)
-        .context("jj output was not valid UTF-8")
-        .map(|value| value.trim().to_owned())
-}
-
-fn stderr_message(output: std::process::Output, fallback: &str) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if stderr.is_empty() {
-        fallback.to_owned()
-    } else {
-        stderr
-    }
 }
 
 #[cfg(test)]
