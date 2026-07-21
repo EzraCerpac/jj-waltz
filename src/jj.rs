@@ -374,6 +374,17 @@ impl JjClient {
         parse_workspace_target_facts(output.stdout()?)
     }
 
+    /// Read one workspace target by its literal workspace name at a frozen operation.
+    fn workspace_target_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        workspace_name: &str,
+    ) -> Result<WorkspaceTargetFacts> {
+        self.workspace_target_facts_at(operation_id)?
+            .remove(workspace_name)
+            .ok_or_else(|| anyhow!("JJ workspace query did not return `{workspace_name}`"))
+    }
+
     /// Capture the current operation without snapshotting or reconciling the working copy.
     pub fn operation_id(&self) -> Result<String> {
         let output = self.run_at(
@@ -459,6 +470,36 @@ impl JjClient {
                 LOCAL_BOOKMARK_NAMES_TEMPLATE,
             ],
         )?;
+        Ok(parse_json_string_lines(output.stdout()?, "bookmark name")?
+            .into_iter()
+            .collect())
+    }
+
+    /// Read local bookmark names attached to a literal workspace target at one frozen operation.
+    pub fn local_bookmark_names_for_workspace_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        workspace_name: &str,
+    ) -> Result<BTreeSet<String>> {
+        let operation_id = operation_id.as_ref().to_owned();
+        let target = self.workspace_target_at(&operation_id, workspace_name)?;
+        self.local_bookmark_names_for_revset_at(&operation_id, &target.commit_id)
+    }
+
+    fn local_bookmark_names_for_revset_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        revset: impl AsRef<OsStr>,
+    ) -> Result<BTreeSet<String>> {
+        let args = [
+            OsString::from("bookmark"),
+            OsString::from("list"),
+            OsString::from("-r"),
+            revset.as_ref().to_owned(),
+            OsString::from("--template"),
+            OsString::from(LOCAL_BOOKMARK_NAMES_TEMPLATE),
+        ];
+        let output = self.run_at(operation_id, args)?;
         Ok(parse_json_string_lines(output.stdout()?, "bookmark name")?
             .into_iter()
             .collect())
@@ -824,6 +865,27 @@ mod tests {
                 .local_bookmark_names_at(&operation_id)
                 .unwrap()
                 .is_empty()
+        );
+
+        client
+            .run(["bookmark", "create", "topic", "-r", "@"])
+            .unwrap();
+        let bookmark_operation = client.operation_id().unwrap();
+        assert_eq!(
+            client
+                .local_bookmark_names_at(&bookmark_operation)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["topic"]
+        );
+        assert_eq!(
+            client
+                .local_bookmark_names_for_workspace_at(&bookmark_operation, "default")
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["topic"]
         );
     }
 }

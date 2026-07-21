@@ -792,32 +792,11 @@ fn validate_workspace_name(name: &str) -> Result<()> {
 }
 
 fn workspace_names() -> Result<Vec<String>> {
-    let output = JjClient::current()?.run(["workspace", "list", "-T", "name ++ \"\\n\""])?;
-
-    Ok(output
-        .trimmed_stdout()?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
+    JjClient::current()?.workspace_names()
 }
 
 fn current_workspace_names_by_target() -> Result<Vec<String>> {
-    let output = JjClient::current()?.run([
-        "workspace",
-        "list",
-        "-T",
-        "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
-    ])?;
-    let stdout = output.trimmed_stdout()?;
-    let names = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-
-    Ok(names.into_iter().map(ToOwned::to_owned).collect())
+    JjClient::current()?.current_workspace_target_names()
 }
 
 fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
@@ -847,20 +826,12 @@ fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
             });
         }
     };
-    let mut args = vec!["bookmark".to_owned(), "list".to_owned()];
-    if recorded.is_none() {
-        args.push("-r".to_owned());
-        args.push(format!("{name}@"));
-    }
-    args.extend(["-T".to_owned(), "name ++ \"\\n\"".to_owned()]);
-    let output = JjClient::current()?.run(&args)?;
-    let candidates = output
-        .trimmed_stdout()?
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    let client = JjClient::current()?;
+    let operation_id = client.operation_id()?;
+    let candidates = match &recorded {
+        Some(_) => client.local_bookmark_names_at(&operation_id)?,
+        None => client.local_bookmark_names_for_workspace_at(&operation_id, name)?,
+    };
     if let Some(recorded) = recorded {
         return Ok(candidates
             .into_iter()
@@ -878,13 +849,12 @@ fn bookmarks_for_managed_workspace(metadata: &ManagedWorkspaceMetadata) -> Resul
     let Some(recorded) = &metadata.associated_bookmark else {
         return Ok(Vec::new());
     };
-    let output = JjClient::current()?.run(["bookmark", "list", "-T", "name ++ \"\\n\""])?;
-    Ok(output
-        .trimmed_stdout()?
-        .lines()
-        .map(str::trim)
+    let client = JjClient::current()?;
+    let operation_id = client.operation_id()?;
+    Ok(client
+        .local_bookmark_names_at(&operation_id)?
+        .into_iter()
         .filter(|candidate| candidate == recorded)
-        .map(ToOwned::to_owned)
         .collect())
 }
 

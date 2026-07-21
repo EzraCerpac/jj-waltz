@@ -732,6 +732,38 @@ fn remove_does_not_treat_unrelated_bookmark_at_same_commit_as_associated() {
 }
 
 #[test]
+fn remove_infers_only_conventional_local_bookmark_for_unmanaged_workspace() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let workspace_root = repo.default_root.with_extension("legacy");
+
+    repo.run_in(
+        &repo.default_root,
+        [
+            "jj",
+            "workspace",
+            "add",
+            "--name",
+            "legacy",
+            workspace_root.to_str().expect("UTF-8 workspace path"),
+        ],
+    )
+    .expect("create unmanaged workspace");
+    repo.run_jj(["bookmark", "create", "wip/legacy", "-r", "legacy@"]);
+    repo.run_jj(["bookmark", "create", "unrelated", "-r", "legacy@"]);
+
+    repo.cmd()
+        .args(["remove", "--delete-bookmark", "legacy"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted bookmark: wip/legacy"));
+
+    let bookmarks = repo.bookmarks();
+    assert!(!bookmarks.contains(&"wip/legacy".to_owned()));
+    assert!(bookmarks.contains(&"unrelated".to_owned()));
+}
+
+#[test]
 fn remove_deletes_multiple_workspace_directories_by_default() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
