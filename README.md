@@ -10,7 +10,20 @@ Fish is the recommended shell for the best `jw` experience, including the riches
 Jujutsu workspaces are powerful, but the raw workflow is still more manual than it needs to be.
 `jj-waltz` makes switching feel intentional: create or jump in one command, preserve your current subdirectory, and integrate cleanly with your shell.
 
-This project is directly inspired by [Worktrunk](https://github.com/max-sixty/worktrunk), which set a high bar for ergonomic worktree tooling in Git-centric workflows. `jj-waltz` brings a similar design philosophy to JJ-native workspace management.
+This project is directly inspired by [Worktrunk](https://github.com/max-sixty/worktrunk),
+which set a high bar for ergonomic worktree tooling. Worktrunk is a quality
+benchmark, not this project's command specification: `jj-waltz` stays focused on
+JJ-native workspace lifecycle and cross-workspace coordination.
+
+The responsibility split is deliberate:
+
+- `jj` owns revision-graph work, bookmarks, fetch/push, and operation-log recovery.
+- `jw` owns workspace creation, navigation, links, lifecycle metadata, and safe
+  cross-workspace coordination.
+- Forge tools such as `gh` and `glab` own pull requests, merge requests, and CI.
+
+Core workspace operations remain offline. Optional forge information must degrade
+to a warning rather than make local workspace management fail.
 
 ## Features
 
@@ -161,6 +174,19 @@ For one command, `jw switch --bookmark custom-name feature-a` overrides the conf
 and `jw switch --no-bookmark feature-a` suppresses configured bookmark creation.
 Explicit `--bookmark` is single-workspace only; for batch `add` or `switch`, use
 `bookmark_template`.
+
+## Semantic contracts
+
+[`CONTEXT.md`](CONTEXT.md) defines workspace, snapshot, trunk, metadata, stack,
+publication, integration, cleanup, and refresh vocabulary. The
+[architecture notes](docs/architecture.md) define dependency direction, metadata
+storage, and JSON compatibility. Defined roadmap concepts do not imply an
+unlisted command is available; the feature list and `jw --help` are the current
+command surface.
+
+`jw` supports JJ 0.39 and newer within its tested compatibility window. CI pins
+the oldest supported release, 0.39.0, and the newer compatibility target, 0.43.0,
+instead of following a moving `latest` label.
 
 ## AI usage note
 

@@ -3,5 +3,7 @@ pub(crate) mod config;
 pub mod jj;
 pub(crate) mod lifecycle;
 pub mod links;
+pub(crate) mod metadata;
 pub(crate) mod shell;
+pub mod snapshot;
 pub(crate) mod workspace;
