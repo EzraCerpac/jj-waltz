@@ -30,7 +30,6 @@ pub struct ManagedWorkspaceMetadata {
 #[derive(Debug, Clone)]
 pub struct WorkspaceMetadataStore {
     root: PathBuf,
-    repository_config_path: PathBuf,
     repository_id: String,
 }
 
@@ -39,7 +38,6 @@ pub struct WorkspaceMetadataStore {
 struct RepositoryManifest {
     schema_version: u32,
     repository_id: String,
-    repository_config_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,11 +57,13 @@ impl WorkspaceMetadataStore {
                 repository_config_path.display()
             )
         })?;
-        let repository_id = repository_id(&repository_config_path);
+        let root = parent.join(STORE_DIRECTORY);
+        let repository_id = read_manifest_if_present(&root)?
+            .map(|manifest| manifest.repository_id)
+            .unwrap_or_else(|| repository_id(&repository_config_path));
 
         Ok(Self {
-            root: parent.join(STORE_DIRECTORY),
-            repository_config_path,
+            root,
             repository_id,
         })
     }
@@ -301,21 +301,10 @@ impl WorkspaceMetadataStore {
         let path = self.manifest_path();
         let contents = fs::read(&path)
             .with_context(|| format!("failed to read metadata manifest {}", path.display()))?;
-        let manifest: RepositoryManifest = serde_json::from_slice(&contents)
-            .with_context(|| format!("metadata manifest is corrupt: {}", path.display()))?;
-        if manifest.schema_version != WORKSPACE_METADATA_SCHEMA_VERSION {
-            bail!(
-                "unsupported workspace metadata schema {} in {} (expected {})",
-                manifest.schema_version,
-                path.display(),
-                WORKSPACE_METADATA_SCHEMA_VERSION
-            );
-        }
+        let manifest = parse_manifest(&path, &contents)?;
 
         let expected = self.expected_manifest();
-        if manifest.repository_id != expected.repository_id
-            || manifest.repository_config_path != expected.repository_config_path
-        {
+        if manifest.repository_id != expected.repository_id {
             bail!(
                 "workspace metadata repository identity mismatch in {}: expected {}, found {}",
                 path.display(),
@@ -330,7 +319,6 @@ impl WorkspaceMetadataStore {
         RepositoryManifest {
             schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
             repository_id: self.repository_id.clone(),
-            repository_config_path: self.repository_config_path.to_string_lossy().into_owned(),
         }
     }
 
@@ -426,6 +414,45 @@ fn repository_id(path: &Path) -> String {
         "repo-{:032x}",
         stable_hash(b"repository", &path_bytes(path))
     )
+}
+
+fn read_manifest_if_present(root: &Path) -> Result<Option<RepositoryManifest>> {
+    let path = root.join(MANIFEST_FILE);
+    let contents = match fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read metadata manifest {}", path.display()));
+        }
+    };
+    parse_manifest(&path, &contents).map(Some)
+}
+
+fn parse_manifest(path: &Path, contents: &[u8]) -> Result<RepositoryManifest> {
+    let manifest: RepositoryManifest = serde_json::from_slice(contents)
+        .with_context(|| format!("metadata manifest is corrupt: {}", path.display()))?;
+    if manifest.schema_version != WORKSPACE_METADATA_SCHEMA_VERSION {
+        bail!(
+            "unsupported workspace metadata schema {} in {} (expected {})",
+            manifest.schema_version,
+            path.display(),
+            WORKSPACE_METADATA_SCHEMA_VERSION
+        );
+    }
+    validate_repository_id(&manifest.repository_id)
+        .with_context(|| format!("invalid repository identity in {}", path.display()))?;
+    Ok(manifest)
+}
+
+fn validate_repository_id(repository_id: &str) -> Result<()> {
+    let Some(digest) = repository_id.strip_prefix("repo-") else {
+        bail!("repository identity must start with 'repo-'")
+    };
+    if digest.len() != 32 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("repository identity must contain exactly 32 hexadecimal digits")
+    }
+    Ok(())
 }
 
 fn workspace_file_name(workspace_name: &str) -> String {
@@ -887,5 +914,29 @@ mod tests {
 
         assert_eq!(direct.repository_id(), equivalent.repository_id());
         assert_eq!(direct.root(), equivalent.root());
+    }
+
+    #[test]
+    fn repository_identity_and_records_survive_whole_repository_move() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let original = tempdir.path().join("original/repo");
+        fs::create_dir_all(&original).expect("create original config directory");
+        let store = WorkspaceMetadataStore::from_repo_config_path(original.join("config.toml"))
+            .expect("create original store");
+        let expected = metadata("solver");
+        store.insert(&expected).expect("insert metadata");
+        let repository_id = store.repository_id().to_owned();
+
+        let moved = tempdir.path().join("moved/repo");
+        fs::create_dir_all(moved.parent().expect("moved parent")).expect("create moved parent");
+        fs::rename(&original, &moved).expect("move whole repository config directory");
+        let reopened = WorkspaceMetadataStore::from_repo_config_path(moved.join("config.toml"))
+            .expect("reopen moved store");
+
+        assert_eq!(reopened.repository_id(), repository_id);
+        assert_eq!(
+            reopened.get("solver").expect("read moved record"),
+            Some(expected)
+        );
     }
 }

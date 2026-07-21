@@ -1,4 +1,5 @@
 use crate::jj::JjClient;
+use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
 use std::fs;
@@ -27,14 +28,13 @@ pub struct SwitchResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct SwitchOptions {
-    pub at_revset: Option<String>,
-    pub bookmark: Option<String>,
     pub preserve_subdir: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AddOptions {
-    pub at_revset: Option<String>,
+    /// Full commit ID resolved before any workspace mutation.
+    pub base_commit_id: String,
     pub bookmark: Option<String>,
 }
 
@@ -43,6 +43,8 @@ pub struct AddResult {
     pub workspace: String,
     pub path: PathBuf,
     pub bookmark: Option<String>,
+    pub creation_operation_id: String,
+    pub creation_base_commit_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -211,12 +213,14 @@ impl WorkspaceInventory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RemovalPlan {
     pub workspace: String,
     pub path: PathBuf,
     pub delete_dir: bool,
     pub bookmarks: Vec<String>,
+    managed_metadata: Option<ManagedWorkspaceMetadata>,
+    managed_store: Option<WorkspaceMetadataStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,25 +282,44 @@ pub fn switch_workspace(
     };
 
     let resolved_name = inventory.resolve(target)?;
-    let (target_path, created, bookmark) = if inventory.contains(&resolved_name) {
-        (inventory.root(&resolved_name)?, false, None)
-    } else {
-        let result = add_workspace_by_name_with_inventory(
-            &resolved_name,
-            &AddOptions {
-                at_revset: options.at_revset.clone(),
-                bookmark: options.bookmark.clone(),
-            },
-            inventory,
-        )?;
-        (result.path, true, result.bookmark)
-    };
+    if !inventory.contains(&resolved_name) {
+        bail!("workspace does not exist: {resolved_name}")
+    }
+    let target_path = inventory.root(&resolved_name)?;
 
     Ok(SwitchResult {
         workspace: resolved_name,
         path: target_path,
-        created,
-        bookmark,
+        created: false,
+        bookmark: None,
+        relative_subdir,
+        from_workspace: current_name,
+        from_path: current_root,
+    })
+}
+
+pub fn switch_to_created_workspace(
+    inventory: &WorkspaceInventory,
+    created: &AddResult,
+    options: &SwitchOptions,
+) -> Result<SwitchResult> {
+    let current_name = inventory.current_name().to_owned();
+    let current_root = inventory.current_root().to_path_buf();
+    let current_dir = env::current_dir().context("failed to determine current directory")?;
+    let relative_subdir = if options.preserve_subdir {
+        current_dir
+            .strip_prefix(&current_root)
+            .ok()
+            .map(Path::to_path_buf)
+    } else {
+        None
+    };
+
+    Ok(SwitchResult {
+        workspace: created.workspace.clone(),
+        path: created.path.clone(),
+        created: true,
+        bookmark: created.bookmark.clone(),
         relative_subdir,
         from_workspace: current_name,
         from_path: current_root,
@@ -349,11 +372,20 @@ pub fn plan_remove_workspace(
         bail!("cannot delete the current workspace directory; switch away first")
     }
 
+    let store = metadata_store()?;
+    let managed_metadata = store.get(&name)?;
+    let bookmarks = match &managed_metadata {
+        Some(metadata) => bookmarks_for_managed_workspace(metadata)?,
+        None => bookmarks_for_workspace(&name, &path)?,
+    };
+
     Ok(RemovalPlan {
-        bookmarks: bookmarks_for_workspace(&name, &path)?,
+        bookmarks,
         workspace: name,
         path,
         delete_dir,
+        managed_store: managed_metadata.as_ref().map(|_| store),
+        managed_metadata,
     })
 }
 
@@ -379,6 +411,20 @@ pub fn execute_remove_workspace(
                 plan.path.display()
             )
         })?;
+    }
+
+    if let Some(metadata) = &plan.managed_metadata {
+        let store = plan
+            .managed_store
+            .as_ref()
+            .expect("managed metadata plan retains its store");
+        let removed = store.remove_if_matches(metadata)?;
+        if !removed {
+            bail!(
+                "workspace metadata changed during removal and was retained: {}",
+                metadata.workspace_name
+            )
+        }
     }
 
     Ok(RemovalResult {
@@ -407,13 +453,24 @@ fn add_workspace_by_name_with_inventory(
         name.to_owned(),
     ];
 
-    if let Some(revset) = &options.at_revset {
-        args.push("--revision".to_owned());
-        args.push(revset.clone());
-    }
+    args.push("--revision".to_owned());
+    args.push(options.base_commit_id.clone());
 
     args.push(path.display().to_string());
-    JjClient::current()?.run(&args)?;
+    let client = JjClient::current()?;
+    client.run(&args)?;
+
+    // Capture provenance before bookmark creation records another JJ operation.
+    let creation_operation_id = match client.operation_id() {
+        Ok(operation_id) => operation_id,
+        Err(error) => {
+            let cleanup = rollback_workspace_parts(name, &path, None).err();
+            if let Some(cleanup) = cleanup {
+                bail!("{error}; cleanup also failed: {cleanup}")
+            }
+            bail!(error)
+        }
+    };
 
     if let Some(bookmark) = &options.bookmark {
         if let Err(error) = JjClient::new(&path).run(["bookmark", "create", bookmark, "-r", "@"]) {
@@ -438,7 +495,21 @@ fn add_workspace_by_name_with_inventory(
         workspace: name.to_owned(),
         path,
         bookmark: options.bookmark.clone(),
+        creation_operation_id,
+        creation_base_commit_id: options.base_commit_id.clone(),
     })
+}
+
+pub(crate) fn preflight_add_workspace(inventory: &WorkspaceInventory, name: &str) -> Result<()> {
+    validate_workspace_name(name)?;
+    if inventory.contains(name) {
+        bail!("workspace already exists: {name}")
+    }
+    let path = workspace_dir_for_name(name, inventory)?;
+    if path.exists() {
+        bail!("directory already exists: {}", path.display())
+    }
+    Ok(())
 }
 
 pub fn rollback_added_workspace(result: &AddResult) -> Result<()> {
@@ -469,12 +540,22 @@ fn rollback_workspace_parts(name: &str, path: &Path, bookmark: Option<&str>) -> 
 
 pub fn prune_missing_workspaces() -> Result<Vec<String>> {
     let mut removed = Vec::new();
+    let store = metadata_store()?;
 
     for entry in WorkspaceInventory::load()?.entries {
         match &entry.root {
             Some(path) if path.is_dir() => {}
             _ => {
+                let metadata = store.get(&entry.name)?;
                 JjClient::current()?.run(["workspace", "forget", &entry.name])?;
+                if let Some(metadata) = metadata
+                    && !store.remove_if_matches(&metadata)?
+                {
+                    bail!(
+                        "workspace metadata changed during prune and was retained: {}",
+                        metadata.workspace_name
+                    )
+                }
                 removed.push(entry.name);
             }
         }
@@ -587,6 +668,27 @@ fn workspace_state_file(root: &Path) -> PathBuf {
 
 fn workspace_bookmark_file(root: &Path) -> PathBuf {
     root.join(".jj").join(WORKSPACE_BOOKMARK_FILE)
+}
+
+pub(crate) fn legacy_workspace_bookmark(root: &Path) -> Result<Option<String>> {
+    let path = workspace_bookmark_file(root);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read workspace bookmark {}", path.display()));
+        }
+    };
+    let names = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    match names.as_slice() {
+        [name] => Ok(Some((*name).to_owned())),
+        _ => bail!("workspace bookmark record is invalid: {}", path.display()),
+    }
 }
 
 fn workspace_dir_for_name(name: &str, inventory: &WorkspaceInventory) -> Result<PathBuf> {
@@ -770,6 +872,25 @@ fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
         .into_iter()
         .filter(|candidate| candidate == name || candidate.ends_with(&suffix))
         .collect())
+}
+
+fn bookmarks_for_managed_workspace(metadata: &ManagedWorkspaceMetadata) -> Result<Vec<String>> {
+    let Some(recorded) = &metadata.associated_bookmark else {
+        return Ok(Vec::new());
+    };
+    let output = JjClient::current()?.run(["bookmark", "list", "-T", "name ++ \"\\n\""])?;
+    Ok(output
+        .trimmed_stdout()?
+        .lines()
+        .map(str::trim)
+        .filter(|candidate| candidate == recorded)
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn metadata_store() -> Result<WorkspaceMetadataStore> {
+    let client = JjClient::current()?;
+    WorkspaceMetadataStore::from_repo_config_path(client.repo_config_path()?)
 }
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf> {
