@@ -282,6 +282,23 @@ impl JjClient {
         self.run(frozen_args)
     }
 
+    /// Execute against one frozen operation while leaving non-zero status handling to the caller.
+    pub fn run_at_unchecked<I, S>(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        args: I,
+    ) -> Result<JjOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut frozen_args = vec![OsString::from("--at-operation")];
+        frozen_args.push(operation_id.as_ref().to_owned());
+        frozen_args.push(OsString::from("--ignore-working-copy"));
+        frozen_args.extend(collect_args(args));
+        self.run_unchecked(frozen_args)
+    }
+
     pub fn version(&self) -> Result<JjVersion> {
         self.run(["--version"])?
             .trimmed_stdout()?

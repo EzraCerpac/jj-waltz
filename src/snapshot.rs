@@ -65,7 +65,10 @@ pub struct WorkspaceSnapshot {
     pub commit_id: String,
     pub description: String,
     pub associated_bookmark: Option<String>,
+    pub created_at_unix_ms: Option<u64>,
+    pub creation_operation_id: Option<String>,
     pub creation_base_commit_id: Option<String>,
+    pub intended_remote: Option<String>,
     pub hazards: Vec<Hazard>,
 }
 
@@ -134,6 +137,7 @@ pub enum HazardId {
     UnpublishedWork,
     HookFailed,
     ForgeUnavailable,
+    MissingWorkspacePath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,7 +190,10 @@ mod tests {
             commit_id: "solver-commit".to_owned(),
             description: "Improve solver".to_owned(),
             associated_bookmark: Some("wip/solver".to_owned()),
+            created_at_unix_ms: Some(1_750_000_000_123),
+            creation_operation_id: Some("operation-1".to_owned()),
             creation_base_commit_id: Some("base-commit".to_owned()),
+            intended_remote: Some("origin".to_owned()),
             hazards: Vec::new(),
         }
     }
@@ -238,7 +245,10 @@ mod tests {
         entry.path = None;
         entry.working_copy_refreshed = false;
         entry.associated_bookmark = None;
+        entry.created_at_unix_ms = None;
+        entry.creation_operation_id = None;
         entry.creation_base_commit_id = None;
+        entry.intended_remote = None;
         entry.hazards.push(Hazard::new(
             HazardId::TrunkMultipleRevisions,
             "trunk revset resolved to multiple revisions",
@@ -266,7 +276,10 @@ mod tests {
             json!({ "state": "modified", "files": 3, "added": 18, "removed": 4 })
         );
         assert_eq!(entry["associated_bookmark"], Value::Null);
+        assert_eq!(entry["created_at_unix_ms"], Value::Null);
+        assert_eq!(entry["creation_operation_id"], Value::Null);
         assert_eq!(entry["creation_base_commit_id"], Value::Null);
+        assert_eq!(entry["intended_remote"], Value::Null);
         assert_eq!(entry["hazards"][0]["id"], "trunk-multiple-revisions");
 
         let decoded: SnapshotEnvelope = serde_json::from_value(value).unwrap();
