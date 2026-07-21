@@ -112,8 +112,9 @@ jj-waltz/
 
 `manifest.json` records schema version 1 and a deterministic `repo-<id>` initially
 derived from the normalized canonical repository-config path. Once created, the
-manifest is authoritative, so moving the whole repository config directory and
-its adjacent `jj-waltz` store preserves repository identity.
+manifest is authoritative. JJ's secure per-repository config path is stable when
+the repository moves, and a moved config directory plus its adjacent `jj-waltz`
+store also keeps the persisted identity.
 Each schema-versioned workspace record can be written, repaired, or removed
 independently and contains only `jw` lifecycle intent such as creation time,
 creation operation ID, immutable creation base, associated bookmark, and intended
@@ -125,6 +126,10 @@ This location is repository-scoped, shared by sibling workspaces, uncommitted,
 and avoids undocumented `.jj` layouts. Moving only a checkout while leaving its
 repository config or copying a detached metadata store is not automatic
 migration; `jw` never searches arbitrary paths or silently adopts an old store.
+On an older repository that has never used per-repository configuration, JJ's
+documented `config path --repo` query may initialize an empty secure-config
+directory. Snapshot and doctor commands still leave the JJ operation and working
+copy unchanged.
 
 ## JSON schema version 1
 

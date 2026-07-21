@@ -3,14 +3,14 @@ use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
 
-/// Read-only repository diagnostics. Every repository query is pinned to one
-/// operation and ignores the working copy.
+/// Repository diagnostics that never change the JJ operation or working copy. Every repository
+/// query is pinned to one operation and ignores the working copy. JJ may initialize its empty
+/// secure-config directory while returning the documented repository config path.
 #[derive(Debug, Clone)]
 pub struct DoctorEngine {
     client: JjClient,
@@ -806,7 +806,10 @@ fn parse_workspace_row(line: &str) -> Result<DoctorWorkspace> {
 }
 
 fn query_workspace_root(client: &JjClient, operation_id: &str, name: &str) -> Result<PathBuf> {
-    let output = run_frozen_unchecked(client, operation_id, ["workspace", "root", "--name", name])?;
+    let output = client.run_at_unchecked(
+        operation_id,
+        ["workspace", "root", "--name", name],
+    )?;
     if !output.success() {
         let message = output.stderr();
         bail!(if message.is_empty() {
@@ -820,24 +823,6 @@ fn query_workspace_root(client: &JjClient, operation_id: &str, name: &str) -> Re
         bail!("workspace root lookup returned an empty path")
     }
     Ok(PathBuf::from(path))
-}
-
-fn run_frozen_unchecked<I, S>(
-    client: &JjClient,
-    operation_id: &str,
-    args: I,
-) -> Result<crate::jj::JjOutput>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let mut frozen = vec![
-        OsString::from("--at-operation"),
-        OsString::from(operation_id),
-        OsString::from("--ignore-working-copy"),
-    ];
-    frozen.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-    client.run_unchecked(frozen)
 }
 
 fn validate_workspace_path(path: &Path) -> Result<()> {

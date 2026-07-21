@@ -78,6 +78,7 @@ pub struct AdoptionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdoptionResult {
     pub metadata: ManagedWorkspaceMetadata,
+    pub current_revision: ResolvedRevision,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +311,9 @@ fn adopt_workspace_with_store(
     }
 
     let operation_id = client.operation_id()?;
+    let current_revision = client
+        .resolve_one_at(&operation_id, "@")
+        .context("failed to resolve the workspace working-copy revision during adoption")?;
     let base = client
         .resolve_one_at(&operation_id, &request.base_revset)
         .with_context(|| {
@@ -331,7 +335,10 @@ fn adopt_workspace_with_store(
         intended_remote: None,
     };
     store.insert(&metadata)?;
-    Ok(AdoptionResult { metadata })
+    Ok(AdoptionResult {
+        metadata,
+        current_revision,
+    })
 }
 
 fn preflight_creations(

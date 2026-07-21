@@ -43,9 +43,11 @@ pub fn resolve_workspace_token(client: &JjClient, token: &str) -> Result<Resolve
 
 /// Captures one consistent view of repository and workspace state.
 ///
-/// Construction may discover JJ's repository configuration path. During capture, only the
-/// explicitly selected working copies may run normal JJ commands. Every JJ query after the final
-/// operation ID is captured uses `--at-operation` and `--ignore-working-copy` through `JjClient`.
+/// Construction discovers JJ's repository configuration path. On an older repository, JJ may
+/// initialize its empty secure-config directory while answering that documented query; it does not
+/// change the repository operation or working copy. During capture, only the explicitly selected
+/// working copies may run normal JJ commands. Every JJ query after the final operation ID is
+/// captured uses `--at-operation` and `--ignore-working-copy` through `JjClient`.
 #[derive(Debug, Clone)]
 pub struct ObservationEngine {
     client: JjClient,

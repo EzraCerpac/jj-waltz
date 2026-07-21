@@ -229,7 +229,11 @@ struct AdoptCommand {
     name: String,
     #[arg(long, value_name = "REVSET", required = true)]
     base: String,
-    #[arg(long, value_name = "BOOKMARK")]
+    #[arg(
+        long,
+        value_name = "BOOKMARK",
+        help = "Record a bookmark association without creating or moving the bookmark"
+    )]
     bookmark: Option<String>,
 }
 
@@ -484,11 +488,6 @@ fn run_adopt(cmd: AdoptCommand) -> Result<()> {
         .filter(|path| path.is_dir())
         .with_context(|| format!("workspace path is missing or unusable: {}", resolved.name))?;
 
-    // Freeze current revision before writing metadata. Both queries ignore the working copy and do
-    // not create JJ operations.
-    let workspace_client = JjClient::new(&path);
-    let operation_id = workspace_client.operation_id()?;
-    let current_revision = workspace_client.resolve_one_at(&operation_id, "@")?;
     let result = lifecycle::adopt_workspace(&AdoptionRequest {
         workspace_name: resolved.name.clone(),
         workspace_root: path.clone(),
@@ -507,8 +506,8 @@ fn run_adopt(cmd: AdoptCommand) -> Result<()> {
         path.display(),
         result.metadata.creation_base_commit_id,
         result.metadata.creation_operation_id,
-        current_revision.commit_id,
-        current_revision.change_id,
+        result.current_revision.commit_id,
+        result.current_revision.change_id,
         bookmark,
     );
     write_text(&output)
@@ -528,6 +527,7 @@ fn render_status_plain(envelope: &SnapshotEnvelope) -> String {
         .expect("status envelope contains one workspace");
     let mut output = String::new();
     writeln!(output, "workspace: {}", workspace.name).expect("write string");
+    writeln!(output, "operation: {}", envelope.repository.operation_id).expect("write string");
     writeln!(
         output,
         "path: {}",
