@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,17 @@ use std::str::FromStr;
 
 /// Oldest JJ release exercised by jj-waltz's compatibility test matrix.
 pub const MINIMUM_SUPPORTED_JJ_VERSION: JjVersion = JjVersion::new(0, 39, 0);
+
+// Keep every workspace field JSON encoded. Tabs and newlines inside names and descriptions cannot
+// corrupt record boundaries. The conflict guards keep diff statistics compatible with JJ 0.39.
+const WORKSPACE_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
+const CURRENT_WORKSPACE_NAMES_TEMPLATE: &str =
+    r#"if(target.current_working_copy(), json(name) ++ "\n", "")"#;
+const WORKSPACE_FACTS_TEMPLATE: &str = r#"json(name) ++ "\t" ++ json(target.change_id()) ++ "\t" ++ json(target.commit_id()) ++ "\t" ++ json(target.description().first_line()) ++ "\t" ++ json(target.current_working_copy()) ++ "\t" ++ json(target.empty()) ++ "\t" ++ json(target.conflict()) ++ "\t" ++ json(target.divergent()) ++ "\t" ++ json(target.diff().files().len()) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_added())) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_removed())) ++ "\t" ++ json(target.conflicted_files().len()) ++ "\n""#;
+const REVISION_TEMPLATE: &str =
+    "change_id ++ \"\\0\" ++ commit_id ++ \"\\0\" ++ description.first_line() ++ \"\\0\"";
+const LOCAL_BOOKMARK_NAMES_TEMPLATE: &str = r#"if(remote, "", json(name) ++ "\n")"#;
+const BOOKMARK_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjVersion {
@@ -224,6 +236,22 @@ pub struct ResolvedRevision {
     pub description: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceTargetFacts {
+    pub name: String,
+    pub change_id: String,
+    pub commit_id: String,
+    pub description: String,
+    pub current_working_copy: bool,
+    pub empty: bool,
+    pub conflicted: bool,
+    pub divergent: bool,
+    pub files: u32,
+    pub added: u32,
+    pub removed: u32,
+    pub conflicts: u32,
+}
+
 /// Direct, shell-free JJ process adapter rooted at one working directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjClient {
@@ -310,6 +338,42 @@ impl JjClient {
         Ok(JjCapabilities::for_version(self.version()?))
     }
 
+    /// List workspace names without snapshotting a working copy.
+    pub fn workspace_names(&self) -> Result<Vec<String>> {
+        let output = self.run([
+            "--ignore-working-copy",
+            "workspace",
+            "list",
+            "-T",
+            WORKSPACE_NAMES_TEMPLATE,
+        ])?;
+        parse_json_string_lines(output.stdout()?, "workspace name")
+    }
+
+    /// List targets that JJ marks as the current working copy without snapshotting it.
+    pub fn current_workspace_target_names(&self) -> Result<Vec<String>> {
+        let output = self.run([
+            "--ignore-working-copy",
+            "workspace",
+            "list",
+            "-T",
+            CURRENT_WORKSPACE_NAMES_TEMPLATE,
+        ])?;
+        parse_json_string_lines(output.stdout()?, "current workspace name")
+    }
+
+    /// Read workspace target facts at one frozen repository operation.
+    pub fn workspace_target_facts_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+    ) -> Result<BTreeMap<String, WorkspaceTargetFacts>> {
+        let output = self.run_at(
+            operation_id,
+            ["workspace", "list", "-T", WORKSPACE_FACTS_TEMPLATE],
+        )?;
+        parse_workspace_target_facts(output.stdout()?)
+    }
+
     /// Capture the current operation without snapshotting or reconciling the working copy.
     pub fn operation_id(&self) -> Result<String> {
         let output = self.run_at(
@@ -351,18 +415,73 @@ impl JjClient {
         revset: impl AsRef<OsStr>,
     ) -> Result<ResolvedRevision> {
         let revset = revset.as_ref();
+        let revisions = self.resolve_all_at(operation_id, revset)?;
+        match revisions.as_slice() {
+            [revision] => Ok(revision.clone()),
+            _ => bail!(
+                "revset {:?} resolved to {} revisions; expected exactly one",
+                revset,
+                revisions.len()
+            ),
+        }
+    }
+
+    /// Resolve every revision in a revset at a previously captured repository operation.
+    pub fn resolve_all_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        revset: impl AsRef<OsStr>,
+    ) -> Result<Vec<ResolvedRevision>> {
+        let revset = revset.as_ref();
         let args = [
             OsString::from("log"),
             OsString::from("-r"),
             revset.to_owned(),
             OsString::from("--no-graph"),
             OsString::from("--template"),
-            OsString::from(
-                "change_id ++ \"\\0\" ++ commit_id ++ \"\\0\" ++ description.first_line() ++ \"\\0\"",
-            ),
+            OsString::from(REVISION_TEMPLATE),
         ];
         let output = self.run_at(operation_id, args)?;
-        parse_resolved_revisions(revset, output.stdout()?)
+        parse_resolved_revisions(output.stdout()?)
+    }
+
+    /// Read local bookmark names at one frozen repository operation.
+    pub fn local_bookmark_names_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+    ) -> Result<BTreeSet<String>> {
+        let output = self.run_at(
+            operation_id,
+            [
+                "bookmark",
+                "list",
+                "--template",
+                LOCAL_BOOKMARK_NAMES_TEMPLATE,
+            ],
+        )?;
+        Ok(parse_json_string_lines(output.stdout()?, "bookmark name")?
+            .into_iter()
+            .collect())
+    }
+
+    /// Read conflicted bookmark names at one frozen repository operation.
+    pub fn conflicted_bookmark_names_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+    ) -> Result<BTreeSet<String>> {
+        let output = self.run_at(
+            operation_id,
+            [
+                "bookmark",
+                "list",
+                "--conflicted",
+                "--template",
+                BOOKMARK_NAMES_TEMPLATE,
+            ],
+        )?;
+        Ok(parse_json_string_lines(output.stdout()?, "bookmark name")?
+            .into_iter()
+            .collect())
     }
 
     /// Return JJ's repository-level config path.
@@ -451,27 +570,108 @@ fn compare_prerelease(left: Option<&str>, right: Option<&str>) -> Ordering {
     }
 }
 
-fn parse_resolved_revisions(revset: &OsStr, output: &str) -> Result<ResolvedRevision> {
+fn parse_resolved_revisions(output: &str) -> Result<Vec<ResolvedRevision>> {
     let fields = output.split_terminator('\0').collect::<Vec<_>>();
     if fields.len() % 3 != 0 {
         bail!("JJ revision query returned malformed template output")
     }
-    let revisions = fields
+    Ok(fields
         .chunks_exact(3)
         .map(|fields| ResolvedRevision {
             change_id: fields[0].to_owned(),
             commit_id: fields[1].to_owned(),
             description: fields[2].to_owned(),
         })
-        .collect::<Vec<_>>();
-    match revisions.as_slice() {
-        [revision] => Ok(revision.clone()),
-        _ => bail!(
-            "revset {:?} resolved to {} revisions; expected exactly one",
-            revset,
-            revisions.len()
-        ),
+        .collect())
+}
+
+fn parse_workspace_target_facts(output: &str) -> Result<BTreeMap<String, WorkspaceTargetFacts>> {
+    let mut facts = BTreeMap::new();
+    for (index, line) in output.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let [
+            name,
+            change_id,
+            commit_id,
+            description,
+            current_working_copy,
+            empty,
+            conflicted,
+            divergent,
+            files,
+            added,
+            removed,
+            conflicts,
+        ] = fields.as_slice()
+        else {
+            bail!(
+                "JJ workspace query returned malformed record {} with {} fields; expected 12",
+                index + 1,
+                fields.len()
+            )
+        };
+
+        let entry = WorkspaceTargetFacts {
+            name: parse_json_field(name, index, "name")?,
+            change_id: parse_json_field(change_id, index, "change ID")?,
+            commit_id: parse_json_field(commit_id, index, "commit ID")?,
+            description: parse_json_field(description, index, "description")?,
+            current_working_copy: parse_json_field(
+                current_working_copy,
+                index,
+                "current working copy",
+            )?,
+            empty: parse_json_field(empty, index, "empty")?,
+            conflicted: parse_json_field(conflicted, index, "conflicted")?,
+            divergent: parse_json_field(divergent, index, "divergent")?,
+            files: parse_count(files, index, "files")?,
+            added: parse_count(added, index, "added")?,
+            removed: parse_count(removed, index, "removed")?,
+            conflicts: parse_count(conflicts, index, "conflicts")?,
+        };
+        let name = entry.name.clone();
+        if facts.insert(name.clone(), entry).is_some() {
+            bail!("JJ workspace query returned duplicate workspace `{name}`")
+        }
     }
+    if facts.is_empty() {
+        bail!("JJ workspace query returned no workspaces")
+    }
+    Ok(facts)
+}
+
+fn parse_json_string_lines(output: &str, field: &str) -> Result<Vec<String>> {
+    output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .enumerate()
+        .map(|(index, line)| parse_json_field(line, index, field))
+        .collect()
+}
+
+fn parse_json_field<T>(value: &str, record_index: usize, field: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_str(value).with_context(|| {
+        format!(
+            "JJ query returned invalid {field} JSON in record {}",
+            record_index + 1
+        )
+    })
+}
+
+fn parse_count(value: &str, record_index: usize, field: &str) -> Result<u32> {
+    let value: u64 = parse_json_field(value, record_index, field)?;
+    value.try_into().with_context(|| {
+        format!(
+            "JJ workspace query returned {field} count outside u32 range in record {}",
+            record_index + 1
+        )
+    })
 }
 
 #[cfg(test)]
@@ -535,26 +735,53 @@ mod tests {
     }
 
     #[test]
-    fn parses_exactly_one_revision() {
-        let revision =
-            parse_resolved_revisions(OsStr::new("trunk()"), "change-id\0commit-id\0first line\0")
-                .unwrap();
+    fn parses_revision_records() {
+        let revisions = parse_resolved_revisions("change-id\0commit-id\0first line\0").unwrap();
+        let revision = &revisions[0];
         assert_eq!(revision.change_id, "change-id");
         assert_eq!(revision.commit_id, "commit-id");
         assert_eq!(revision.description, "first line");
 
-        let undescribed =
-            parse_resolved_revisions(OsStr::new("@"), "other-change\0other-commit\0\0").unwrap();
+        let undescribed = &parse_resolved_revisions("other-change\0other-commit\0\0").unwrap()[0];
         assert!(undescribed.description.is_empty());
 
-        assert!(parse_resolved_revisions(OsStr::new("none()"), "").is_err());
-        assert!(
-            parse_resolved_revisions(
-                OsStr::new("all()"),
-                "change-1\0commit-1\0one\0change-2\0commit-2\0two\0",
-            )
-            .is_err()
+        assert!(parse_resolved_revisions("").unwrap().is_empty());
+        assert_eq!(
+            parse_resolved_revisions("change-1\0commit-1\0one\0change-2\0commit-2\0two\0")
+                .unwrap()
+                .len(),
+            2
         );
+        assert!(parse_resolved_revisions("change\0commit\0").is_err());
+    }
+
+    #[test]
+    fn parses_json_tab_workspace_records_without_delimiter_ambiguity() {
+        let output = [
+            r#""solver\tui""#,
+            r#""change-1""#,
+            r#""commit-1""#,
+            r#""line one\nline two""#,
+            "true",
+            "false",
+            "true",
+            "false",
+            "3",
+            "18",
+            "4",
+            "2",
+        ]
+        .join("\t")
+            + "\n";
+        let parsed = parse_workspace_target_facts(&output).unwrap();
+        let facts = &parsed["solver\tui"];
+        assert_eq!(facts.description, "line one\nline two");
+        assert_eq!(facts.files, 3);
+        assert_eq!(facts.conflicts, 2);
+
+        assert!(parse_workspace_target_facts("\"name\"\t\"too-few\"\n").is_err());
+        let line = "\"same\"\t\"change\"\t\"commit\"\t\"description\"\ttrue\ttrue\tfalse\tfalse\t0\t0\t0\t0\n";
+        assert!(parse_workspace_target_facts(&format!("{line}{line}")).is_err());
     }
 
     #[test]
@@ -581,5 +808,22 @@ mod tests {
         assert!(!operation_id.is_empty());
         assert!(!revision.change_id.is_empty());
         assert!(!revision.commit_id.is_empty());
+        assert_eq!(client.workspace_names().unwrap(), ["default"]);
+        assert_eq!(
+            client.current_workspace_target_names().unwrap(),
+            ["default"]
+        );
+        assert!(
+            client
+                .workspace_target_facts_at(&operation_id)
+                .unwrap()
+                .contains_key("default")
+        );
+        assert!(
+            client
+                .local_bookmark_names_at(&operation_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

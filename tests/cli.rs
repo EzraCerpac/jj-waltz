@@ -1442,6 +1442,20 @@ fn adopt_records_intent_without_changing_jj_state() {
     ]);
     fs::write(legacy_root.join(".jj/jw-bookmark"), "broken\nmarker\n")
         .expect("write invalid legacy marker");
+    let missing_before = repo.operation_id();
+    let missing = repo.command_output(&[
+        "adopt",
+        "legacy",
+        "--base",
+        "legacy@-",
+        "--bookmark",
+        "missing",
+    ]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("does not exist locally"));
+    assert_eq!(repo.operation_id(), missing_before);
+
+    repo.run_jj(["bookmark", "create", "declared", "-r", "legacy@"]);
     let operation = repo.operation_id();
     let revision = repo.revision_commit_id("legacy@");
     let bookmarks = repo.bookmarks();

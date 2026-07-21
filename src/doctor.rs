@@ -745,71 +745,32 @@ fn query_revisions(
     operation_id: &str,
     revset: &str,
 ) -> Result<Vec<DoctorRevision>> {
-    let output = client.run_at(
-        operation_id,
-        [
-            "log",
-            "-r",
-            revset,
-            "--no-graph",
-            "--template",
-            "change_id ++ \"\\0\" ++ commit_id ++ \"\\0\" ++ description.first_line() ++ \"\\0\"",
-        ],
-    )?;
-    let fields = output.stdout()?.split_terminator('\0').collect::<Vec<_>>();
-    if fields.len() % 3 != 0 {
-        bail!("JJ revision query returned malformed template output")
-    }
-    Ok(fields
-        .chunks_exact(3)
-        .map(|fields| DoctorRevision {
-            change_id: fields[0].to_owned(),
-            commit_id: fields[1].to_owned(),
-            description: fields[2].to_owned(),
+    Ok(client
+        .resolve_all_at(operation_id, revset)?
+        .into_iter()
+        .map(|revision| DoctorRevision {
+            change_id: revision.change_id,
+            commit_id: revision.commit_id,
+            description: revision.description,
         })
         .collect())
 }
 
 fn query_workspaces(client: &JjClient, operation_id: &str) -> Result<Vec<DoctorWorkspace>> {
-    let output = client.run_at(
-        operation_id,
-        [
-            "workspace",
-            "list",
-            "--template",
-            "json(name) ++ \"\\t\" ++ json(target.commit_id()) ++ \"\\t\" ++ json(target.divergent()) ++ \"\\n\"",
-        ],
-    )?;
-    let mut workspaces = output
-        .stdout()?
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(parse_workspace_row)
-        .collect::<Result<Vec<_>>>()?;
-    workspaces.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(workspaces)
-}
-
-fn parse_workspace_row(line: &str) -> Result<DoctorWorkspace> {
-    let fields = line.split('\t').collect::<Vec<_>>();
-    let [name, commit_id, divergent] = fields.as_slice() else {
-        bail!("JJ workspace query returned malformed template output")
-    };
-    Ok(DoctorWorkspace {
-        name: serde_json::from_str(name).context("workspace name was not valid JSON")?,
-        commit_id: serde_json::from_str(commit_id)
-            .context("workspace commit ID was not valid JSON")?,
-        divergent: serde_json::from_str(divergent)
-            .context("workspace divergence flag was not valid JSON")?,
-        path: None,
-    })
+    Ok(client
+        .workspace_target_facts_at(operation_id)?
+        .into_values()
+        .map(|facts| DoctorWorkspace {
+            name: facts.name,
+            commit_id: facts.commit_id,
+            divergent: facts.divergent,
+            path: None,
+        })
+        .collect())
 }
 
 fn query_workspace_root(client: &JjClient, operation_id: &str, name: &str) -> Result<PathBuf> {
-    let output = client.run_at_unchecked(
-        operation_id,
-        ["workspace", "root", "--name", name],
-    )?;
+    let output = client.run_at_unchecked(operation_id, ["workspace", "root", "--name", name])?;
     if !output.success() {
         let message = output.stderr();
         bail!(if message.is_empty() {
@@ -841,38 +802,14 @@ fn validate_workspace_path(path: &Path) -> Result<()> {
 }
 
 fn query_bookmark_names(client: &JjClient, operation_id: &str) -> Result<BTreeSet<String>> {
-    let output = client.run_at(
-        operation_id,
-        [
-            "bookmark",
-            "list",
-            "--template",
-            "if(remote, \"\", json(name) ++ \"\\n\")",
-        ],
-    )?;
-    parse_json_lines(output.stdout()?)
+    client.local_bookmark_names_at(operation_id)
 }
 
 fn query_conflicted_bookmarks(client: &JjClient, operation_id: &str) -> Result<Vec<String>> {
-    let output = client.run_at(
-        operation_id,
-        [
-            "bookmark",
-            "list",
-            "--conflicted",
-            "--template",
-            "json(name) ++ \"\\n\"",
-        ],
-    )?;
-    Ok(parse_json_lines(output.stdout()?)?.into_iter().collect())
-}
-
-fn parse_json_lines(output: &str) -> Result<BTreeSet<String>> {
-    output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_str(line).context("JJ name template returned invalid JSON"))
-        .collect()
+    Ok(client
+        .conflicted_bookmark_names_at(operation_id)?
+        .into_iter()
+        .collect())
 }
 
 #[cfg(test)]

@@ -326,6 +326,16 @@ fn adopt_workspace_with_store(
         Some(bookmark) => Some(bookmark.clone()),
         None => workspace::legacy_workspace_bookmark(&request.workspace_root)?,
     };
+    if let Some(bookmark) = &bookmark {
+        let bookmarks = client
+            .local_bookmark_names_at(&operation_id)
+            .context("failed to verify the adoption bookmark at the captured operation")?;
+        if !bookmarks.contains(bookmark) {
+            bail!(
+                "associated bookmark `{bookmark}` does not exist locally; create it first or adopt without a bookmark association"
+            )
+        }
+    }
     let metadata = ManagedWorkspaceMetadata {
         workspace_name: request.workspace_name.clone(),
         created_at_unix_ms: unix_timestamp_ms()?,
@@ -586,18 +596,24 @@ mod tests {
         let store =
             WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
                 .expect("test metadata store");
+        let request = AdoptionRequest {
+            workspace_name: "default".to_owned(),
+            workspace_root: root.clone(),
+            base_revset: "parents(@)".to_owned(),
+            bookmark: None,
+        };
+
+        let missing_before = client.operation_id().expect("operation before rejection");
+        let error = adopt_workspace_with_store(&request, &client, &store)
+            .expect_err("missing imported bookmark");
+        assert!(error.to_string().contains("does not exist locally"));
+        assert_eq!(client.operation_id().unwrap(), missing_before);
+        assert!(store.get("default").unwrap().is_none());
+
+        run_jj(&root, &["bookmark", "create", "wip/legacy", "-r", "@"]);
         let before = client.operation_id().expect("operation before adoption");
-        let result = adopt_workspace_with_store(
-            &AdoptionRequest {
-                workspace_name: "default".to_owned(),
-                workspace_root: root.clone(),
-                base_revset: "parents(@)".to_owned(),
-                bookmark: None,
-            },
-            &client,
-            &store,
-        )
-        .expect("adopt workspace");
+        let result =
+            adopt_workspace_with_store(&request, &client, &store).expect("adopt workspace");
         let after = client.operation_id().expect("operation after adoption");
 
         assert_eq!(before, after);
@@ -628,6 +644,7 @@ mod tests {
             return;
         }
         let (_tempdir, root) = test_repo();
+        run_jj(&root, &["bookmark", "create", "explicit", "-r", "@"]);
         fs::write(root.join(".jj/jw-bookmark"), "one\ntwo\n").expect("write invalid marker");
         let client = JjClient::new(&root);
         let store =

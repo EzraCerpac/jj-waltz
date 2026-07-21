@@ -1,4 +1,4 @@
-use crate::jj::{JjClient, JjCommandError, JjErrorKind};
+use crate::jj::{JjClient, JjCommandError, JjErrorKind, WorkspaceTargetFacts};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use crate::snapshot::{
     Hazard, HazardId, ManagementState, RepositorySnapshot, ResolvedTrunk, SnapshotCommand,
@@ -12,14 +12,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const CAPTURE_ATTEMPTS: usize = 2;
 const PREVIOUS_WORKSPACE_FILE: &str = "jw-prev-workspace";
-
-// Keep every field JSON encoded. Tabs and newlines inside names and descriptions therefore cannot
-// corrupt the record boundary. This avoids WorkspaceRef.root(), which is absent from older JJ
-// releases in the supported compatibility window.
-const WORKSPACE_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
-const CURRENT_WORKSPACE_NAMES_TEMPLATE: &str =
-    r#"if(target.current_working_copy(), json(name) ++ "\n", "")"#;
-const WORKSPACE_FACTS_TEMPLATE: &str = r#"json(name) ++ "\t" ++ json(target.change_id()) ++ "\t" ++ json(target.commit_id()) ++ "\t" ++ json(target.description().first_line()) ++ "\t" ++ json(target.current_working_copy()) ++ "\t" ++ json(target.empty()) ++ "\t" ++ json(target.conflict()) ++ "\t" ++ json(target.divergent()) ++ "\t" ++ json(target.diff().files().len()) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_added())) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_removed())) ++ "\t" ++ json(target.conflicted_files().len()) ++ "\n""#;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RefreshMode {
@@ -227,12 +219,11 @@ impl ObservationEngine {
         Ok(states)
     }
 
-    fn workspace_facts_at(&self, operation_id: &str) -> Result<BTreeMap<String, TargetFacts>> {
-        let output = self.client.run_at(
-            operation_id,
-            ["workspace", "list", "-T", WORKSPACE_FACTS_TEMPLATE],
-        )?;
-        parse_workspace_facts(output.stdout()?)
+    fn workspace_facts_at(
+        &self,
+        operation_id: &str,
+    ) -> Result<BTreeMap<String, WorkspaceTargetFacts>> {
+        self.client.workspace_target_facts_at(operation_id)
     }
 
     fn workspace_paths_at<'a>(
@@ -311,8 +302,8 @@ impl CaptureSelection {
 
     fn selected_facts<'a>(
         &self,
-        facts: &'a BTreeMap<String, TargetFacts>,
-    ) -> Result<Vec<&'a TargetFacts>> {
+        facts: &'a BTreeMap<String, WorkspaceTargetFacts>,
+    ) -> Result<Vec<&'a WorkspaceTargetFacts>> {
         match self {
             Self::List => Ok(facts.values().collect()),
             Self::Status(name) => {
@@ -358,14 +349,7 @@ struct PreliminaryInventory {
 
 impl PreliminaryInventory {
     fn discover(client: &JjClient) -> Result<Self> {
-        let output = client.run([
-            "--ignore-working-copy",
-            "workspace",
-            "list",
-            "-T",
-            WORKSPACE_NAMES_TEMPLATE,
-        ])?;
-        let names = parse_json_lines(output.stdout()?, "workspace name")?;
+        let names = client.workspace_names()?;
         if names.is_empty() {
             bail!("JJ workspace inventory was empty")
         }
@@ -393,14 +377,7 @@ impl PreliminaryInventory {
         let current = match path_matches.as_slice() {
             [name] => name.clone(),
             [] => {
-                let output = client.run([
-                    "--ignore-working-copy",
-                    "workspace",
-                    "list",
-                    "-T",
-                    CURRENT_WORKSPACE_NAMES_TEMPLATE,
-                ])?;
-                let target_matches = parse_json_lines(output.stdout()?, "current workspace name")?;
+                let target_matches = client.current_workspace_target_names()?;
                 let candidates = target_matches
                     .into_iter()
                     .filter(|name| roots.get(name).is_some_and(Option::is_none))
@@ -439,22 +416,6 @@ impl PreliminaryInventory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TargetFacts {
-    name: String,
-    change_id: String,
-    commit_id: String,
-    description: String,
-    current_working_copy: bool,
-    empty: bool,
-    conflicted: bool,
-    divergent: bool,
-    files: u32,
-    added: u32,
-    removed: u32,
-    conflicts: u32,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefreshState {
     Refreshed,
@@ -462,7 +423,7 @@ enum RefreshState {
 }
 
 struct DerivationInput<'a> {
-    facts: &'a TargetFacts,
+    facts: &'a WorkspaceTargetFacts,
     path: Option<PathBuf>,
     role: WorkspaceRole,
     refresh_state: Option<RefreshState>,
@@ -556,95 +517,6 @@ fn derive_workspace_snapshot(input: DerivationInput<'_>) -> WorkspaceSnapshot {
         intended_remote: metadata.and_then(|entry| entry.intended_remote.clone()),
         hazards,
     }
-}
-
-fn parse_workspace_facts(output: &str) -> Result<BTreeMap<String, TargetFacts>> {
-    let mut facts = BTreeMap::new();
-    for (index, line) in output.lines().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let fields = line.split('\t').collect::<Vec<_>>();
-        let [
-            name,
-            change_id,
-            commit_id,
-            description,
-            current_working_copy,
-            empty,
-            conflicted,
-            divergent,
-            files,
-            added,
-            removed,
-            conflicts,
-        ] = fields.as_slice()
-        else {
-            bail!(
-                "JJ workspace query returned malformed record {} with {} fields; expected 12",
-                index + 1,
-                fields.len()
-            )
-        };
-
-        let entry = TargetFacts {
-            name: parse_json_field(name, index, "name")?,
-            change_id: parse_json_field(change_id, index, "change ID")?,
-            commit_id: parse_json_field(commit_id, index, "commit ID")?,
-            description: parse_json_field(description, index, "description")?,
-            current_working_copy: parse_json_field(
-                current_working_copy,
-                index,
-                "current working copy",
-            )?,
-            empty: parse_json_field(empty, index, "empty")?,
-            conflicted: parse_json_field(conflicted, index, "conflicted")?,
-            divergent: parse_json_field(divergent, index, "divergent")?,
-            files: parse_count(files, index, "files")?,
-            added: parse_count(added, index, "added")?,
-            removed: parse_count(removed, index, "removed")?,
-            conflicts: parse_count(conflicts, index, "conflicts")?,
-        };
-        let name = entry.name.clone();
-        if facts.insert(name.clone(), entry).is_some() {
-            bail!("JJ workspace query returned duplicate workspace `{name}`")
-        }
-    }
-    if facts.is_empty() {
-        bail!("JJ workspace query returned no workspaces")
-    }
-    Ok(facts)
-}
-
-fn parse_json_lines(output: &str, field: &str) -> Result<Vec<String>> {
-    output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .enumerate()
-        .map(|(index, line)| parse_json_field(line, index, field))
-        .collect()
-}
-
-fn parse_json_field<T>(value: &str, record_index: usize, field: &str) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    serde_json::from_str(value).with_context(|| {
-        format!(
-            "JJ workspace query returned invalid {field} JSON in record {}",
-            record_index + 1
-        )
-    })
-}
-
-fn parse_count(value: &str, record_index: usize, field: &str) -> Result<u32> {
-    let value: u64 = parse_json_field(value, record_index, field)?;
-    value.try_into().with_context(|| {
-        format!(
-            "JJ workspace query returned {field} count outside u32 range in record {}",
-            record_index + 1
-        )
-    })
 }
 
 fn query_workspace_root(client: &JjClient, name: Option<&str>) -> Result<Option<PathBuf>> {
@@ -799,8 +671,8 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    fn facts() -> TargetFacts {
-        TargetFacts {
+    fn facts() -> WorkspaceTargetFacts {
+        WorkspaceTargetFacts {
             name: "solver".to_owned(),
             change_id: "change-1".to_owned(),
             commit_id: "commit-1".to_owned(),
@@ -814,38 +686,6 @@ mod tests {
             removed: 4,
             conflicts: 0,
         }
-    }
-
-    #[test]
-    fn parses_json_tab_records_without_delimiter_ambiguity() {
-        let output = [
-            r#""solver\tui""#,
-            r#""change-1""#,
-            r#""commit-1""#,
-            r#""line one\nline two""#,
-            "true",
-            "false",
-            "true",
-            "false",
-            "3",
-            "18",
-            "4",
-            "2",
-        ]
-        .join("\t")
-            + "\n";
-        let parsed = parse_workspace_facts(&output).unwrap();
-        let facts = &parsed["solver\tui"];
-        assert_eq!(facts.description, "line one\nline two");
-        assert_eq!(facts.files, 3);
-        assert_eq!(facts.conflicts, 2);
-    }
-
-    #[test]
-    fn rejects_malformed_and_duplicate_workspace_records() {
-        assert!(parse_workspace_facts("\"name\"\t\"too-few\"\n").is_err());
-        let line = "\"same\"\t\"change\"\t\"commit\"\t\"description\"\ttrue\ttrue\tfalse\tfalse\t0\t0\t0\t0\n";
-        assert!(parse_workspace_facts(&format!("{line}{line}")).is_err());
     }
 
     #[test]
