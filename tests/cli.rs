@@ -638,6 +638,54 @@ fn remove_deletes_workspace_directory_by_default() {
     assert!(!workspace_root.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn remove_reports_partial_progress_and_cleans_metadata_when_directory_remains() {
+    use std::os::unix::fs::PermissionsExt;
+
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let workspace_root = repo.default_root.with_extension("feature-a");
+    repo.cmd()
+        .args(["add", "--bookmark", "wip/feature-a", "feature-a"])
+        .assert()
+        .success();
+    let canonical_workspace_root =
+        fs::canonicalize(&workspace_root).expect("canonical workspace path");
+
+    let parent = repo._tempdir.path();
+    let original_permissions = fs::metadata(parent)
+        .expect("workspace parent metadata")
+        .permissions();
+    let mut blocked_permissions = original_permissions.clone();
+    blocked_permissions.set_mode(0o500);
+    fs::set_permissions(parent, blocked_permissions).expect("block directory deletion");
+
+    let output = repo.command_output(&["remove", "--delete-bookmark", "feature-a"]);
+
+    fs::set_permissions(parent, original_permissions)
+        .expect("restore workspace parent permissions");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "partial removal: workspace feature-a was forgotten and bookmark wip/feature-a was deleted"
+        ),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "workspace directory remains at {}",
+            canonical_workspace_root.display()
+        )),
+        "stderr: {stderr}"
+    );
+    assert!(workspace_root.is_dir());
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    assert!(!repo.bookmarks().contains(&"wip/feature-a".to_owned()));
+    assert!(repo.metadata_record_paths().is_empty());
+}
+
 #[test]
 fn remove_prompts_before_deleting_associated_bookmark() {
     skip_without_jj!();

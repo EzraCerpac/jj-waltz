@@ -3,10 +3,15 @@ use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 const PREVIOUS_WORKSPACE_FILE: &str = "jw-prev-workspace";
 const WORKSPACE_BOOKMARK_FILE: &str = "jw-bookmark";
+const REMOVE_DIRECTORY_ATTEMPTS: usize = 4;
+const REMOVE_DIRECTORY_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceEntry {
@@ -399,18 +404,13 @@ pub fn execute_remove_workspace(
     if delete_bookmarks && !plan.bookmarks.is_empty() {
         let mut args = vec!["bookmark".to_owned(), "delete".to_owned()];
         args.extend(plan.bookmarks.iter().cloned());
-        JjClient::current()?.run(&args)?;
-        deleted_bookmarks.clone_from(&plan.bookmarks);
-    }
-
-    let deleted_dir = plan.delete_dir && plan.path.is_dir();
-    if deleted_dir {
-        fs::remove_dir_all(&plan.path).with_context(|| {
+        JjClient::current()?.run(&args).with_context(|| {
             format!(
-                "failed to delete workspace directory {}",
-                plan.path.display()
+                "partial removal: workspace {} was forgotten, but associated bookmark deletion failed",
+                plan.workspace
             )
         })?;
+        deleted_bookmarks.clone_from(&plan.bookmarks);
     }
 
     if let Some(metadata) = &plan.managed_metadata {
@@ -418,13 +418,30 @@ pub fn execute_remove_workspace(
             .managed_store
             .as_ref()
             .expect("managed metadata plan retains its store");
-        let removed = store.remove_if_matches(metadata)?;
+        let removed = store.remove_if_matches(metadata).with_context(|| {
+            format!(
+                "{}; managed workspace metadata cleanup failed",
+                partial_removal_progress(&plan.workspace, &deleted_bookmarks)
+            )
+        })?;
         if !removed {
             bail!(
-                "workspace metadata changed during removal and was retained: {}",
+                "{}; workspace metadata changed during removal and was retained: {}",
+                partial_removal_progress(&plan.workspace, &deleted_bookmarks),
                 metadata.workspace_name
             )
         }
+    }
+
+    let deleted_dir = plan.delete_dir && plan.path.is_dir();
+    if deleted_dir {
+        remove_workspace_directory(&plan.path).with_context(|| {
+            format!(
+                "{}; workspace directory remains at {}",
+                partial_removal_progress(&plan.workspace, &deleted_bookmarks),
+                plan.path.display()
+            )
+        })?;
     }
 
     Ok(RemovalResult {
@@ -433,6 +450,42 @@ pub fn execute_remove_workspace(
         deleted_dir,
         deleted_bookmarks,
     })
+}
+
+fn partial_removal_progress(workspace: &str, deleted_bookmarks: &[String]) -> String {
+    let mut progress = format!("partial removal: workspace {workspace} was forgotten");
+    match deleted_bookmarks {
+        [] => {}
+        [bookmark] => progress.push_str(&format!(" and bookmark {bookmark} was deleted")),
+        bookmarks => progress.push_str(&format!(
+            " and bookmarks {} were deleted",
+            bookmarks.join(", ")
+        )),
+    }
+    progress
+}
+
+fn remove_workspace_directory(path: &Path) -> io::Result<()> {
+    remove_workspace_directory_with(path, |path| fs::remove_dir_all(path))
+}
+
+fn remove_workspace_directory_with(
+    path: &Path,
+    mut remove: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    for attempt in 1..=REMOVE_DIRECTORY_ATTEMPTS {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == io::ErrorKind::DirectoryNotEmpty
+                    && attempt < REMOVE_DIRECTORY_ATTEMPTS =>
+            {
+                thread::sleep(REMOVE_DIRECTORY_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("directory removal loop always returns")
 }
 
 fn add_workspace_by_name_with_inventory(
@@ -879,5 +932,26 @@ mod tests {
         assert!(validate_workspace_name("../bad").is_err());
         assert!(validate_workspace_name("-bad").is_err());
         assert!(validate_workspace_name("bad:name").is_err());
+    }
+
+    #[test]
+    fn retries_directory_not_empty_during_workspace_cleanup() {
+        let tempdir = tempfile::tempdir().expect("create temporary directory");
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir(&workspace).expect("create workspace directory");
+        let mut attempts = 0;
+
+        remove_workspace_directory_with(&workspace, |path| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(io::Error::from(io::ErrorKind::DirectoryNotEmpty))
+            } else {
+                fs::remove_dir_all(path)
+            }
+        })
+        .expect("retry directory removal");
+
+        assert_eq!(attempts, 2);
+        assert!(!workspace.exists());
     }
 }
