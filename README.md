@@ -44,10 +44,22 @@ brew install EzraCerpac/tap/jj-waltz
 cargo install --git https://github.com/EzraCerpac/jj-waltz --locked
 ```
 
+### Herdr plugin
+
+Install the bundled Herdr UI to create and remove `jw` workspaces from Herdr:
+
+```bash
+herdr plugin install EzraCerpac/jj-waltz/plugins/herdr
+```
+
+The plugin builds the `jw` binary from the same repository revision and delegates all
+workspace paths, links, bookmarks, and removal checks to it. See
+[`plugins/herdr`](plugins/herdr) for keybindings and local development.
+
 ## Workspace links
 
 If you keep large ignored data in one workspace and want it accessible from others,
-define links in `.jwlinks.toml`:
+define links in the default workspace's `.jwlinks.toml`:
 
 ```toml
 [[link]]
@@ -57,7 +69,13 @@ required = true
 ```
 
 When you run `jw switch`, `jw` creates symlinks in the target workspace unless you pass
-`--no-links`. You can also run `jw links apply` manually.
+`--no-links`. You can also run `jw links apply` manually from any workspace; it still
+uses the default workspace's configuration. Relative targets resolve from the workspace
+receiving the links.
+
+Sources must stay inside the receiving workspace. Absolute sources and parent traversal
+such as `../outside` are rejected. All rules are checked before `jw` changes the filesystem,
+so a later conflict does not leave earlier links behind.
 
 For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep ignored).
 
@@ -75,6 +93,12 @@ eval "$(jw shell init zsh)"
 
 # fish
 jw shell init fish | source
+
+# elvish
+eval (jw shell init elvish | slurp)
+
+# PowerShell
+jw shell init powershell | Out-String | Invoke-Expression
 ```
 
 Without shell initialization, the raw `jw` binary can only print the target path
@@ -86,6 +110,8 @@ To generate completions manually:
 jw shell completions fish
 jw shell completions zsh
 jw shell completions bash
+jw shell completions elvish
+jw shell completions powershell
 ```
 
 ## Quick start
@@ -100,6 +126,20 @@ jw -
 jw ls
 jw remove frontend tests
 ```
+
+## Removing workspaces
+
+When a workspace has a bookmark created by `jw`, `jw remove` asks before deleting
+that bookmark. The safe default is to keep it. Scripts can choose explicitly:
+
+```bash
+jw remove --delete-bookmark feature-api
+jw remove --keep-bookmark feature-api
+```
+
+Removal is planned before mutation, so default/current-workspace checks and bookmark
+choices happen before the workspace is forgotten. `--keep-dir` forgets the workspace
+without deleting its directory.
 
 ## Config
 

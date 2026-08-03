@@ -1,10 +1,12 @@
-use crate::config::{self, Config};
+use crate::lifecycle::{self, CreatedWorkspace, CreationPolicy};
 use crate::links;
-use crate::shell::{self, ShellKind};
-use crate::workspace::{self, AddOptions, SwitchOptions};
+use crate::shell::{self, Shell};
+use crate::workspace;
 use anyhow::{Context, Result, bail};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use std::ffi::OsString;
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{ArgValueCompleter, CompletionCandidate};
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -26,7 +28,10 @@ pub struct Cli {
 enum Commands {
     #[command(about = "Create one or more workspaces")]
     Add(AddCommand),
-    #[command(alias = "s", about = "Switch to or create a workspace")]
+    #[command(
+        visible_aliases = shell::SWITCH_ALIASES,
+        about = "Switch to or create a workspace"
+    )]
     Switch(SwitchCommand),
     #[command(aliases = ["l", "ls"], about = "List known workspaces")]
     List,
@@ -50,7 +55,12 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct AddCommand {
-    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    #[arg(
+        value_name = "NAME",
+        num_args = 1..,
+        required = true,
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(
         long,
@@ -77,7 +87,12 @@ struct AddCommand {
 
 #[derive(Debug, Args)]
 struct SwitchCommand {
-    #[arg(value_name = "NAME", num_args = 1.., required = true)]
+    #[arg(
+        value_name = "NAME",
+        num_args = 1..,
+        required = true,
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(
         long,
@@ -127,22 +142,42 @@ enum LinksSubcommand {
 
 #[derive(Debug, Args)]
 struct PathCommand {
-    #[arg(value_name = "NAME")]
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     name: String,
 }
 
 #[derive(Debug, Args)]
 struct RemoveCommand {
-    #[arg(value_name = "NAME")]
+    #[arg(
+        value_name = "NAME",
+        add = ArgValueCompleter::new(complete_workspaces)
+    )]
     names: Vec<String>,
     #[arg(long, action = ArgAction::SetTrue, help = "Forget the workspace but keep its directory")]
     keep_dir: bool,
+    #[arg(
+        long,
+        conflicts_with = "keep_bookmark",
+        action = ArgAction::SetTrue,
+        help = "Delete associated bookmarks without prompting"
+    )]
+    delete_bookmark: bool,
+    #[arg(
+        long,
+        conflicts_with = "delete_bookmark",
+        action = ArgAction::SetTrue,
+        help = "Keep associated bookmarks without prompting"
+    )]
+    keep_bookmark: bool,
 }
 
 #[derive(Debug, Args)]
 struct CompletionCommand {
     #[arg(value_enum)]
-    shell: ShellArg,
+    shell: Shell,
 }
 
 #[derive(Debug, Args)]
@@ -155,38 +190,16 @@ struct ShellCommand {
 enum ShellSubcommand {
     Init(ShellInitCommand),
     Completions(CompletionCommand),
-    #[command(hide = true)]
-    CompleteWorkspaces,
 }
 
 #[derive(Debug, Args)]
 struct ShellInitCommand {
     #[arg(value_enum)]
-    shell: ShellArg,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum ShellArg {
-    Bash,
-    Elvish,
-    Fish,
-    Powershell,
-    Zsh,
-}
-
-impl From<ShellArg> for ShellKind {
-    fn from(value: ShellArg) -> Self {
-        match value {
-            ShellArg::Bash => ShellKind::Bash,
-            ShellArg::Elvish => ShellKind::Elvish,
-            ShellArg::Fish => ShellKind::Fish,
-            ShellArg::Powershell => ShellKind::Powershell,
-            ShellArg::Zsh => ShellKind::Zsh,
-        }
-    }
+    shell: Shell,
 }
 
 pub fn run() -> Result<()> {
+    shell::complete_if_requested(Cli::command);
     let cli = Cli::parse_from(normalized_args());
 
     match cli.command {
@@ -200,13 +213,17 @@ pub fn run() -> Result<()> {
         Commands::Current => print_line(workspace::current_workspace_name()?),
         Commands::Shell(cmd) => run_shell(cmd),
         Commands::Links(cmd) => run_links(cmd),
-        Commands::Completions(cmd) => run_completions(cmd.shell.into()),
+        Commands::Completions(cmd) => run_completions(cmd.shell),
     }
 }
 
 fn normalized_args() -> Vec<OsString> {
     let mut args = std::env::args_os().collect::<Vec<_>>();
-    if matches!(args.get(1).and_then(|arg| arg.to_str()), Some("^" | "-")) {
+    if args
+        .get(1)
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|arg| shell::SWITCH_SHORTHANDS.contains(&arg))
+    {
         let target = args[1].clone();
         args[1] = OsString::from("switch");
         args.insert(2, target);
@@ -215,33 +232,15 @@ fn normalized_args() -> Vec<OsString> {
 }
 
 fn run_add(cmd: AddCommand) -> Result<()> {
-    if cmd.bookmark.is_some() && cmd.no_bookmark {
-        bail!("--bookmark and --no-bookmark cannot be used together")
-    }
-    if cmd.bookmark.is_some() && cmd.names.len() > 1 {
-        bail!("--bookmark can only be used with a single workspace")
-    }
-
-    for name in &cmd.names {
-        let bookmark = effective_bookmark(name, cmd.bookmark.as_deref(), cmd.no_bookmark)?;
-        let result = workspace::add_workspace(
-            name,
-            &AddOptions {
-                at_revset: cmd.at.clone(),
-                bookmark,
-            },
-        )
-        .with_context(|| format!("failed to add workspace {name}"))?;
-
-        if !cmd.no_links {
-            apply_links_for_path(&result.path, false)?;
-        }
-
-        println!("Created workspace: {}", result.workspace);
-        println!("  path: {}", result.path.display());
-        if let Some(bookmark) = result.bookmark {
-            println!("  bookmark: {bookmark}");
-        }
+    let policy = CreationPolicy::load(
+        cmd.at,
+        cmd.bookmark,
+        cmd.no_bookmark,
+        cmd.no_links,
+        cmd.names.len(),
+    )?;
+    for created in lifecycle::add_workspaces(&cmd.names, &policy)? {
+        print_created_workspace(&created, false);
     }
 
     Ok(())
@@ -251,57 +250,21 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
     if cmd.execute.is_none() && !cmd.execute_args.is_empty() {
         bail!("arguments after -- require --execute")
     }
-    if cmd.bookmark.is_some() && cmd.no_bookmark {
-        bail!("--bookmark and --no-bookmark cannot be used together")
-    }
-    if cmd.bookmark.is_some() && cmd.names.len() > 1 {
-        bail!("--bookmark can only be used with a single workspace")
-    }
-
-    let (final_name, intermediate_names) = cmd
-        .names
-        .split_last()
-        .expect("clap requires at least one workspace name");
-
-    for name in intermediate_names {
-        if workspace::workspace_exists(&workspace::resolve_workspace_token(name)?)? {
-            continue;
-        }
-        let bookmark = effective_bookmark(name, None, cmd.no_bookmark)?;
-        let result = workspace::add_workspace(
-            name,
-            &AddOptions {
-                at_revset: cmd.at.clone(),
-                bookmark,
-            },
-        )
-        .with_context(|| format!("failed to add workspace {name}"))?;
-        if !cmd.no_links {
-            apply_links_for_path(&result.path, false)?;
-        }
-        if !cmd.print_path {
-            println!("Created workspace: {}", result.workspace);
-            println!("  path: {}", result.path.display());
-            if let Some(bookmark) = result.bookmark {
-                println!("  bookmark: {bookmark}");
-            }
-        }
-    }
-
-    let bookmark = effective_bookmark(final_name, cmd.bookmark.as_deref(), cmd.no_bookmark)?;
-
-    let result = workspace::switch_workspace(
-        final_name,
-        &SwitchOptions {
-            at_revset: cmd.at,
-            bookmark,
-            preserve_subdir: true,
-        },
+    let policy = CreationPolicy::load(
+        cmd.at,
+        cmd.bookmark,
+        cmd.no_bookmark,
+        cmd.no_links,
+        cmd.names.len(),
     )?;
-
-    if !cmd.no_links {
-        apply_links_for_path(&result.path, cmd.print_path)?;
+    let outcome = lifecycle::switch_workspaces(&cmd.names, &policy)?;
+    for created in &outcome.intermediate {
+        if !cmd.print_path {
+            print_created_workspace(created, false);
+        }
     }
+    print_links_report(outcome.links.as_ref(), cmd.print_path);
+    let result = outcome.result;
 
     if cmd.print_path {
         let path = match result.relative_subdir {
@@ -334,49 +297,40 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
     Ok(())
 }
 
-fn effective_bookmark(
-    workspace_name: &str,
-    explicit_bookmark: Option<&str>,
-    no_bookmark: bool,
-) -> Result<Option<String>> {
-    if no_bookmark {
-        return Ok(None);
+fn print_created_workspace(created: &CreatedWorkspace, quiet: bool) {
+    print_links_report(created.links.as_ref(), quiet);
+    if quiet {
+        return;
     }
-    if let Some(bookmark) = explicit_bookmark {
-        return Ok(Some(bookmark.to_owned()));
+    println!("Created workspace: {}", created.result.workspace);
+    println!("  path: {}", created.result.path.display());
+    if let Some(bookmark) = &created.result.bookmark {
+        println!("  bookmark: {bookmark}");
     }
+}
 
-    let config = Config::load()?;
-    if !config.workspace.create_bookmark {
-        return Ok(None);
+fn print_links_report(report: Option<&links::LinkApplyReport>, quiet: bool) {
+    if quiet {
+        return;
     }
-
-    let workspace = workspace::resolve_workspace_token(workspace_name)?;
-    Ok(Some(config::bookmark_from_template(
-        &config.workspace.bookmark_template,
-        &workspace,
-    )))
+    if let Some(report) = report
+        && report.has_entries()
+    {
+        println!(
+            "Links: {} created, {} already satisfied, {} missing target",
+            report.linked, report.satisfied, report.skipped_missing_target
+        );
+    }
 }
 
 fn run_list() -> Result<()> {
-    let entries = workspace::workspace_entries()?;
-    let current = workspace::current_workspace_name().ok();
-    let previous = workspace::previous_workspace_name().ok();
-    let default = workspace::default_workspace_name().ok();
-
-    for entry in entries {
-        let marker = if current.as_deref() == Some(entry.name.as_str()) {
-            '@'
-        } else if previous.as_deref() == Some(entry.name.as_str()) {
-            '-'
-        } else if default.as_deref() == Some(entry.name.as_str()) {
-            '^'
-        } else {
-            ' '
-        };
+    let inventory = workspace::WorkspaceInventory::load()?;
+    for entry in inventory.entries() {
+        let marker = inventory.marker(&entry.name);
 
         let path = entry
             .root
+            .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "(missing)".to_owned());
         println!("{marker} {}\t{path}", entry.name);
@@ -391,37 +345,79 @@ fn run_path(cmd: PathCommand) -> Result<()> {
 
 fn run_remove(cmd: RemoveCommand) -> Result<()> {
     let delete_dir = !cmd.keep_dir;
-    if cmd.names.is_empty() {
-        let (name, path) = workspace::remove_workspace(None, delete_dir)?;
-        print_remove_result(&name, &path, delete_dir);
-        return Ok(());
+    let inventory = workspace::WorkspaceInventory::load()?;
+    let plans = if cmd.names.is_empty() {
+        vec![workspace::plan_remove_workspace(
+            &inventory, None, delete_dir,
+        )?]
+    } else {
+        cmd.names
+            .iter()
+            .map(|name| {
+                workspace::plan_remove_workspace(&inventory, Some(name), delete_dir)
+                    .with_context(|| format!("failed to remove workspace {name}"))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let mut planned = HashSet::new();
+    for plan in &plans {
+        if !planned.insert(plan.workspace.as_str()) {
+            bail!("workspace listed more than once: {}", plan.workspace)
+        }
     }
 
-    for name in &cmd.names {
-        let (removed_name, path) = workspace::remove_workspace(Some(name), delete_dir)
-            .with_context(|| format!("failed to remove workspace {name}"))?;
-        print_remove_result(&removed_name, &path, delete_dir);
+    let mut choices = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let delete_bookmarks = choose_bookmark_removal(&plan, &cmd)?;
+        choices.push((plan, delete_bookmarks));
+    }
+    for (plan, delete_bookmarks) in choices {
+        let result = workspace::execute_remove_workspace(plan, delete_bookmarks)?;
+        print_remove_result(&result);
     }
     Ok(())
 }
 
-fn print_remove_result(name: &str, path: &Path, delete_dir: bool) {
-    println!("Forgot workspace: {name}");
-    if delete_dir {
-        println!("Deleted directory: {}", path.display());
-    }
+fn choose_bookmark_removal(plan: &workspace::RemovalPlan, cmd: &RemoveCommand) -> Result<bool> {
+    Ok(if plan.bookmarks.is_empty() || cmd.keep_bookmark {
+        false
+    } else if cmd.delete_bookmark {
+        true
+    } else {
+        prompt_delete_bookmarks(&plan.bookmarks)?
+    })
 }
 
-fn apply_links_for_path(path: &Path, quiet: bool) -> Result<()> {
-    let config_root = workspace::default_workspace_root().unwrap_or_else(|_| path.to_path_buf());
-    let links_report = links::apply_workspace_links_with_config_root(&config_root, path)?;
-    if !quiet && links_report.has_entries() {
-        println!(
-            "Links: {} created, {} already satisfied, {} missing target",
-            links_report.linked, links_report.satisfied, links_report.skipped_missing_target
-        );
+fn prompt_delete_bookmarks(bookmarks: &[String]) -> Result<bool> {
+    let label = if bookmarks.len() == 1 {
+        format!("bookmark '{}'", bookmarks[0])
+    } else {
+        format!("bookmarks {}", bookmarks.join(", "))
+    };
+    let mut stderr = io::stderr().lock();
+    write!(stderr, "Delete associated {label}? [y/N] ")
+        .context("failed to write bookmark prompt")?;
+    stderr.flush().context("failed to flush bookmark prompt")?;
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("failed to read bookmark prompt")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn print_remove_result(result: &workspace::RemovalResult) {
+    println!("Forgot workspace: {}", result.workspace);
+    if result.deleted_dir {
+        println!("Deleted directory: {}", result.path.display());
     }
-    Ok(())
+    for bookmark in &result.deleted_bookmarks {
+        println!("Deleted bookmark: {bookmark}");
+    }
 }
 
 fn run_prune() -> Result<()> {
@@ -435,25 +431,26 @@ fn run_prune() -> Result<()> {
 
 fn run_shell(cmd: ShellCommand) -> Result<()> {
     match cmd.command {
-        ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell.into())?),
-        ShellSubcommand::Completions(cmd) => run_completions(cmd.shell.into()),
-        ShellSubcommand::CompleteWorkspaces => run_complete_workspaces(),
+        ShellSubcommand::Init(cmd) => print_line(shell::init_script(cmd.shell)?),
+        ShellSubcommand::Completions(cmd) => run_completions(cmd.shell),
     }
 }
 
-fn run_completions(shell: ShellKind) -> Result<()> {
-    let mut command = Cli::command();
+fn run_completions(shell: Shell) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    shell::write_completions(shell, &mut command, &mut handle)?;
+    shell::write_completions(shell, &mut handle)?;
     Ok(())
 }
 
 fn run_links(cmd: LinksCommand) -> Result<()> {
     match cmd.command {
         LinksSubcommand::Apply => {
-            let root = workspace::workspace_root_current()?;
-            let report = links::apply_workspace_links(&root)?;
+            let inventory = workspace::WorkspaceInventory::load()?;
+            let config_root = inventory
+                .root(inventory.default_name()?)
+                .context("failed to locate default workspace link configuration")?;
+            let report = links::apply_workspace_links(&config_root, inventory.current_root())?;
             println!(
                 "Links: {} created, {} already satisfied, {} missing target",
                 report.linked, report.satisfied, report.skipped_missing_target
@@ -509,10 +506,21 @@ fn print_line(value: impl std::fmt::Display) -> Result<()> {
     Ok(())
 }
 
-fn run_complete_workspaces() -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    for (candidate, description) in workspace::completion_workspace_candidates()? {
-        writeln!(stdout, "{candidate}\t{description}").context("failed to write stdout")?;
-    }
-    Ok(())
+fn complete_workspaces(current: &OsStr) -> Vec<CompletionCandidate> {
+    let current = current.to_string_lossy();
+    let candidates = match workspace::completion_workspace_candidates() {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            eprintln!("jw: failed to complete workspaces: {error:#}");
+            return Vec::new();
+        }
+    };
+
+    candidates
+        .into_iter()
+        .filter(|(candidate, _)| candidate.starts_with(current.as_ref()))
+        .map(|(candidate, description)| {
+            CompletionCandidate::new(candidate).help(Some(description.into()))
+        })
+        .collect()
 }

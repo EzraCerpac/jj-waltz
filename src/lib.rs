@@ -1,5 +1,6 @@
 pub mod cli;
-pub mod config;
+pub(crate) mod config;
+pub(crate) mod lifecycle;
 pub mod links;
-pub mod shell;
-pub mod workspace;
+pub(crate) mod shell;
+pub(crate) mod workspace;

@@ -8,10 +8,22 @@ updates:
     commit-message:
       prefix: "deps"
 
+  - package-ecosystem: cargo
+    directory: "/plugins/herdr"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "actions/attest-build-provenance"
+      - dependency-name: "actions/download-artifact"
+      - dependency-name: "actions/upload-artifact"
     commit-message:
       prefix: "ci"
