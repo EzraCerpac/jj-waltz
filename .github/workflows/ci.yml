@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        jj_version: ["0.39.0", "0.43.0"]
+        jj_version: ["0.39.0", "0.44.0"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

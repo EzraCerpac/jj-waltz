@@ -1,5 +1,18 @@
 # Changelog
 
+## Version 0.4.0 (2026-08-15)
+
+- Add semantic `list --format=json`, `status`, `doctor`, and `adopt` commands
+  backed by frozen, schema-versioned snapshots and repository-scoped lifecycle
+  metadata.
+- Diagnose corrupt, stale, and missing workspace state without silently replacing
+  metadata or changing JJ history.
+- Make workspace removal report partial progress and clean managed metadata even
+  when directory deletion cannot finish immediately.
+- Support legacy JJ repositories whose default workspace has no recorded path,
+  restoring `jw list`, workspace creation, and the Herdr integration (#30).
+- Test the compatibility window against JJ 0.39.0 and JJ 0.44.0.
+
 ## Version 0.3.1 (2026-07-12)
 
 - Add a static x86_64 Linux release for older-glibc systems such as CerpacNAS.
