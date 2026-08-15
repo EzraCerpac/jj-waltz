@@ -1,6 +1,11 @@
 pub mod cli;
 pub(crate) mod config;
+pub mod doctor;
+pub mod jj;
 pub(crate) mod lifecycle;
 pub mod links;
+pub(crate) mod metadata;
+pub mod observe;
 pub(crate) mod shell;
+pub mod snapshot;
 pub(crate) mod workspace;
