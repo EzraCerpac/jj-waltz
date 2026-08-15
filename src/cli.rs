@@ -235,6 +235,13 @@ struct AdoptCommand {
         help = "Record a bookmark association without creating or moving the bookmark"
     )]
     bookmark: Option<String>,
+    #[arg(
+        long,
+        conflicts_with = "bookmark",
+        action = ArgAction::SetTrue,
+        help = "Do not record a bookmark association, even if a legacy marker exists"
+    )]
+    no_bookmark: bool,
 }
 
 #[derive(Debug, Args)]
@@ -468,8 +475,11 @@ fn run_status(cmd: StatusCommand) -> Result<()> {
 }
 
 fn run_doctor(cmd: DoctorCommand) -> Result<()> {
-    let config = Config::load()?;
-    let report = DoctorEngine::current(config.trunk.revset)?.run();
+    let doctor = match Config::load() {
+        Ok(config) => DoctorEngine::current(config.trunk.revset)?,
+        Err(error) => DoctorEngine::current_with_configuration_error(format!("{error:#}"))?,
+    };
+    let report = doctor.run();
     match cmd.format {
         OutputFormat::Json => write_json(&report)?,
         OutputFormat::Plain => write_text(&report.render_plain())?,
@@ -493,6 +503,7 @@ fn run_adopt(cmd: AdoptCommand) -> Result<()> {
         workspace_root: path.clone(),
         base_revset: cmd.base,
         bookmark: cmd.bookmark,
+        no_bookmark: cmd.no_bookmark,
     })?;
 
     let bookmark = result

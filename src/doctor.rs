@@ -15,6 +15,7 @@ pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
 pub struct DoctorEngine {
     client: JjClient,
     trunk_revset: String,
+    configuration_error: Option<String>,
     repository_config_path: Option<PathBuf>,
 }
 
@@ -27,8 +28,16 @@ impl DoctorEngine {
         Self {
             client,
             trunk_revset: trunk_revset.into(),
+            configuration_error: None,
             repository_config_path: None,
         }
+    }
+
+    /// Builds a report when the user configuration cannot supply a trunk revset.
+    pub fn current_with_configuration_error(error: impl Into<String>) -> Result<Self> {
+        let mut engine = Self::new(JjClient::current()?, "");
+        engine.configuration_error = Some(error.into());
+        Ok(engine)
     }
 
     /// Overrides metadata discovery. Useful when the caller already captured
@@ -42,9 +51,21 @@ impl DoctorEngine {
     pub fn run(&self) -> DoctorReport {
         let mut report = DoctorReport::new(self.trunk_revset.clone());
 
+        if let Some(error) = &self.configuration_error {
+            report.push(DoctorDiagnostic::error(
+                DoctorCode::Configuration,
+                format!("could not load jj-waltz configuration: {error}"),
+                Some("fix or remove the invalid jj-waltz config.toml file"),
+            ));
+        }
+
         self.check_jj_version(&mut report);
         let operation_id = self.check_operation_snapshot(&mut report);
-        let trunk = self.check_trunk(&mut report, operation_id.as_deref());
+        let trunk = self.check_trunk(
+            &mut report,
+            operation_id.as_deref(),
+            self.configuration_error.is_none(),
+        );
         report.repository.trunk = trunk;
 
         let metadata = self.check_metadata(&mut report);
@@ -133,7 +154,16 @@ impl DoctorEngine {
         &self,
         report: &mut DoctorReport,
         operation_id: Option<&str>,
+        configuration_loaded: bool,
     ) -> Option<DoctorRevision> {
+        if !configuration_loaded {
+            report.push(DoctorDiagnostic::skipped(
+                DoctorCode::TrunkRevset,
+                "trunk revset was not evaluated because jj-waltz configuration could not be loaded",
+                Some("fix the jj-waltz config.toml file, then rerun doctor"),
+            ));
+            return None;
+        }
         if self.trunk_revset.trim().is_empty() {
             report.push(DoctorDiagnostic::error(
                 DoctorCode::TrunkRevset,
@@ -649,6 +679,7 @@ impl DoctorDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DoctorCode {
+    Configuration,
     JjVersion,
     OperationSnapshot,
     TrunkRevset,
@@ -664,6 +695,7 @@ pub enum DoctorCode {
 impl DoctorCode {
     fn label(self) -> &'static str {
         match self {
+            Self::Configuration => "configuration",
             Self::JjVersion => "jj-version",
             Self::OperationSnapshot => "operation-snapshot",
             Self::TrunkRevset => "trunk-revset",

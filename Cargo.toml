@@ -1,6 +1,6 @@
 [package]
 name = "jj-waltz"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "A Jujutsu workspace switcher inspired by Worktrunk"
 license = "MIT"

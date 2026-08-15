@@ -1,5 +1,14 @@
 # Changelog
 
+## Version 0.4.1 (2026-08-15)
+
+- Keep `jw doctor` machine-readable when jj-waltz configuration cannot be read
+  or parsed, with a failed configuration diagnostic and skipped trunk check.
+- Let `jw adopt --no-bookmark` ignore stale legacy bookmark markers while
+  preserving the existing explicit bookmark association behavior.
+- Correct architecture documentation to name JJ 0.44.0 as the newer tested
+  compatibility target.
+
 ## Version 0.4.0 (2026-08-15)
 
 - Add semantic `list --format=json`, `status`, `doctor`, and `adopt` commands

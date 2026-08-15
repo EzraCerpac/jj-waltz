@@ -73,6 +73,7 @@ pub struct AdoptionRequest {
     pub workspace_root: PathBuf,
     pub base_revset: String,
     pub bookmark: Option<String>,
+    pub no_bookmark: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +307,9 @@ fn adopt_workspace_with_store(
     client: &JjClient,
     store: &WorkspaceMetadataStore,
 ) -> Result<AdoptionResult> {
+    if request.bookmark.is_some() && request.no_bookmark {
+        bail!("--bookmark and --no-bookmark cannot be used together")
+    }
     if store.get(&request.workspace_name)?.is_some() {
         bail!("workspace is already managed: {}", request.workspace_name)
     }
@@ -322,9 +326,13 @@ fn adopt_workspace_with_store(
                 request.base_revset
             )
         })?;
-    let bookmark = match &request.bookmark {
-        Some(bookmark) => Some(bookmark.clone()),
-        None => workspace::legacy_workspace_bookmark(&request.workspace_root)?,
+    let bookmark = if request.no_bookmark {
+        None
+    } else {
+        match &request.bookmark {
+            Some(bookmark) => Some(bookmark.clone()),
+            None => workspace::legacy_workspace_bookmark(&request.workspace_root)?,
+        }
     };
     if let Some(bookmark) = &bookmark {
         let bookmarks = client
@@ -601,6 +609,7 @@ mod tests {
             workspace_root: root.clone(),
             base_revset: "parents(@)".to_owned(),
             bookmark: None,
+            no_bookmark: false,
         };
 
         let missing_before = client.operation_id().expect("operation before rejection");
@@ -628,6 +637,7 @@ mod tests {
                     workspace_root: root,
                     base_revset: "parents(@)".to_owned(),
                     bookmark: Some("explicit".to_owned()),
+                    no_bookmark: false,
                 },
                 &client,
                 &store,
@@ -656,6 +666,7 @@ mod tests {
                 workspace_root: root,
                 base_revset: "parents(@)".to_owned(),
                 bookmark: Some("explicit".to_owned()),
+                no_bookmark: false,
             },
             &client,
             &store,
