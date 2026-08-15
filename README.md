@@ -235,7 +235,7 @@ unlisted command is available; the feature list and `jw --help` are the current
 command surface.
 
 `jw` supports JJ 0.39 and newer within its tested compatibility window. CI pins
-the oldest supported release, 0.39.0, and the newer compatibility target, 0.43.0,
+the oldest supported release, 0.39.0, and the newer compatibility target, 0.44.0,
 instead of following a moving `latest` label.
 
 ## AI usage note

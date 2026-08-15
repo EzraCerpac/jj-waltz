@@ -15,7 +15,7 @@ cargo test --locked --manifest-path plugins/herdr/Cargo.toml
 ```
 
 The Herdr plugin is a separate Cargo workspace, so root Cargo commands do not
-check it. CI runs root integration tests against pinned JJ 0.39.0 and 0.43.0;
+check it. CI runs root integration tests against pinned JJ 0.39.0 and 0.44.0;
 update those explicit compatibility pins instead of following `latest`.
 
 ## Scope
@@ -45,7 +45,7 @@ Keep product ownership clear:
 
 ## JJ compatibility
 
-JJ 0.39.0 is the minimum supported release. Root CI also tests pinned JJ 0.43.0
+JJ 0.39.0 is the minimum supported release. Root CI also tests pinned JJ 0.44.0
 as the newer compatibility target. Do not follow a floating `latest` in tests.
 Raise the minimum only for a documented public capability, and keep JJ output
 parsing and version differences inside the adapter.
