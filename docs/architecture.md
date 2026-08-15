@@ -189,7 +189,7 @@ cargo test --locked
 ```
 
 JJ 0.39.0 is the oldest supported release. CI runs root integration tests against
-0.39.0 and the newer pinned compatibility target, 0.43.0. A minimum-version bump
+0.39.0 and the newer pinned compatibility target, 0.44.0. A minimum-version bump
 requires a documented public JJ capability that cannot reasonably be adapted.
 Newer JJ versions may work, but are not part of the declared window until the pin
 is advanced. Herdr is checked separately because it is a separate Cargo

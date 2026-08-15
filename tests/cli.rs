@@ -1460,6 +1460,45 @@ fn doctor_serializes_bad_trunk_and_corrupt_metadata_before_failure() {
 }
 
 #[test]
+fn doctor_serializes_configuration_load_failures_before_failure() {
+    skip_without_jj!();
+
+    for malformed in [true, false] {
+        let repo = TestRepo::new().expect("create test repo");
+        let config_path = repo.config_home.join("jj-waltz/config.toml");
+        fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        if malformed {
+            fs::write(&config_path, "[trunk\nrevset = \"trunk()\"\n")
+                .expect("write malformed config");
+        } else {
+            fs::create_dir(&config_path).expect("create unreadable config path");
+        }
+
+        let output = repo.command_output(&["doctor", "--format=json"]);
+        assert!(!output.status.success());
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid doctor JSON");
+        assert_eq!(value["command"], "doctor");
+        assert_eq!(value["healthy"], false);
+        assert!(
+            value["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["code"] == "configuration" && entry["state"] == "failed" })
+        );
+        assert!(
+            value["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["code"] == "trunk-revset" && entry["state"] == "skipped" })
+        );
+    }
+}
+
+#[test]
 fn creation_metadata_records_exact_base_prebookmark_operation_and_removal_cleans_it() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
@@ -1592,6 +1631,67 @@ fn adopt_records_intent_without_changing_jj_state() {
     let value: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status JSON");
     assert_eq!(value["workspaces"][0]["management"], "managed");
     assert_eq!(value["workspaces"][0]["associated_bookmark"], "declared");
+}
+
+#[test]
+fn adopt_no_bookmark_ignores_stale_legacy_marker_without_changing_jj_state() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let legacy_root = repo.default_root.with_extension("legacy");
+    repo.run_jj([
+        "workspace",
+        "add",
+        "--name",
+        "legacy",
+        legacy_root.to_str().unwrap(),
+    ]);
+    fs::write(legacy_root.join(".jj/jw-bookmark"), "wip/deleted\n")
+        .expect("write stale legacy marker");
+    let operation = repo.operation_id();
+    let bookmarks = repo.bookmarks();
+
+    let output = repo.command_output(&["adopt", "legacy", "--base", "legacy@-", "--no-bookmark"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(repo.operation_id(), operation);
+    assert_eq!(repo.bookmarks(), bookmarks);
+
+    let record = repo
+        .metadata_record_paths()
+        .into_iter()
+        .next()
+        .expect("managed metadata record");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(record).expect("read metadata")).expect("metadata JSON");
+    assert_eq!(
+        metadata["metadata"]["associated_bookmark"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn adopt_rejects_bookmark_and_no_bookmark_together() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args([
+            "adopt",
+            "default",
+            "--base",
+            "@-",
+            "--bookmark",
+            "wip/default",
+            "--no-bookmark",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot be used with '--no-bookmark'",
+        ));
 }
 
 struct TestRepo {
