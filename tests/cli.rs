@@ -580,6 +580,33 @@ fn list_accepts_ls_alias() {
 }
 
 #[test]
+fn list_infers_current_default_without_recorded_path() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::remove_dir_all(repo.default_root.join(".jj/repo/workspace_store"))
+        .expect("remove recorded workspace paths");
+
+    let named_root = Command::new("jj")
+        .current_dir(&repo.default_root)
+        .args(["workspace", "root", "--name", "default"])
+        .output()
+        .expect("query named workspace root");
+    assert!(!named_root.status.success());
+    assert!(
+        String::from_utf8_lossy(&named_root.stderr)
+            .contains("Workspace has no recorded path: default")
+    );
+
+    let expected = format!("@ default\t{}", path_string(&repo.default_root));
+    repo.cmd()
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(expected))
+        .stdout(predicate::str::contains("(missing)").not());
+}
+
+#[test]
 fn list_reports_missing_checkout_without_hiding_other_root_errors() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");

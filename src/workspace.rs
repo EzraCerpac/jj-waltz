@@ -78,10 +78,28 @@ impl WorkspaceInventory {
             })
             .collect::<Vec<_>>();
         let current = match matches.as_slice() {
-            [] => bail!(
-                "could not determine current workspace for root {}",
-                current_root.display()
-            ),
+            [] => {
+                let target_candidates = current_workspace_names_by_target()?;
+                let candidates = entries
+                    .iter()
+                    .filter(|entry| entry.root.is_none() && target_candidates.contains(&entry.name))
+                    .map(|entry| entry.name.clone())
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [name] => {
+                        entries
+                            .iter_mut()
+                            .find(|entry| entry.name == *name)
+                            .expect("candidate came from entries")
+                            .root = Some(current_root.clone());
+                        name.clone()
+                    }
+                    _ => bail!(
+                        "could not determine current workspace for root {}",
+                        current_root.display()
+                    ),
+                }
+            }
             [name] => name.clone(),
             _ => bail!(
                 "multiple workspaces match current root {}: {}",
@@ -226,7 +244,8 @@ fn workspace_root_by_name_direct(name: &str) -> Result<Option<PathBuf>> {
     let missing_checkout = message.contains("Cannot resolve absolute workspace path")
         && (message.contains("No such file or directory")
             || message.contains("os error 2")
-            || message.contains("os error 3"));
+            || message.contains("os error 3"))
+        || message.contains("Workspace has no recorded path");
     if missing_checkout {
         Ok(None)
     } else {
@@ -689,6 +708,24 @@ fn workspace_names() -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect())
+}
+
+fn current_workspace_names_by_target() -> Result<Vec<String>> {
+    let output = run_jj(&[
+        "workspace",
+        "list",
+        "-T",
+        "if(target.current_working_copy(), name ++ \"\\n\", \"\")",
+        "--color=never",
+    ])?;
+    let stdout = trimmed_stdout(output)?;
+    let names = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    Ok(names.into_iter().map(ToOwned::to_owned).collect())
 }
 
 fn bookmarks_for_workspace(name: &str, root: &Path) -> Result<Vec<String>> {
