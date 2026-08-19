@@ -19,7 +19,7 @@
       "files": [],
       "expectations": [
         "Explains that the default workspace owns `.jwlinks.toml` and `.jwlinks.local.toml`, with local entries overriding matching sources.",
-        "Distinguishes required and optional missing targets from a conflicting existing source path or symlink.",
+        "Distinguishes required and optional missing targets from conflicts, while treating a symlink or ordinary path that resolves to the expected target as satisfied.",
         "States that source paths stay inside the receiving workspace and relative targets resolve from its root.",
         "Inspects the target and source before rerunning `jw links apply` or `jw switch`, without overwriting the conflict."
       ]
@@ -41,9 +41,9 @@
       "expected_output": "Separates installed and source behavior, verifies executable identity and help, then uses status and doctor as read-only diagnostics.",
       "files": [],
       "expectations": [
-        "Uses `command -v jw`, a resolved executable path, and `jw --version` before version-specific claims.",
+        "Inspects any shell wrapper, uses a shell-appropriate executable-only lookup, and checks the resolved path and version before version-specific claims.",
         "Uses the relevant live `--help` or repository-built help rather than assuming the installed command surface matches source.",
-        "Recommends `jw status @` and `jw doctor` without mutating workspace state."
+        "Recommends `jw status @ --refresh none` and `jw doctor` without mutating workspace state."
       ]
     },
     {
@@ -54,7 +54,7 @@
       "expectations": [
         "Uses `jw adopt legacy-api --base main@origin --no-bookmark` or the equivalent argument order supported by help.",
         "Explains that adopt records lifecycle metadata without moving revisions, creating or moving bookmarks, or refreshing the working copy.",
-        "Verifies the result with `jw status legacy-api` and confirms JJ revision and bookmark state stayed unchanged."
+        "Verifies the result with `jw status legacy-api --refresh none` and confirms JJ revision and bookmark state stayed unchanged."
       ]
     },
     {
@@ -63,7 +63,7 @@
       "expected_output": "Inspects exact state before cleanup, makes directory and bookmark preservation explicit, and distinguishes remove from prune safeguards.",
       "files": [],
       "expectations": [
-        "Inspects `jw list`, `jw current`, `jw status old-workspace`, `jw path old-workspace`, target JJ status, and bookmark state before removal.",
+        "Inspects `jw list`, `jw current`, `jw status old-workspace --refresh none`, `jw path old-workspace`, target JJ status, and bookmark state before removal.",
         "Explains default directory deletion, `--keep-dir`, current/default protections, and `--keep-bookmark` versus `--delete-bookmark`.",
         "Explains that prune only forgets missing paths and lacks remove's explicit default-workspace guard, so it requires inventory inspection first.",
         "Verifies workspace, directory, and bookmark state after the chosen operation."
@@ -78,6 +78,7 @@
         "Inspects existing workspaces before creating frontend, tests, and docs workspace names.",
         "Uses one workspace per substantial independent task and keeps coupled work together.",
         "Uses `jw switch --execute <command> <name>` or its supported shorthand for launching from each workspace.",
+        "Uses `jw current` as switch verification only after shell-integrated navigation or from inside the target workspace; otherwise verifies with the switch result and `jw path`.",
         "Treats workspace creation and permission to spawn agents as separate decisions."
       ]
     },

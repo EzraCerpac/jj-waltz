@@ -13,14 +13,14 @@ Use `jw` for explicit JJ workspace lifecycle and navigation work. A generic para
 
 Identify the JJ repository, current directory, requested workspace names, and whether the task creates, switches, diagnoses, adopts, links, or removes workspaces.
 
-Before a mutation, inspect the relevant state with `jw list`, `jw current`, `jw path <name>`, or `jw status <name>`. Use `jw --help` and the relevant subcommand help for current syntax instead of relying on a cached command list.
+Before a mutation, inspect the relevant state with `jw list`, `jw current`, `jw path <name>`, or `jw status <name> --refresh none`. Use `jw --help` and the relevant subcommand help for current syntax instead of relying on a cached command list.
 
-When installed behavior may differ from the repository or documentation, verify all three before making version-specific claims:
+When installed behavior may differ from the repository or documentation, inspect any shell wrapper and resolve the executable beneath it before making version-specific claims. Use the current shell's executable-only lookup: `type -P jw` in Bash, `whence -p jw` in Zsh, or `command -s jw` in Fish. Then verify the resolved path and version:
 
 ```bash
-command -v jw
-realpath "$(command -v jw)"
-jw --version
+resolved_jw="$(whence -p jw)"  # zsh; use the lookup above for bash or fish
+realpath "$resolved_jw"
+"$resolved_jw" --version
 ```
 
 Complete inspection when the executable identity, target workspaces, current state, and intended mutation are unambiguous.
@@ -77,7 +77,7 @@ Complete this stage when the requested branch either succeeds or stops with the 
 
 Verify the boundary the user will rely on:
 
-- creation or switching: confirm `jw list`, `jw current`, and `jw path <name>`;
+- creation or switching: confirm `jw list` and `jw path <name>`; use `jw current` only after shell-integrated navigation or from a command executed inside the target workspace;
 - executed tools: confirm their exit status and working directory;
 - shell navigation: confirm from the initialized interactive shell, not from the child binary alone;
 - links or lifecycle work: use the completion checks in the branch reference.
