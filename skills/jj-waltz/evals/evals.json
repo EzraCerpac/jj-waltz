@@ -1,37 +1,95 @@
 {
-  "skill_name": "jj-waltz-support",
+  "skill_name": "jj-waltz",
   "evals": [
     {
       "id": 1,
       "prompt": "I installed jw and `jw switch feature-ui` creates the workspace, but in zsh it leaves me in the same directory instead of moving into the new workspace. What am I missing?",
-      "expected_output": "Explains that shell integration is required for directory switching, gives the zsh `jw shell init zsh` setup, and tells the user what to rerun or re-source.",
+      "expected_output": "Explains the parent-shell boundary, gives zsh shell initialization, and requires a restart or re-source before retrying.",
       "files": [],
       "expectations": [
-        "The response explains that `jw switch` does not change the shell directory by itself and that shell integration is required.",
-        "The response includes the exact command `eval \"$(jw shell init zsh)\"`.",
-        "The response tells the user to re-source or restart their shell and retry `jw switch feature-ui`."
+        "Explains that the jw binary cannot change its parent shell directory and shell integration performs the directory change.",
+        "Includes `eval \"$(jw shell init zsh)\"`.",
+        "Tells the user to restart or re-source zsh before retrying `jw switch feature-ui`."
       ]
     },
     {
       "id": 2,
-      "prompt": "I want every jj-waltz workspace to share the same ignored `data` directory. I added a `.jwlinks.toml`, but when I switch into `solver-benchmark` I get a link conflict. Help me figure out whether the target is missing or the workspace already has the wrong path.",
-      "expected_output": "Uses `.jwlinks.toml` terminology correctly, distinguishes missing-target behavior from link conflicts, and gives concrete inspection and retry commands such as checking the target path and running `jw links apply` or `jw switch` again.",
+      "prompt": "I want every jj-waltz workspace to share the same ignored `data` directory. I added a `.jwlinks.toml`, but `solver-benchmark` reports a link conflict. Diagnose it without overwriting anything.",
+      "expected_output": "Reads the link branch, distinguishes missing targets from conflicts, inspects default-workspace configuration and both resolved paths, then verifies before retrying.",
       "files": [],
       "expectations": [
-        "The response mentions `.jwlinks.toml` or `.jwlinks.local.toml` explicitly.",
-        "The response distinguishes a missing target from a conflicting existing path or symlink.",
-        "The response recommends inspecting the target path and then rerunning `jw links apply` or `jw switch`."
+        "Explains that the default workspace owns `.jwlinks.toml` and `.jwlinks.local.toml`, with local entries overriding matching sources.",
+        "Distinguishes required and optional missing targets from a conflicting existing source path or symlink.",
+        "States that source paths stay inside the receiving workspace and relative targets resolve from its root.",
+        "Inspects the target and source before rerunning `jw links apply` or `jw switch`, without overwriting the conflict."
       ]
     },
     {
       "id": 3,
-      "prompt": "Can you explain what `jw switch -`, `jw switch @`, and `jw switch default` do? Also, if I want to see where a workspace resolves before switching, what should I run?",
-      "expected_output": "Correctly explains the workspace tokens for previous, current, and default workspaces, and points the user to commands like `jw current`, `jw root`, or `jw path <name>` for inspection.",
+      "prompt": "What do `jw switch -`, `jw switch @`, `jw switch ^`, and `jw switch default` mean? Show me how to inspect each destination before switching.",
+      "expected_output": "Explains all routing tokens and uses current, root, or path commands for inspection.",
       "files": [],
       "expectations": [
-        "The response explains that `-` means the previous workspace.",
-        "The response explains that `@` means the current workspace and that `default` resolves to the default workspace.",
-        "The response recommends `jw path <name>` or another direct inspection command such as `jw current` or `jw root`."
+        "Explains that `-` is previous, `@` is current, and `^` or `default` resolves the default workspace.",
+        "Uses `jw current`, `jw root`, or `jw path <token>` to inspect destinations.",
+        "Does not assume `default` is necessarily a literal workspace name."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I am in the jj-waltz source checkout. The installed jw says 0.4.0 but the repo says 0.4.1, and `jw list` looks odd. Check executable identity, then tell me how to inspect the current workspace and repository health without mutating anything.",
+      "expected_output": "Separates installed and source behavior, verifies executable identity and help, then uses status and doctor as read-only diagnostics.",
+      "files": [],
+      "expectations": [
+        "Uses `command -v jw`, a resolved executable path, and `jw --version` before version-specific claims.",
+        "Uses the relevant live `--help` or repository-built help rather than assuming the installed command surface matches source.",
+        "Recommends `jw status @` and `jw doctor` without mutating workspace state."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I already have a JJ workspace named legacy-api. Make jw manage it using base `main@origin`, but do not move revisions or bookmarks and do not import its stale bookmark marker.",
+      "expected_output": "Inspects the workspace, uses adopt with an explicit base and no bookmark association, and verifies metadata without changing JJ state.",
+      "files": [],
+      "expectations": [
+        "Uses `jw adopt legacy-api --base main@origin --no-bookmark` or the equivalent argument order supported by help.",
+        "Explains that adopt records lifecycle metadata without moving revisions, creating or moving bookmarks, or refreshing the working copy.",
+        "Verifies the result with `jw status legacy-api` and confirms JJ revision and bookmark state stayed unchanged."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Clean up old-workspace safely. It may be current and has files and an associated bookmark. Also explain whether `jw prune` is a safe substitute.",
+      "expected_output": "Inspects exact state before cleanup, makes directory and bookmark preservation explicit, and distinguishes remove from prune safeguards.",
+      "files": [],
+      "expectations": [
+        "Inspects `jw list`, `jw current`, `jw status old-workspace`, `jw path old-workspace`, target JJ status, and bookmark state before removal.",
+        "Explains default directory deletion, `--keep-dir`, current/default protections, and `--keep-bookmark` versus `--delete-bookmark`.",
+        "Explains that prune only forgets missing paths and lacks remove's explicit default-workspace guard, so it requires inventory inspection first.",
+        "Verifies workspace, directory, and bookmark state after the chosen operation."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Use jw to set up separate JJ workspaces for independent frontend, tests, and docs tasks, then launch an agent command in each.",
+      "expected_output": "Inspects existing workspaces, creates or reuses one per independent task, and launches through execute while respecting host agent policy.",
+      "files": [],
+      "expectations": [
+        "Inspects existing workspaces before creating frontend, tests, and docs workspace names.",
+        "Uses one workspace per substantial independent task and keeps coupled work together.",
+        "Uses `jw switch --execute <command> <name>` or its supported shorthand for launching from each workspace.",
+        "Treats workspace creation and permission to spawn agents as separate decisions."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "How should I divide a large refactor among parallel agents? This repository uses ordinary Git worktrees, not JJ or jw.",
+      "expected_output": "Respects the stated Git workflow and does not force jj-waltz commands or JJ workspace creation into the answer.",
+      "files": [],
+      "expectations": [
+        "Does not recommend or run `jw` commands.",
+        "Uses the repository's stated Git worktree model or gives general task-splitting guidance.",
+        "Does not treat generic parallelism as implicit permission to create JJ workspaces."
       ]
     }
   ]
