@@ -6,10 +6,10 @@ Use the relevant `jw <command> --help` before relying on flags.
 
 ## Inspect and diagnose
 
-- `jw status [workspace]` explains one workspace; it defaults to `@`. Use it before lifecycle mutations.
+- `jw status [workspace] --refresh none` explains one workspace without refreshing a working copy; it defaults to `@`. Use this form for read-only inspection before lifecycle mutations.
 - `jw doctor` diagnoses repository, trunk, metadata, and workspace consistency without repairing them. `jw doctor --format=json` still emits a diagnostic report when configuration loading fails.
 
-Complete diagnosis when the target workspace and reported hazards are identified without mutating state.
+Complete diagnosis when the target workspace and reported hazards are identified without refreshing or otherwise mutating state.
 
 ## Adopt
 
@@ -17,11 +17,11 @@ Complete diagnosis when the target workspace and reported hazards are identified
 
 Inspect the workspace and resolve the base before adoption. Use `--bookmark` only to record an existing association. Use `--no-bookmark` when no association should be recorded, including when ignoring a stale legacy marker.
 
-Complete adoption when `jw status <name>` reports the intended managed metadata and JJ revision/bookmark state is unchanged.
+Complete adoption when `jw status <name> --refresh none` reports the intended managed metadata and JJ revision/bookmark state is unchanged.
 
 ## Remove
 
-Run removal only for an explicitly requested cleanup. Before acting, inspect `jw list`, `jw current`, `jw status <name>`, `jw path <name>`, JJ status from the target path, and associated bookmarks.
+Run removal only for an explicitly requested cleanup. Before acting, inspect `jw list`, `jw current`, `jw status <name> --refresh none`, `jw path <name>`, JJ status from the target path, and associated bookmarks.
 
 - `jw remove <name>` forgets the workspace and deletes its directory by default.
 - `--keep-dir` forgets it while preserving the directory; prefer this when file preservation is uncertain.
