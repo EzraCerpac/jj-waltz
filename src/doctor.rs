@@ -382,7 +382,16 @@ impl DoctorEngine {
         let mut problems = 0;
 
         for record in metadata {
-            if !workspace_names.contains(record.workspace_name.as_str()) {
+            let workspace_registered = workspace_names.contains(record.workspace_name.as_str());
+            let repair_remedy = || {
+                workspace_registered.then(|| {
+                    format!(
+                        "run `jw repair {} --base <exact-revset>` with `--bookmark <existing>` or `--no-bookmark`",
+                        record.workspace_name
+                    )
+                })
+            };
+            if !workspace_registered {
                 problems += 1;
                 report.push(
                     DoctorDiagnostic::error(
@@ -409,10 +418,7 @@ impl DoctorEngine {
                                 "creation base resolves to {} revisions; expected one",
                                 revisions.len()
                             ),
-                            Some(format!(
-                                "run `jw repair {} --base <exact-revset>` with `--bookmark <existing>` or `--no-bookmark`",
-                                record.workspace_name
-                            )),
+                            repair_remedy(),
                         )
                         .with_subject(&record.workspace_name),
                     );
@@ -424,10 +430,7 @@ impl DoctorEngine {
                         DoctorDiagnostic::error(
                             DoctorCode::MetadataConsistency,
                             format!("creation base cannot be resolved: {error:#}"),
-                        Some(format!(
-                            "run `jw repair {} --base <exact-revset>` with `--bookmark <existing>` or `--no-bookmark`",
-                            record.workspace_name
-                        )),
+                            repair_remedy(),
                         )
                         .with_subject(&record.workspace_name),
                     );
@@ -449,7 +452,7 @@ impl DoctorEngine {
                             DoctorDiagnostic::error(
                                 DoctorCode::MetadataConsistency,
                                 format!("associated bookmark `{bookmark}` does not exist"),
-                                Some(format!(
+                                workspace_registered.then(|| format!(
                                     "recreate the bookmark or run `jw repair {} --base {} --no-bookmark`",
                                     record.workspace_name, repair_base
                                 )),
@@ -1293,6 +1296,40 @@ mod tests {
             "{}",
             report.render_plain()
         );
+    }
+
+    #[test]
+    fn stale_metadata_does_not_offer_unusable_repair_command() {
+        let Some(fixture) = RepoFixture::init() else {
+            return;
+        };
+        fixture
+            .metadata_store()
+            .upsert(&ManagedWorkspaceMetadata {
+                workspace_name: "gone".to_owned(),
+                created_at_unix_ms: 1,
+                creation_operation_id: fixture.client().operation_id().expect("operation"),
+                creation_base_commit_id: "missing-base".to_owned(),
+                associated_bookmark: Some("missing-bookmark".to_owned()),
+                intended_remote: None,
+            })
+            .expect("write stale metadata");
+
+        let report = fixture.doctor("trunk()");
+        let diagnostics = diagnostics_for(&report, DoctorCode::MetadataConsistency);
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.subject.as_deref() == Some("gone")
+                && diagnostic.remedy.as_deref()
+                    == Some("remove stale metadata only after confirming the workspace is gone")
+        }));
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.subject.as_deref() != Some("gone")
+                || !diagnostic
+                    .remedy
+                    .as_deref()
+                    .is_some_and(|remedy| remedy.contains("jw repair"))
+        }));
     }
 
     #[test]
