@@ -433,6 +433,68 @@ fn apply_links_rejects_missing_source_below_a_nested_symlinked_parent() {
     assert!(!outside.join("missing/link").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn apply_links_rejects_existing_source_below_a_symlinked_parent() {
+    let env = LinkTestEnv::new();
+    let outside = env.tempdir.path().join("outside");
+    fs::create_dir_all(&outside).expect("create outside directory");
+    fs::create_dir_all(outside.join("ordinary")).expect("create ordinary source");
+    std::os::unix::fs::symlink(&outside, env.workspace_root.join("escaped-parent"))
+        .expect("create escaping parent symlink");
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"escaped-parent/ordinary\"",
+            "target = \"escaped-parent/ordinary\"",
+            "required = true",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write link config");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &env.workspace_root)
+        .expect_err("existing source below a symlink parent must conflict");
+    assert!(
+        err.to_string().contains("parent cannot be a symlink"),
+        "{err:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_links_rejects_existing_symlink_below_a_symlinked_parent() {
+    let env = LinkTestEnv::new();
+    let outside = env.tempdir.path().join("outside");
+    fs::create_dir_all(&outside).expect("create outside directory");
+    fs::create_dir_all(outside.join("shared")).expect("create symlink target");
+    std::os::unix::fs::symlink(&outside, env.workspace_root.join("escaped-parent"))
+        .expect("create escaping parent symlink");
+    std::os::unix::fs::symlink("shared", outside.join("link"))
+        .expect("create existing source symlink");
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"escaped-parent/link\"",
+            "target = \"escaped-parent/shared\"",
+            "required = true",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write link config");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &env.workspace_root)
+        .expect_err("existing symlink below a symlink parent must conflict");
+    assert!(
+        err.to_string().contains("parent cannot be a symlink"),
+        "{err:#}"
+    );
+}
+
 #[test]
 fn apply_links_rejects_missing_source_below_a_non_directory_parent() {
     let env = LinkTestEnv::new();
@@ -484,6 +546,21 @@ fn apply_links_reports_unreadable_target_metadata() {
         .expect_err("target metadata must be reported as unreadable");
     assert!(err.to_string().contains("link is unreadable"), "{err:#}");
     assert!(!receiver.join("cache").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_links_reports_dangling_configuration_symlink() {
+    let env = LinkTestEnv::new();
+    std::os::unix::fs::symlink(
+        "missing-links.toml",
+        env.workspace_root.join(".jwlinks.toml"),
+    )
+    .expect("create dangling links config symlink");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &env.workspace_root)
+        .expect_err("dangling links config symlink must fail");
+    assert!(err.to_string().contains("failed to read"), "{err:#}");
 }
 
 fn assert_symlink(path: &Path) {

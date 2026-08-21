@@ -532,21 +532,7 @@ impl DoctorEngine {
         };
 
         for (record, workspace_root) in inspectable {
-            let inspections =
-                match links::inspect_loaded_workspace_links(&link_config, workspace_root) {
-                    Ok(inspections) => inspections,
-                    Err(error) => {
-                        report.push(
-                        DoctorDiagnostic::error(
-                            DoctorCode::WorkspaceLink,
-                            format!("could not inspect configured workspace links: {error:#}"),
-                            Some("fix or remove the invalid .jwlinks.toml file, then rerun doctor"),
-                        )
-                        .with_subject(&record.workspace_name),
-                    );
-                        continue;
-                    }
-                };
+            let inspections = links::inspect_loaded_workspace_links(&link_config, workspace_root);
 
             let mut inspections = inspections;
             inspections.sort_by(|left, right| left.source.cmp(&right.source));
@@ -1415,6 +1401,62 @@ mod tests {
         assert_eq!(unreadable.state, DoctorState::Failed);
         assert_eq!(unreadable.severity, DoctorSeverity::Error);
         assert!(unreadable.message.contains("could not be inspected"));
+        let valid = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("default:valid-target"))
+            .expect("valid link diagnostic");
+        assert_eq!(valid.state, DoctorState::Passed);
+        assert_eq!(valid.severity, DoctorSeverity::Info);
+    }
+
+    #[test]
+    fn workspace_links_report_malformed_rule_and_continue_with_later_rules() {
+        let Some(fixture) = RepoFixture::init() else {
+            return;
+        };
+        fs::create_dir_all(fixture.repo.join("valid-target")).expect("create valid target");
+        fs::write(
+            fixture.repo.join(".jwlinks.toml"),
+            r#"
+                [[link]]
+                source = "../escaped"
+                target = "valid-target"
+                required = true
+
+                [[link]]
+                source = "valid-target"
+                target = "valid-target"
+                required = true
+            "#,
+        )
+        .expect("write malformed link config");
+
+        let store = fixture.metadata_store();
+        let base = fixture
+            .client()
+            .resolve_one("trunk()")
+            .expect("resolve fixture trunk");
+        store
+            .upsert(&ManagedWorkspaceMetadata {
+                workspace_name: "default".to_owned(),
+                created_at_unix_ms: 1,
+                creation_operation_id: fixture.client().operation_id().expect("operation"),
+                creation_base_commit_id: base.commit_id,
+                associated_bookmark: None,
+                intended_remote: None,
+            })
+            .expect("write metadata");
+
+        let report = fixture.doctor("trunk()");
+        let diagnostics = diagnostics_for(&report, DoctorCode::WorkspaceLink);
+        assert_eq!(diagnostics.len(), 2, "{}", report.render_plain());
+        let malformed = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("default:../escaped"))
+            .expect("malformed link diagnostic");
+        assert_eq!(malformed.state, DoctorState::Failed);
+        assert_eq!(malformed.severity, DoctorSeverity::Error);
+        assert!(malformed.message.contains("invalid link rule"));
         let valid = diagnostics
             .iter()
             .find(|diagnostic| diagnostic.subject.as_deref() == Some("default:valid-target"))

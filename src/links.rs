@@ -127,8 +127,12 @@ pub(crate) fn load_link_config(config_root: &Path) -> Result<Option<LinkConfig>>
 
     for file_name in [LINKS_FILE, LINKS_LOCAL_FILE] {
         let path = config_root.join(file_name);
-        if !path.exists() {
-            continue;
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
         }
         found = true;
 
@@ -155,11 +159,17 @@ pub(crate) fn load_link_config(config_root: &Path) -> Result<Option<LinkConfig>>
 pub(crate) fn inspect_loaded_workspace_links(
     config: &LinkConfig,
     workspace_root: &Path,
-) -> Result<Vec<LinkCheck>> {
-    Ok(normalize_rules(config, workspace_root)?
+) -> Vec<LinkCheck> {
+    config
+        .rules
         .iter()
-        .map(classify_rule)
-        .collect::<Vec<_>>())
+        .map(|raw| match normalize_rule(workspace_root, raw.clone()) {
+            Ok(rule) => classify_rule(&rule),
+            Err(error) => {
+                invalid_rule_check(workspace_root, raw, format!("invalid link rule: {error:#}"))
+            }
+        })
+        .collect()
 }
 
 fn normalize_rules(config: &LinkConfig, workspace_root: &Path) -> Result<Vec<LinkRule>> {
@@ -239,12 +249,12 @@ impl LinkPlan {
                     )
                 }
                 LinkCheckState::Conflicting => {
-                    let source_kind = match fs::symlink_metadata(&check.source) {
-                        Ok(metadata) if metadata.file_type().is_symlink() => {
-                            "existing symlink does not point to".to_owned()
-                        }
-                        _ => match inspect_source_parents(&check.source, workspace_root) {
-                            Err(SourceParentIssue::Conflict(reason)) => reason,
+                    let source_kind = match inspect_source_parents(&check.source, workspace_root) {
+                        Err(SourceParentIssue::Conflict(reason)) => reason,
+                        _ => match fs::symlink_metadata(&check.source) {
+                            Ok(metadata) if metadata.file_type().is_symlink() => {
+                                "existing symlink does not point to".to_owned()
+                            }
                             _ => "path exists and is not a symlink to".to_owned(),
                         },
                     };
@@ -314,6 +324,20 @@ impl LinkPlan {
 }
 
 fn classify_rule(rule: &LinkRule) -> LinkCheck {
+    if let Err(issue) = inspect_source_parents(&rule.source, &rule.workspace_root) {
+        let state = match issue {
+            SourceParentIssue::Conflict(_) => LinkCheckState::Conflicting,
+            SourceParentIssue::Unreadable(error) => LinkCheckState::Unreadable(error),
+        };
+        return LinkCheck {
+            source: rule.source.clone(),
+            target: rule.target.clone(),
+            required: rule.required,
+            state,
+            target_exists: false,
+        };
+    }
+
     let target_exists = match fs::metadata(&rule.target) {
         Ok(_) => true,
         Err(error) if error.kind() == ErrorKind::NotFound => false,
@@ -369,17 +393,11 @@ fn classify_rule(rule: &LinkRule) -> LinkCheck {
             )),
         },
         Ok(_) => LinkCheckState::Conflicting,
-        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-            match inspect_source_parents(&rule.source, &rule.workspace_root) {
-                Ok(()) => {
-                    if !target_exists && !rule.required {
-                        LinkCheckState::Skipped
-                    } else {
-                        LinkCheckState::Missing
-                    }
-                }
-                Err(SourceParentIssue::Conflict(_reason)) => LinkCheckState::Conflicting,
-                Err(SourceParentIssue::Unreadable(error)) => LinkCheckState::Unreadable(error),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if !target_exists && !rule.required {
+                LinkCheckState::Skipped
+            } else {
+                LinkCheckState::Missing
             }
         }
         Err(error) => LinkCheckState::Unreadable(format!(
@@ -394,6 +412,26 @@ fn classify_rule(rule: &LinkRule) -> LinkCheck {
         required: rule.required,
         state,
         target_exists,
+    }
+}
+
+fn invalid_rule_check(workspace_root: &Path, raw: &LinkRuleRaw, error: String) -> LinkCheck {
+    let source_raw = PathBuf::from(raw.source.trim());
+    let target_raw = PathBuf::from(raw.target.trim());
+    LinkCheck {
+        source: if source_raw.is_absolute() {
+            source_raw
+        } else {
+            workspace_root.join(source_raw)
+        },
+        target: if target_raw.is_absolute() {
+            target_raw
+        } else {
+            workspace_root.join(target_raw)
+        },
+        required: raw.required,
+        state: LinkCheckState::Unreadable(error),
+        target_exists: false,
     }
 }
 
