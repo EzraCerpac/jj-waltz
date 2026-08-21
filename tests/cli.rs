@@ -1499,6 +1499,100 @@ fn doctor_serializes_configuration_load_failures_before_failure() {
 }
 
 #[test]
+fn doctor_reports_managed_workspace_link_health_in_json_and_plain_output() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"node_modules\"\ntarget = \"../repo/missing\"\nrequired = false\n",
+    )
+    .expect("write links config");
+
+    repo.cmd()
+        .args(["add", "--no-links", "private", "skipped"])
+        .assert()
+        .success();
+    fs::create_dir_all(
+        repo.default_root
+            .with_extension("private")
+            .join("node_modules"),
+    )
+    .expect("create private link source");
+    let operation = repo.operation_id();
+
+    let output = repo.command_output(&["doctor", "--format=json"]);
+    assert!(!output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid doctor JSON");
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["healthy"], false);
+    let diagnostics = report["diagnostics"].as_array().expect("diagnostics array");
+    assert!(diagnostics.iter().any(|entry| {
+        entry["code"] == "workspace-link"
+            && entry["subject"] == "private:node_modules"
+            && entry["state"] == "failed"
+            && entry["severity"] == "error"
+    }));
+    assert!(diagnostics.iter().any(|entry| {
+        entry["code"] == "workspace-link"
+            && entry["subject"] == "skipped:node_modules"
+            && entry["state"] == "skipped"
+            && entry["severity"] == "warning"
+    }));
+
+    repo.cmd()
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "FAIL workspace-link [private:node_modules]",
+        ))
+        .stdout(predicate::str::contains(
+            "WARN workspace-link [skipped:node_modules]",
+        ));
+    assert_eq!(repo.operation_id(), operation);
+}
+
+#[test]
+fn doctor_uses_current_root_when_default_has_no_recorded_path() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd()
+        .args(["adopt", "default", "--base", "@-", "--no-bookmark"])
+        .assert()
+        .success();
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"cache\"\ntarget = \"missing\"\nrequired = false\n",
+    )
+    .expect("write links config");
+    fs::remove_dir_all(repo.default_root.join(".jj/repo/workspace_store"))
+        .expect("remove recorded workspace paths");
+
+    let output = repo.command_output(&["doctor", "--format=json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid doctor JSON");
+    assert_eq!(report["healthy"], true);
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|entry| {
+                entry["code"] == "workspace-link"
+                    && entry["subject"] == "default:cache"
+                    && entry["state"] == "skipped"
+                    && entry["severity"] == "warning"
+            })
+    );
+}
+
+#[test]
 fn creation_metadata_records_exact_base_prebookmark_operation_and_removal_cleans_it() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");

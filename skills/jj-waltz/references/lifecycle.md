@@ -7,7 +7,19 @@ Use the relevant `jw <command> --help` before relying on flags.
 ## Inspect and diagnose
 
 - `jw status [workspace] --refresh none` explains one workspace without refreshing a working copy; it defaults to `@`. Use this form for read-only inspection before lifecycle mutations.
-- `jw doctor` diagnoses repository, trunk, metadata, and workspace consistency without repairing them. `jw doctor --format=json` still emits a diagnostic report when configuration loading fails.
+- `jw doctor` diagnoses repository, trunk, metadata, workspace, and configured-link
+  consistency without repairing them. It checks links from the default workspace's
+  `.jwlinks.toml` plus `.jwlinks.local.toml` in every managed workspace. Relative
+  targets are resolved from each receiving workspace; unmanaged workspaces are not
+  link-health subjects. Read [links](links.md) for the classifier and remedies.
+- Doctor human link results are `PASS`, `WARN`, `FAIL`, or `SKIP`: optional absent
+  targets are `WARN`/`SKIP`; missing sources with available targets, required missing
+  targets, and occupied sources are `FAIL`; stale or unreadable managed paths are
+  `SKIP` for link inspection. `jw doctor --format=json` keeps schema version 1
+  and adds the `workspace-link` diagnostic
+  code; a complete report is emitted before a failing exit status.
+- `jw status` remains a one-workspace snapshot. It does not inspect or report link
+  health; use `jw doctor` for the repository-wide check.
 
 Complete diagnosis when the target workspace and reported hazards are identified without refreshing or otherwise mutating state.
 

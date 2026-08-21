@@ -76,7 +76,7 @@ workspace paths, links, bookmarks, and removal checks to it. See
 ## Workspace links
 
 If you keep large ignored data in one workspace and want it accessible from others,
-define links in the default workspace's `.jwlinks.toml`:
+define link relationships in the default workspace's `.jwlinks.toml`:
 
 ```toml
 [[link]]
@@ -85,16 +85,26 @@ target = "../ezra-cerpac/data"
 required = true
 ```
 
-When you run `jw switch`, `jw` creates symlinks in the target workspace unless you pass
-`--no-links`. You can also run `jw links apply` manually from any workspace; it still
-uses the default workspace's configuration. Relative targets resolve from the workspace
-receiving the links.
+When you run `jw switch`, `jw` creates symlinks in the receiving workspace unless you
+pass `--no-links`. You can also run `jw links apply` manually from any workspace; it
+still uses the default workspace's configuration. `.jwlinks.local.toml` overrides the
+shared file for an entry with the same `source`. Relative targets resolve from the
+workspace receiving the links, so the same rule can work across sibling and nested
+workspaces.
 
 Sources must stay inside the receiving workspace. Absolute sources and parent traversal
 such as `../outside` are rejected. All rules are checked before `jw` changes the filesystem,
 so a later conflict does not leave earlier links behind.
 
 For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep ignored).
+
+`jw doctor` checks these relationships in every managed workspace. A configured source
+is `PASS` when it resolves canonically to its target, including an ordinary path. A
+missing source when its target exists, a missing required target, or a source occupied
+by a private path or wrong link is `FAIL`. An optional missing target is `WARN`/`SKIP`
+only when the source is absent or is the correct dangling link. A managed workspace
+whose path is stale or missing gets a separate workspace diagnostic and link inspection
+is `SKIP`.
 
 ## Shell setup
 
@@ -219,6 +229,13 @@ jw doctor --format=json
 resolved trunk IDs. Known missing values stay explicit `null`; JSON contains no
 ANSI escapes. `doctor` uses its own schema-versioned report because it must remain
 valid even when trunk or metadata is broken.
+
+Doctor keeps schema version 1 while adding the `workspace-link` diagnostic code.
+Consumers should ignore unknown additive diagnostic codes and fields. Human link
+results map to `PASS`, `WARN`, `FAIL`, or `SKIP`; machine output keeps the existing
+`passed`, `failed`, and `skipped` states, with severity distinguishing optional
+warnings from informational skips and errors. `jw status` does not inspect or expose
+link health in this change.
 
 `jw adopt NAME --base REVSET [--bookmark BOOKMARK]` records lifecycle intent for
 an existing workspace. It does not move revisions or bookmarks and does not

@@ -15,6 +15,24 @@ pub struct LinkApplyReport {
     pub skipped_missing_target: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LinkCheckState {
+    Satisfied,
+    Missing,
+    Skipped,
+    Conflicting,
+    Unreadable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkCheck {
+    pub(crate) source: PathBuf,
+    pub(crate) target: PathBuf,
+    pub(crate) required: bool,
+    pub(crate) state: LinkCheckState,
+    pub(crate) target_exists: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct LinkApplication {
     report: LinkApplyReport,
@@ -40,6 +58,7 @@ impl LinkApplyReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LinkRule {
+    workspace_root: PathBuf,
     source: PathBuf,
     target: PathBuf,
     required: bool,
@@ -64,6 +83,11 @@ struct LinksFile {
     link: Vec<LinkRuleRaw>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LinkConfig {
+    rules: Vec<LinkRuleRaw>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct LinkRuleRaw {
     source: String,
@@ -83,18 +107,34 @@ pub(crate) fn apply_workspace_links_reversible(
     config_root: &Path,
     workspace_root: &Path,
 ) -> Result<LinkApplication> {
-    let rules = load_rules(config_root, workspace_root)?;
+    let config = load_link_config(config_root)?;
+    let rules = config
+        .as_ref()
+        .map(|config| normalize_rules(config, workspace_root))
+        .transpose()?
+        .unwrap_or_default();
     LinkPlan::build(workspace_root, rules)?.apply()
 }
 
-fn load_rules(config_root: &Path, workspace_root: &Path) -> Result<Vec<LinkRule>> {
+/// Read and merge the repository-owned link configuration once.
+///
+/// The local file replaces a base-file entry with the same raw `source`, matching the
+/// long-standing override behavior. Targets are intentionally left unresolved here because
+/// relative targets are relative to each receiving workspace.
+pub(crate) fn load_link_config(config_root: &Path) -> Result<Option<LinkConfig>> {
     let mut combined: Vec<LinkRuleRaw> = Vec::new();
+    let mut found = false;
 
     for file_name in [LINKS_FILE, LINKS_LOCAL_FILE] {
         let path = config_root.join(file_name);
-        if !path.exists() {
-            continue;
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
         }
+        found = true;
 
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -113,8 +153,30 @@ fn load_rules(config_root: &Path, workspace_root: &Path) -> Result<Vec<LinkRule>
         }
     }
 
-    combined
-        .into_iter()
+    Ok(found.then_some(LinkConfig { rules: combined }))
+}
+
+pub(crate) fn inspect_loaded_workspace_links(
+    config: &LinkConfig,
+    workspace_root: &Path,
+) -> Vec<LinkCheck> {
+    config
+        .rules
+        .iter()
+        .map(|raw| match normalize_rule(workspace_root, raw.clone()) {
+            Ok(rule) => classify_rule(&rule),
+            Err(error) => {
+                invalid_rule_check(workspace_root, raw, format!("invalid link rule: {error:#}"))
+            }
+        })
+        .collect()
+}
+
+fn normalize_rules(config: &LinkConfig, workspace_root: &Path) -> Result<Vec<LinkRule>> {
+    config
+        .rules
+        .iter()
+        .cloned()
         .map(|raw| normalize_rule(workspace_root, raw))
         .collect()
 }
@@ -154,6 +216,7 @@ fn normalize_rule(workspace_root: &Path, raw: LinkRuleRaw) -> Result<LinkRule> {
     };
 
     Ok(LinkRule {
+        workspace_root: workspace_root.to_path_buf(),
         source: workspace_root.join(source_rel),
         target,
         required: raw.required,
@@ -170,61 +233,52 @@ impl LinkPlan {
         }
 
         let mut links_to_create = Vec::new();
+        let mut skipped_sources = Vec::new();
         let mut report = LinkApplyReport::default();
 
         for rule in rules {
-            if !rule.target.exists() {
-                if rule.required {
+            let check = classify_rule(&rule);
+            match check.state {
+                LinkCheckState::Satisfied => report.satisfied += 1,
+                LinkCheckState::Skipped => {
+                    report.skipped_missing_target += 1;
+                    skipped_sources.push(check.source.clone());
+                }
+                LinkCheckState::Missing if check.target_exists => links_to_create.push(rule),
+                LinkCheckState::Missing => {
                     bail!(
                         "required link target is missing for {}: {}",
-                        display_in_workspace(workspace_root, &rule.source),
-                        rule.target.display()
+                        display_in_workspace(workspace_root, &check.source),
+                        check.target.display()
                     )
                 }
-                report.skipped_missing_target += 1;
-                continue;
-            }
-
-            match fs::symlink_metadata(&rule.source) {
-                Err(error) if error.kind() == ErrorKind::NotFound => links_to_create.push(rule),
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to inspect {}", rule.source.display()));
-                }
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let existing = fs::read_link(&rule.source).with_context(|| {
-                        format!("failed to read symlink {}", rule.source.display())
-                    })?;
-                    let existing_abs = if existing.is_absolute() {
-                        existing
-                    } else {
-                        rule.source
-                            .parent()
-                            .unwrap_or(workspace_root)
-                            .join(existing)
+                LinkCheckState::Conflicting => {
+                    let source_kind = match inspect_source_parents(&check.source, workspace_root) {
+                        Err(SourceParentIssue::Conflict(reason)) => reason,
+                        _ => match fs::symlink_metadata(&check.source) {
+                            Ok(metadata) if metadata.file_type().is_symlink() => {
+                                "existing symlink does not point to".to_owned()
+                            }
+                            _ => "path exists and is not a symlink to".to_owned(),
+                        },
                     };
-                    if same_existing_path(&existing_abs, &rule.target)? {
-                        report.satisfied += 1;
-                    } else {
-                        bail!(
-                            "link conflict at {}: existing symlink does not point to {}",
-                            display_in_workspace(workspace_root, &rule.source),
-                            rule.target.display()
-                        )
-                    }
+                    bail!(
+                        "link conflict at {}: {source_kind} {}",
+                        display_in_workspace(workspace_root, &check.source),
+                        check.target.display()
+                    )
                 }
-                Ok(_) if same_existing_path(&rule.source, &rule.target)? => {
-                    report.satisfied += 1;
+                LinkCheckState::Unreadable(error) => {
+                    bail!(
+                        "link is unreadable at {}: {error}",
+                        display_in_workspace(workspace_root, &check.source),
+                    )
                 }
-                Ok(_) => bail!(
-                    "link conflict at {}: path exists and is not a symlink to {}",
-                    display_in_workspace(workspace_root, &rule.source),
-                    rule.target.display()
-                ),
             }
         }
 
-        let directories_to_create = preflight_creation_paths(workspace_root, &links_to_create)?;
+        let directories_to_create =
+            preflight_creation_paths(workspace_root, &links_to_create, &skipped_sources)?;
         report.linked = links_to_create.len();
 
         Ok(Self {
@@ -274,9 +328,182 @@ impl LinkPlan {
     }
 }
 
+fn classify_rule(rule: &LinkRule) -> LinkCheck {
+    if let Err(issue) = inspect_source_parents(&rule.source, &rule.workspace_root) {
+        let state = match issue {
+            SourceParentIssue::Conflict(_) => LinkCheckState::Conflicting,
+            SourceParentIssue::Unreadable(error) => LinkCheckState::Unreadable(error),
+        };
+        return LinkCheck {
+            source: rule.source.clone(),
+            target: rule.target.clone(),
+            required: rule.required,
+            state,
+            target_exists: false,
+        };
+    }
+
+    let target_exists = match fs::metadata(&rule.target) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => {
+            return unreadable_check(
+                rule,
+                format!(
+                    "failed to inspect target {}: {error}",
+                    rule.target.display()
+                ),
+            );
+        }
+    };
+
+    let state = match fs::symlink_metadata(&rule.source) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let existing = match fs::read_link(&rule.source) {
+                Ok(existing) => existing,
+                Err(error) => {
+                    return unreadable_check(
+                        rule,
+                        format!("failed to read symlink {}: {error}", rule.source.display()),
+                    );
+                }
+            };
+            let existing_abs = if existing.is_absolute() {
+                existing
+            } else {
+                rule.source
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(existing)
+            };
+            match same_existing_path(&existing_abs, &rule.target) {
+                Ok(true) if target_exists => LinkCheckState::Satisfied,
+                Ok(true) if rule.required => LinkCheckState::Missing,
+                Ok(true) => LinkCheckState::Skipped,
+                Ok(false) => LinkCheckState::Conflicting,
+                Err(error) => LinkCheckState::Unreadable(format!(
+                    "failed to compare {} with {}: {error:#}",
+                    existing_abs.display(),
+                    rule.target.display()
+                )),
+            }
+        }
+        Ok(_) if target_exists => match same_existing_path(&rule.source, &rule.target) {
+            Ok(true) => LinkCheckState::Satisfied,
+            Ok(false) => LinkCheckState::Conflicting,
+            Err(error) => LinkCheckState::Unreadable(format!(
+                "failed to compare {} with {}: {error:#}",
+                rule.source.display(),
+                rule.target.display()
+            )),
+        },
+        Ok(_) => LinkCheckState::Conflicting,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if !target_exists && !rule.required {
+                LinkCheckState::Skipped
+            } else {
+                LinkCheckState::Missing
+            }
+        }
+        Err(error) => LinkCheckState::Unreadable(format!(
+            "failed to inspect source {}: {error}",
+            rule.source.display()
+        )),
+    };
+
+    LinkCheck {
+        source: rule.source.clone(),
+        target: rule.target.clone(),
+        required: rule.required,
+        state,
+        target_exists,
+    }
+}
+
+fn invalid_rule_check(workspace_root: &Path, raw: &LinkRuleRaw, error: String) -> LinkCheck {
+    let source_raw = PathBuf::from(raw.source.trim());
+    let target_raw = PathBuf::from(raw.target.trim());
+    LinkCheck {
+        source: if source_raw.is_absolute() {
+            source_raw
+        } else {
+            workspace_root.join(source_raw)
+        },
+        target: if target_raw.is_absolute() {
+            target_raw
+        } else {
+            workspace_root.join(target_raw)
+        },
+        required: raw.required,
+        state: LinkCheckState::Unreadable(error),
+        target_exists: false,
+    }
+}
+
+fn unreadable_check(rule: &LinkRule, error: String) -> LinkCheck {
+    LinkCheck {
+        source: rule.source.clone(),
+        target: rule.target.clone(),
+        required: rule.required,
+        state: LinkCheckState::Unreadable(error),
+        target_exists: false,
+    }
+}
+
+#[derive(Debug)]
+enum SourceParentIssue {
+    Conflict(String),
+    Unreadable(String),
+}
+
+fn inspect_source_parents(
+    source: &Path,
+    workspace_root: &Path,
+) -> std::result::Result<(), SourceParentIssue> {
+    let Some(parent) = source.parent() else {
+        return Ok(());
+    };
+
+    let relative_parent = parent.strip_prefix(workspace_root).map_err(|error| {
+        SourceParentIssue::Unreadable(format!(
+            "source parent {} is outside workspace {}: {error}",
+            parent.display(),
+            workspace_root.display()
+        ))
+    })?;
+    let mut candidate = workspace_root.to_path_buf();
+    for component in relative_parent.components() {
+        candidate.push(component.as_os_str());
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(SourceParentIssue::Conflict(format!(
+                    "source parent cannot be a symlink: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(SourceParentIssue::Conflict(format!(
+                    "source parent is not a directory: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(SourceParentIssue::Unreadable(format!(
+                    "failed to inspect source parent {}: {error}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn preflight_creation_paths(
     workspace_root: &Path,
     links_to_create: &[LinkRule],
+    skipped_sources: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     let mut sources = links_to_create
         .iter()
@@ -285,12 +512,24 @@ fn preflight_creation_paths(
     sources.sort_unstable();
 
     for pair in sources.windows(2) {
-        if pair[1] == pair[0] || pair[1].starts_with(pair[0]) {
+        if paths_overlap(pair[0], pair[1]) {
             bail!(
                 "link sources overlap: {} and {}",
                 display_in_workspace(workspace_root, pair[0]),
                 display_in_workspace(workspace_root, pair[1])
             )
+        }
+    }
+
+    for skipped in skipped_sources {
+        for planned in &sources {
+            if paths_overlap(skipped, planned) {
+                bail!(
+                    "link sources overlap: {} and {}",
+                    display_in_workspace(workspace_root, skipped),
+                    display_in_workspace(workspace_root, planned)
+                )
+            }
         }
     }
 
@@ -339,6 +578,10 @@ fn preflight_creation_paths(
             .then_with(|| left.cmp(right))
     });
     Ok(directories)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 fn create_planned_directory(path: &Path) -> Result<bool> {
@@ -416,17 +659,62 @@ fn remove_created_symlink(link: &CreatedLink) -> std::io::Result<()> {
 }
 
 fn same_existing_path(path_a: &Path, path_b: &Path) -> Result<bool> {
-    if path_a.exists() && path_b.exists() {
-        let left = path_a
-            .canonicalize()
-            .with_context(|| format!("failed to resolve {}", path_a.display()))?;
-        let right = path_b
-            .canonicalize()
-            .with_context(|| format!("failed to resolve {}", path_b.display()))?;
-        return Ok(left == right);
-    }
+    Ok(resolve_existing_prefix(path_a)? == resolve_existing_prefix(path_b)?)
+}
 
-    Ok(path_a == path_b)
+fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut prefix = path.to_path_buf();
+    let mut missing_suffix = Vec::new();
+
+    loop {
+        match fs::canonicalize(&prefix) {
+            Ok(existing) => {
+                let mut resolved = existing;
+                for component in missing_suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(normalize_lexical(&resolved));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let Some(name) = prefix.file_name() else {
+                    return Ok(normalize_lexical(path));
+                };
+                missing_suffix.push(name.to_owned());
+                let Some(parent) = prefix.parent() else {
+                    return Ok(normalize_lexical(path));
+                };
+                prefix = parent.to_path_buf();
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to resolve {}", prefix.display()));
+            }
+        }
+    }
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let can_pop_normal = normalized
+                    .components()
+                    .next_back()
+                    .is_some_and(|component| matches!(component, Component::Normal(_)));
+                if can_pop_normal {
+                    normalized.pop();
+                } else if !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn display_in_workspace(workspace_root: &Path, path: &Path) -> String {
@@ -481,6 +769,18 @@ fn remove_symlink(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn normalize_lexical_clamps_parent_traversal_at_absolute_root() {
+        assert_eq!(
+            normalize_lexical(Path::new("/../../target")),
+            PathBuf::from("/target")
+        );
+        assert_eq!(
+            normalize_lexical(Path::new("/foo/../../target")),
+            PathBuf::from("/target")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn apply_rolls_back_links_and_directories_after_a_late_conflict() {
@@ -493,11 +793,13 @@ mod tests {
         let late_conflict = workspace_root.join("late-conflict");
         let rules = vec![
             LinkRule {
+                workspace_root: workspace_root.clone(),
                 source: created_source.clone(),
                 target: target.clone(),
                 required: true,
             },
             LinkRule {
+                workspace_root: workspace_root.clone(),
                 source: late_conflict.clone(),
                 target,
                 required: true,

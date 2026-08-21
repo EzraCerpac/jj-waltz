@@ -759,7 +759,7 @@ fn workspace_dir_for_name(name: &str, inventory: &WorkspaceInventory) -> Result<
     }
 }
 
-fn workspace_base_root(current_root: &Path, current_name: &str) -> Result<PathBuf> {
+pub(crate) fn workspace_base_root(current_root: &Path, current_name: &str) -> Result<PathBuf> {
     let parent = current_root
         .parent()
         .ok_or_else(|| anyhow!("workspace root has no parent directory"))?;

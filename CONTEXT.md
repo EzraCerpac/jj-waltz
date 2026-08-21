@@ -66,8 +66,15 @@ by itself a claim that a command exposing that concept already exists.
   before destructive work begins.
 - **Associated bookmark** — a bookmark created by `jw` for one workspace. `jw`
   records this relationship and asks before deleting the bookmark.
-- **Workspace link** — a validated symlink from a workspace-relative source to a
-  shared target, configured by `.jwlinks.toml` and optional local overrides.
+- **Workspace link** — a configured source-target relationship owned by the
+  default workspace's `.jwlinks.toml` and optional `.jwlinks.local.toml`.
+  `source` is inside each receiving workspace; a relative `target` is resolved
+  from that receiver. A link is satisfied by a symlink or ordinary path that
+  resolves canonically to the target.
+- **Workspace-link health** — the doctor result for one configured link in one
+  managed workspace: satisfied, missing, skipped, or conflicting. An optional
+  missing target is skipped only when the source is absent or is the correct
+  dangling link; an occupied source is conflicting.
 - **Shell adapter** — shell-specific syntax that gives the shared `jw` command
   policy native completion and parent-shell directory changes.
 - **Herdr container** — a Herdr workspace or tab associated with one JJ workspace
@@ -84,7 +91,14 @@ by itself a claim that a command exposing that concept already exists.
 - Managed metadata records only `jw` lifecycle intent. Unmanaged inference stays
   visibly inferred.
 - Creation either completes required setup or removes newly created state.
+- `jw doctor` checks configured links in every managed workspace. It reports
+  missing or conflicting links instead of treating the repository as healthy;
+  stale or missing workspace paths are reported separately and link inspection
+  is skipped for those paths.
 - Link sources stay inside the target workspace.
+- Link configuration comes from the default workspace; local entries override
+  shared entries with the same source. Relative targets are resolved per
+  receiving workspace.
 - Removal preserves bookmarks unless the user confirms deletion.
 - Publication and cleanup remain separate workflows.
 - Core workspace lifecycle and local status remain offline; forge and network
@@ -104,6 +118,11 @@ by itself a claim that a command exposing that concept already exists.
 - `jw doctor` uses a separate versioned report. Every check renders even when
   another fails, and an unhealthy report exits nonzero only after stdout is
   complete.
+- Doctor human output uses `PASS`, `WARN`, `FAIL`, and `SKIP` for link health.
+  Optional omissions are warnings; missing required targets and conflicts are
+  failures. The `workspace-link` diagnostic code is additive within doctor
+  schema version 1. `jw status` remains a one-workspace snapshot and does not
+  include link health.
 - `jw adopt NAME --base REVSET [--bookmark BOOKMARK]` adds managed metadata for
   an existing usable workspace. It never moves revisions or bookmarks and never
   refreshes a working copy. Creation-base and current-revision facts are reported;
