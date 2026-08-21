@@ -1788,6 +1788,125 @@ fn adopt_rejects_bookmark_and_no_bookmark_together() {
         ));
 }
 
+#[test]
+fn repair_requires_explicit_bookmark_intent_and_literal_workspace_name() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["repair", "default", "--base", "@-"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--bookmark"));
+    repo.cmd()
+        .args([
+            "repair",
+            "default",
+            "--base",
+            "@-",
+            "--bookmark",
+            "main",
+            "--no-bookmark",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+    repo.cmd()
+        .args(["repair", "@", "--base", "@-", "--no-bookmark"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("literal workspace name"));
+
+    repo.cmd()
+        .args(["adopt", "default", "--base", "@-", "--no-bookmark"])
+        .assert()
+        .success();
+    repo.cmd()
+        .args(["repair", "default", "--base", "@-", "--no-bookmark"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Repaired workspace: default"));
+}
+
+#[test]
+fn repair_replaces_only_base_and_bookmark_and_fixes_doctor_remedy() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd()
+        .args(["add", "--no-links", "feature-a"])
+        .assert()
+        .success();
+    let record_path = repo
+        .metadata_record_paths()
+        .into_iter()
+        .next()
+        .expect("managed metadata record");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).expect("read managed metadata record"))
+            .expect("metadata JSON");
+    let created_at = record["metadata"]["created_at_unix_ms"].clone();
+    let creation_operation = record["metadata"]["creation_operation_id"].clone();
+    record["metadata"]["creation_base_commit_id"] = "missing-base".into();
+    record["metadata"]["associated_bookmark"] = "missing-bookmark".into();
+    record["metadata"]["intended_remote"] = "origin".into();
+    let mut bytes = serde_json::to_vec_pretty(&record).expect("serialize metadata");
+    bytes.push(b'\n');
+    fs::write(&record_path, bytes).expect("write invalid managed metadata");
+
+    repo.cmd()
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("jw repair feature-a"))
+        .stdout(predicate::str::contains(
+            "jw repair feature-a --base <exact-revset> --no-bookmark",
+        ));
+
+    let operation = repo.operation_id();
+    let bookmarks = repo.bookmarks();
+    let feature_root = repo.default_root.with_extension("feature-a");
+    let commit = repo.revision_commit_id("feature-a@");
+    let expected_base = repo.revision_commit_id("@-");
+    repo.cmd()
+        .args(["repair", "feature-a", "--base", "@-", "--no-bookmark"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Repaired workspace: feature-a"))
+        .stdout(predicate::str::contains(
+            "previous creation base: missing-base",
+        ))
+        .stdout(predicate::str::contains(format!(
+            "creation base: {expected_base}"
+        )))
+        .stdout(predicate::str::contains(
+            "previous bookmark: missing-bookmark",
+        ))
+        .stdout(predicate::str::contains("bookmark: (none)"));
+
+    assert_eq!(repo.operation_id(), operation);
+    assert_eq!(repo.bookmarks(), bookmarks);
+    assert_eq!(repo.revision_commit_id("feature-a@"), commit);
+    assert!(feature_root.is_dir());
+    let repaired: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).expect("read repaired metadata record"))
+            .expect("repaired metadata JSON");
+    assert_eq!(repaired["metadata"]["created_at_unix_ms"], created_at);
+    assert_eq!(
+        repaired["metadata"]["creation_operation_id"],
+        creation_operation
+    );
+    assert_eq!(
+        repaired["metadata"]["creation_base_commit_id"],
+        expected_base
+    );
+    assert_eq!(
+        repaired["metadata"]["associated_bookmark"],
+        serde_json::Value::Null
+    );
+    assert_eq!(repaired["metadata"]["intended_remote"], "origin");
+    repo.cmd().arg("doctor").assert().success();
+}
+
 struct TestRepo {
     _tempdir: TempDir,
     default_root: PathBuf,

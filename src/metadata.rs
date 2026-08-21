@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const WORKSPACE_METADATA_SCHEMA_VERSION: u32 = 1;
@@ -15,6 +17,12 @@ const WORKSPACES_DIRECTORY: &str = "workspaces";
 const TEMP_ATTEMPTS: usize = 100;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static PROCESS_METADATA_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ATOMIC_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,21 +138,67 @@ impl WorkspaceMetadataStore {
     /// Creates a record without replacing an existing managed workspace.
     pub fn insert(&self, metadata: &ManagedWorkspaceMetadata) -> Result<()> {
         validate_metadata(metadata)?;
-        if self.get(&metadata.workspace_name)?.is_some() {
-            bail!("workspace is already managed: {}", metadata.workspace_name);
+        self.ensure_initialized()?;
+        self.with_record_lock(&metadata.workspace_name, || {
+            if self.get(&metadata.workspace_name)?.is_some() {
+                bail!("workspace is already managed: {}", metadata.workspace_name);
+            }
+
+            let path = self.workspace_path(&metadata.workspace_name);
+            let record = WorkspaceRecord {
+                schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
+                metadata: metadata.clone(),
+            };
+            write_json_new(&path, &record).with_context(|| {
+                format!(
+                    "failed to insert metadata for workspace {}",
+                    metadata.workspace_name
+                )
+            })
+        })
+    }
+
+    /// Replaces one existing record only when it still matches `expected`.
+    ///
+    /// The replacement is installed with the same atomic writer used for
+    /// manifests and new records. A missing or changed record is not an
+    /// error: the caller gets `Ok(false)` and the store is left untouched.
+    pub fn replace_if_matches(
+        &self,
+        expected: &ManagedWorkspaceMetadata,
+        replacement: &ManagedWorkspaceMetadata,
+    ) -> Result<bool> {
+        validate_metadata(expected)?;
+        validate_metadata(replacement)?;
+        if expected.workspace_name != replacement.workspace_name {
+            bail!(
+                "metadata replacement workspace name differs: expected {}, replacement {}",
+                expected.workspace_name,
+                replacement.workspace_name
+            );
         }
 
-        self.ensure_initialized()?;
-        let path = self.workspace_path(&metadata.workspace_name);
-        let record = WorkspaceRecord {
-            schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
-            metadata: metadata.clone(),
-        };
-        write_json_new(&path, &record).with_context(|| {
-            format!(
-                "failed to insert metadata for workspace {}",
-                metadata.workspace_name
-            )
+        if !self.validate_existing_store()? {
+            return Ok(false);
+        }
+        self.with_record_lock(&expected.workspace_name, || {
+            let current = self.get(&expected.workspace_name)?;
+            if current.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+
+            let record = WorkspaceRecord {
+                schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
+                metadata: replacement.clone(),
+            };
+            let path = self.workspace_path(&replacement.workspace_name);
+            write_json_atomic(&path, &record).with_context(|| {
+                format!(
+                    "failed to replace metadata for workspace {}",
+                    replacement.workspace_name
+                )
+            })?;
+            Ok(true)
         })
     }
 
@@ -155,52 +209,65 @@ impl WorkspaceMetadataStore {
         metadata: &ManagedWorkspaceMetadata,
     ) -> Result<Option<ManagedWorkspaceMetadata>> {
         validate_metadata(metadata)?;
-        let previous = self.get(&metadata.workspace_name)?;
         self.ensure_initialized()?;
+        self.with_record_lock(&metadata.workspace_name, || {
+            let previous = self.get(&metadata.workspace_name)?;
 
-        let record = WorkspaceRecord {
-            schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
-            metadata: metadata.clone(),
-        };
-        let path = self.workspace_path(&metadata.workspace_name);
-        write_json_atomic(&path, &record).with_context(|| {
-            format!(
-                "failed to write metadata for workspace {}",
-                metadata.workspace_name
-            )
-        })?;
-        Ok(previous)
+            let record = WorkspaceRecord {
+                schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
+                metadata: metadata.clone(),
+            };
+            let path = self.workspace_path(&metadata.workspace_name);
+            write_json_atomic(&path, &record).with_context(|| {
+                format!(
+                    "failed to write metadata for workspace {}",
+                    metadata.workspace_name
+                )
+            })?;
+            Ok(previous)
+        })
     }
 
     #[cfg(test)]
     pub fn remove(&self, workspace_name: &str) -> Result<Option<ManagedWorkspaceMetadata>> {
-        let previous = self.get(workspace_name)?;
-        if previous.is_none() {
+        validate_workspace_name(workspace_name)?;
+        if !self.validate_existing_store()? {
             return Ok(None);
         }
+        self.with_record_lock(workspace_name, || {
+            let previous = self.get(workspace_name)?;
+            if previous.is_none() {
+                return Ok(None);
+            }
 
-        match fs::remove_file(self.workspace_path(workspace_name)) {
-            Ok(()) => Ok(previous),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to remove metadata for {workspace_name}")),
-        }
+            match fs::remove_file(self.workspace_path(workspace_name)) {
+                Ok(()) => Ok(previous),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error)
+                    .with_context(|| format!("failed to remove metadata for {workspace_name}")),
+            }
+        })
     }
 
     /// Removes a record only when its current contents match `expected`.
     pub fn remove_if_matches(&self, expected: &ManagedWorkspaceMetadata) -> Result<bool> {
         validate_metadata(expected)?;
-        if self.get(&expected.workspace_name)?.as_ref() != Some(expected) {
+        if !self.validate_existing_store()? {
             return Ok(false);
         }
+        self.with_record_lock(&expected.workspace_name, || {
+            if self.get(&expected.workspace_name)?.as_ref() != Some(expected) {
+                return Ok(false);
+            }
 
-        match fs::remove_file(self.workspace_path(&expected.workspace_name)) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to remove metadata for {}", expected.workspace_name)
-            }),
-        }
+            match fs::remove_file(self.workspace_path(&expected.workspace_name)) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error).with_context(|| {
+                    format!("failed to remove metadata for {}", expected.workspace_name)
+                }),
+            }
+        })
     }
 
     fn ensure_initialized(&self) -> Result<()> {
@@ -366,6 +433,32 @@ impl WorkspaceMetadataStore {
         self.workspaces_directory()
             .join(workspace_file_name(workspace_name))
     }
+
+    fn with_record_lock<T>(
+        &self,
+        workspace_name: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let process_guard = PROCESS_METADATA_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("metadata writer lock is poisoned"))?;
+        let path = self
+            .workspaces_directory()
+            .join(format!(".{}.lock", workspace_file_name(workspace_name)));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open metadata lock {}", path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("failed to lock metadata record {}", path.display()))?;
+        let result = operation();
+        drop(file);
+        drop(process_guard);
+        result
+    }
 }
 
 fn validate_metadata(metadata: &ManagedWorkspaceMetadata) -> Result<()> {
@@ -524,6 +617,11 @@ fn is_manifest_temporary_file(name: &std::ffi::OsStr) -> bool {
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_ATOMIC_WRITE.with(|failure| failure.replace(false)) {
+        bail!("injected atomic metadata write failure");
+    }
+
     let contents = json_bytes(value)?;
     let (mut file, mut temporary) = create_temporary_file(path)?;
     file.write_all(&contents)
@@ -760,6 +858,143 @@ mod tests {
             Some(second.clone())
         );
         assert_eq!(store.list().expect("list records"), vec![updated, second]);
+    }
+
+    #[test]
+    fn replace_if_matches_replaces_the_expected_record() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let store = test_store(&tempdir);
+        let original = metadata("solver");
+        let mut replacement = original.clone();
+        replacement.creation_base_commit_id = "commit-2".to_owned();
+        store.insert(&original).expect("insert original record");
+
+        assert!(
+            store
+                .replace_if_matches(&original, &replacement)
+                .expect("replace matching record")
+        );
+        assert_eq!(
+            store.get("solver").expect("read replacement record"),
+            Some(replacement)
+        );
+    }
+
+    #[test]
+    fn replace_if_matches_does_not_create_a_missing_record() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let store = test_store(&tempdir);
+        let original = metadata("solver");
+        let mut replacement = original.clone();
+        replacement.creation_base_commit_id = "commit-2".to_owned();
+
+        assert!(
+            !store
+                .replace_if_matches(&original, &replacement)
+                .expect("leave missing record absent")
+        );
+        assert_eq!(store.get("solver").expect("read missing record"), None);
+        assert!(!store.root().exists());
+    }
+
+    #[test]
+    fn replace_if_matches_refuses_a_changed_record_without_writing() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let store = test_store(&tempdir);
+        let expected = metadata("solver");
+        let mut current = expected.clone();
+        current.creation_base_commit_id = "commit-current".to_owned();
+        let mut replacement = expected.clone();
+        replacement.creation_base_commit_id = "commit-replacement".to_owned();
+        store.insert(&current).expect("insert current record");
+        let path = store.workspace_path("solver");
+        let original_bytes = fs::read(&path).expect("read original bytes");
+
+        assert!(
+            !store
+                .replace_if_matches(&expected, &replacement)
+                .expect("refuse changed record")
+        );
+        assert_eq!(
+            fs::read(path).expect("read unchanged bytes"),
+            original_bytes
+        );
+        assert_eq!(
+            store.get("solver").expect("read current record"),
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn replace_if_matches_preserves_bytes_when_atomic_write_fails() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let store = test_store(&tempdir);
+        let original = metadata("solver");
+        let mut replacement = original.clone();
+        replacement.creation_base_commit_id = "commit-2".to_owned();
+        store.insert(&original).expect("insert original record");
+        let path = store.workspace_path("solver");
+        let original_bytes = fs::read(&path).expect("read original bytes");
+        FAIL_NEXT_ATOMIC_WRITE.with(|failure| failure.set(true));
+
+        let error = store
+            .replace_if_matches(&original, &replacement)
+            .expect_err("report atomic write failure");
+        assert!(error.to_string().contains("failed to replace metadata"));
+        assert_eq!(
+            fs::read(path).expect("read preserved bytes"),
+            original_bytes
+        );
+        assert_eq!(
+            store.get("solver").expect("read original record"),
+            Some(original)
+        );
+    }
+
+    #[test]
+    fn concurrent_replacements_to_one_record_have_one_winner() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let store = Arc::new(test_store(&tempdir));
+        for round in 0..32 {
+            let workspace = format!("solver-{round}");
+            let original = metadata(&workspace);
+            store.insert(&original).expect("insert original record");
+            let barrier = Arc::new(Barrier::new(2));
+
+            let workers = (1..=2)
+                .map(|index| {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    let original = original.clone();
+                    std::thread::spawn(move || {
+                        let mut replacement = original.clone();
+                        replacement.creation_base_commit_id = format!("replacement-{index}");
+                        barrier.wait();
+                        (
+                            store
+                                .replace_if_matches(&original, &replacement)
+                                .expect("replace record"),
+                            replacement,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let results = workers
+                .into_iter()
+                .map(|worker| worker.join().expect("replacement thread succeeds"))
+                .collect::<Vec<_>>();
+            assert_eq!(results.iter().filter(|(replaced, _)| *replaced).count(), 1);
+            let winner = results
+                .into_iter()
+                .find_map(|(replaced, metadata)| replaced.then_some(metadata))
+                .expect("one replacement wins");
+            assert_eq!(
+                store.get(&workspace).expect("read winning record"),
+                Some(winner)
+            );
+        }
+        assert_eq!(store.list().expect("list records").len(), 32);
     }
 
     #[test]

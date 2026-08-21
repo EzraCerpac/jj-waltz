@@ -38,6 +38,7 @@ to a warning rather than make local workspace management fail.
 - `jw status [workspace]` explains one workspace from the same snapshot contract
 - `jw doctor` reports repository, trunk, metadata, and workspace consistency checks
 - `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
+- `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
 - `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
@@ -237,10 +238,25 @@ results map to `PASS`, `WARN`, `FAIL`, or `SKIP`; machine output keeps the exist
 warnings from informational skips and errors. `jw status` does not inspect or expose
 link health in this change.
 
-`jw adopt NAME --base REVSET [--bookmark BOOKMARK]` records lifecycle intent for
-an existing workspace. It does not move revisions or bookmarks and does not
-refresh the working copy. Milestone 0 reports the exact base and current revision;
-workspace-stack analysis is deferred to milestone 1.
+`jw adopt NAME --base REVSET [--bookmark BOOKMARK | --no-bookmark]` records lifecycle
+intent for an existing workspace. Adoption is insert-only: it requires no existing
+managed record and never replaces one. It does not move revisions or bookmarks and
+does not refresh the working copy.
+
+`jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` repairs an
+existing readable managed record. `NAME` is literal; routing shortcuts such as `@`,
+`-`, and `^` are not accepted. The named workspace must be registered with JJ, and
+the base must resolve to exactly one revision. With `--bookmark`, the bookmark must
+already exist locally at one frozen JJ operation; `--no-bookmark` clears the recorded
+association. The checkout path does not need to be usable.
+
+Repair replaces only the recorded creation base and associated bookmark. It preserves
+the record's historical timestamps, creation operation, and intended remote. The
+metadata write is atomic, so validation or write failure leaves the old record intact.
+The command does not create or move bookmarks, rewrite commits, refresh working
+copies, or create a JJ operation. Doctor points invalid bases and missing associated
+bookmarks to `jw repair`; corrupt records still require manual restore, while missing
+records still use `jw adopt`.
 
 ## Semantic contracts
 

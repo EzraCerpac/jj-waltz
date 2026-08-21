@@ -26,15 +26,16 @@ by itself a claim that a command exposing that concept already exists.
   defaulting to `trunk()`. It must resolve to exactly one revision. It is not a
   writable bookmark, and resolving trunk never grants permission to move one.
 - **Managed workspace** — a JJ workspace with repository-scoped lifecycle
-  metadata recorded by `jw`, including its immutable creation base. Management
+  metadata recorded by `jw`, including its recorded creation base. Management
   records `jw` intent; it does not replace JJ's graph or workspace state.
 - **Unmanaged workspace** — a JJ workspace without `jw` lifecycle metadata. It
   remains usable by existing workspace commands. Display code may label derived
   facts as inferred, but destructive or publication automation must not treat
   inferred intent as authoritative.
 - **Creation base** — the exact commit from which `jw` created or explicitly
-  adopted a managed workspace. It is historical metadata and is not rewritten
-  when the workspace stack later moves.
+  adopted a managed workspace. It is historical metadata; ordinary lifecycle
+  operations do not rewrite it. Explicit metadata repair may replace the recorded
+  value after validating a new exact base.
 - **Working-copy revision (WC revision)** — the literal revision associated with
   a workspace's `@`. It may be empty and therefore may differ from the revision
   containing work intended for publication.
@@ -64,8 +65,11 @@ by itself a claim that a command exposing that concept already exists.
   link application, rollback, and switch-state recording.
 - **Removal plan** — workspace, directory action, and associated bookmarks known
   before destructive work begins.
-- **Associated bookmark** — a bookmark created by `jw` for one workspace. `jw`
-  records this relationship and asks before deleting the bookmark.
+- **Associated bookmark** — a local bookmark recorded by `jw` for one workspace.
+  `jw` records this relationship and asks before deleting the bookmark.
+- **Metadata repair** — an explicit correction of an existing managed record's
+  creation base and bookmark association. It does not change JJ workspace, commit,
+  bookmark, or working-copy state.
 - **Workspace link** — a configured source-target relationship owned by the
   default workspace's `.jwlinks.toml` and optional `.jwlinks.local.toml`.
   `source` is inside each receiving workspace; a relative `target` is resolved
@@ -90,6 +94,12 @@ by itself a claim that a command exposing that concept already exists.
   process execution or filesystem mutation.
 - Managed metadata records only `jw` lifecycle intent. Unmanaged inference stays
   visibly inferred.
+- `jw adopt` is insert-only. `jw repair` requires an existing readable managed
+  record and a matching JJ workspace registration at one frozen operation; a usable
+  checkout path is not required.
+- Metadata repair changes only the recorded creation base and bookmark association.
+  Historical fields survive, and a failed or concurrent write leaves the old record
+  intact.
 - Creation either completes required setup or removes newly created state.
 - `jw doctor` checks configured links in every managed workspace. It reports
   missing or conflicting links instead of treating the repository as healthy;
@@ -127,6 +137,12 @@ by itself a claim that a command exposing that concept already exists.
   an existing usable workspace. It never moves revisions or bookmarks and never
   refreshes a working copy. Creation-base and current-revision facts are reported;
   stack analysis remains milestone-one work.
+- `jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` updates an
+  existing readable record only. `NAME` is literal, the base resolves to exactly
+  one revision, and a requested bookmark must already exist locally. It validates
+  the workspace and inputs at one frozen operation, preserves historical fields,
+  and performs no JJ or working-copy mutation. It has no JSON or `jw status` output
+  contract beyond the ordinary human command result.
 - New workspace creation resolves an exact base before mutation. Implicit creation
   requires exactly one `parents(@)` revision. A merge working copy therefore needs
   an explicit exact base such as `--at @`.

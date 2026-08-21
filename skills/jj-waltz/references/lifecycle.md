@@ -20,6 +20,9 @@ Use the relevant `jw <command> --help` before relying on flags.
   code; a complete report is emitted before a failing exit status.
 - `jw status` remains a one-workspace snapshot. It does not inspect or report link
   health; use `jw doctor` for the repository-wide check.
+- For an invalid creation base or missing associated bookmark, follow the doctor
+  remedy with `jw repair`. A missing managed record still calls for `jw adopt`, and
+  a corrupt record needs manual restore.
 
 Complete diagnosis when the target workspace and reported hazards are identified without refreshing or otherwise mutating state.
 
@@ -30,6 +33,27 @@ Complete diagnosis when the target workspace and reported hazards are identified
 Inspect the workspace and resolve the base before adoption. Use `--bookmark` only to record an existing association. Use `--no-bookmark` when no association should be recorded, including when ignoring a stale legacy marker.
 
 Complete adoption when `jw status <name> --refresh none` reports the intended managed metadata and JJ revision/bookmark state is unchanged.
+
+## Repair metadata
+
+`jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` corrects an
+existing readable managed record. `NAME` must be literal; do not use `@`, `-`, `^`,
+or another routing shortcut. The named workspace must be registered with JJ, and
+the replacement base must resolve to exactly one revision at one frozen validation
+operation. A requested bookmark must already exist locally. The checkout path may be
+stale or unusable; JJ workspace registration is the safety gate.
+
+Repair replaces only the recorded creation base and bookmark association. It preserves
+creation time, creation operation ID, and intended remote. The replacement is atomic:
+validation, a changed record, or a write failure leaves the old record intact. Repair
+does not create a JJ operation, change commits or bookmarks, refresh a working copy,
+or create a checkout. Missing records still use `jw adopt`; corrupt records need
+manual restore.
+
+Complete repair when the command reports the old and new metadata values and the
+frozen validation operation, and a read-only doctor/status inspection shows the
+intended record without any JJ revision or bookmark mutation. Repair has no JSON
+output contract and does not add link health to `jw status`.
 
 ## Remove
 
