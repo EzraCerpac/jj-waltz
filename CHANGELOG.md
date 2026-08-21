@@ -1,5 +1,14 @@
 # Changelog
 
+## Version 0.5.0 (2026-08-21)
+
+- Make `jw doctor` inspect every configured workspace link for every managed
+  workspace, reporting satisfied, missing, skipped, conflicting, and unreadable
+  rules without hiding later diagnostics.
+- Add `jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` for
+  safe, atomic repair of an existing workspace's managed base and bookmark
+  metadata without changing JJ commits, bookmarks, operations, or checkouts.
+
 ## Version 0.4.1 (2026-08-15)
 
 - Keep `jw doctor` machine-readable when jj-waltz configuration cannot be read
