@@ -394,8 +394,12 @@ impl DoctorEngine {
                 );
             }
 
-            match query_revisions(&self.client, operation_id, &record.creation_base_commit_id) {
-                Ok(revisions) if revisions.len() == 1 => {}
+            let creation_base_valid = match query_revisions(
+                &self.client,
+                operation_id,
+                &record.creation_base_commit_id,
+            ) {
+                Ok(revisions) if revisions.len() == 1 => true,
                 Ok(revisions) => {
                     problems += 1;
                     report.push(
@@ -405,10 +409,14 @@ impl DoctorEngine {
                                 "creation base resolves to {} revisions; expected one",
                                 revisions.len()
                             ),
-                            Some("adopt the workspace again with a valid exact base"),
+                            Some(format!(
+                                "run `jw repair {} --base <exact-revset>` with `--bookmark <existing>` or `--no-bookmark`",
+                                record.workspace_name
+                            )),
                         )
                         .with_subject(&record.workspace_name),
                     );
+                    false
                 }
                 Err(error) => {
                     problems += 1;
@@ -416,23 +424,35 @@ impl DoctorEngine {
                         DoctorDiagnostic::error(
                             DoctorCode::MetadataConsistency,
                             format!("creation base cannot be resolved: {error:#}"),
-                            Some("adopt the workspace again with a valid exact base"),
+                        Some(format!(
+                            "run `jw repair {} --base <exact-revset>` with `--bookmark <existing>` or `--no-bookmark`",
+                            record.workspace_name
+                        )),
                         )
                         .with_subject(&record.workspace_name),
                     );
+                    false
                 }
-            }
+            };
 
             if let Some(bookmark) = &record.associated_bookmark {
                 match &bookmarks {
                     Ok(names) if names.contains(bookmark) => {}
                     Ok(_) => {
                         problems += 1;
+                        let repair_base = if creation_base_valid {
+                            record.creation_base_commit_id.as_str()
+                        } else {
+                            "<exact-revset>"
+                        };
                         report.push(
                             DoctorDiagnostic::error(
                                 DoctorCode::MetadataConsistency,
                                 format!("associated bookmark `{bookmark}` does not exist"),
-                                Some("recreate the bookmark or adopt without an association"),
+                                Some(format!(
+                                    "recreate the bookmark or run `jw repair {} --base {} --no-bookmark`",
+                                    record.workspace_name, repair_base
+                                )),
                             )
                             .with_subject(&record.workspace_name),
                         );
@@ -1185,7 +1205,14 @@ mod tests {
             .expect("write metadata");
         let record = fs::read_dir(store.root().join("workspaces"))
             .expect("list metadata records")
-            .next()
+            .find(|entry| {
+                entry.as_ref().is_ok_and(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                })
+            })
             .expect("metadata record")
             .expect("read metadata entry")
             .path();

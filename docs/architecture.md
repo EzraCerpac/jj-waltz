@@ -26,9 +26,9 @@ offline.
 
 - `cli` is the terminal adapter. It parses flags, asks questions, and renders
   outcomes.
-- `lifecycle` owns creation policy and ordered add/switch workflows. It loads user
-  config once, applies links, records successful switches, and rolls back failed
-  creations.
+- `lifecycle` owns creation policy, ordered add/switch workflows, adoption, and
+  explicit metadata repair. It loads user config once, applies links, records
+  successful switches, and rolls back failed creations.
 - `jj` is the only production adapter that starts JJ. It owns frozen operation
   queries, version compatibility, process policy, and typed command errors.
 - `observe` refreshes selected working copies, captures one final operation, and
@@ -119,7 +119,7 @@ the repository moves, and a moved config directory plus its adjacent `jj-waltz`
 store also keeps the persisted identity.
 Each schema-versioned workspace record can be written, repaired, or removed
 independently and contains only `jw` lifecycle intent such as creation time,
-creation operation ID, immutable creation base, associated bookmark, and intended
+creation operation ID, recorded creation base, associated bookmark, and intended
 remote. Writes use a unique same-directory temporary file followed by atomic
 replacement. Parse or identity errors are diagnostics, never permission to
 silently reset the store. No secrets or forge tokens belong here.
@@ -132,6 +132,23 @@ On an older repository that has never used per-repository configuration, JJ's
 documented `config path --repo` query may initialize an empty secure-config
 directory. Snapshot and doctor commands still leave the JJ operation and working
 copy unchanged.
+
+### Metadata repair
+
+`jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` is the explicit
+correction path for an existing readable managed record. `NAME` is literal and must
+identify a workspace registered with JJ at one captured validation operation. The
+replacement base resolves to exactly one revision at that operation; a requested
+bookmark must already exist locally. The checkout path need not be readable or
+present.
+
+Repair replaces only `creation_base_commit_id` and `associated_bookmark`. It preserves
+creation time, creation operation ID, and intended remote. The record is replaced
+atomically only if it still matches the validated old record; validation failure,
+write failure, or concurrent change leaves the old record intact. Repair does not
+create a JJ operation, change commits or bookmarks, refresh a working copy, or
+create a usable checkout. Missing records remain an adoption case, and corrupt
+records remain a restore/manual-repair case.
 
 ## Workspace-link health
 
@@ -194,6 +211,9 @@ existing `passed`, `failed`, and `skipped` states and uses severity to distingui
 optional warnings from informational skips and errors. Consumers must ignore
 unknown additive diagnostic codes and fields. `jw status` remains a single-workspace
 snapshot and does not inspect link health.
+
+Metadata repair is a human lifecycle command. It does not add a JSON schema or link
+health field to `jw status`.
 
 ## Failure order
 
