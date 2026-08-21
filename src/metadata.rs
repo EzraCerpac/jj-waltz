@@ -6,8 +6,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 pub const WORKSPACE_METADATA_SCHEMA_VERSION: u32 = 1;
 
@@ -139,21 +139,22 @@ impl WorkspaceMetadataStore {
     pub fn insert(&self, metadata: &ManagedWorkspaceMetadata) -> Result<()> {
         validate_metadata(metadata)?;
         self.ensure_initialized()?;
-        let _lock = self.record_lock(&metadata.workspace_name)?;
-        if self.get(&metadata.workspace_name)?.is_some() {
-            bail!("workspace is already managed: {}", metadata.workspace_name);
-        }
+        self.with_record_lock(&metadata.workspace_name, || {
+            if self.get(&metadata.workspace_name)?.is_some() {
+                bail!("workspace is already managed: {}", metadata.workspace_name);
+            }
 
-        let path = self.workspace_path(&metadata.workspace_name);
-        let record = WorkspaceRecord {
-            schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
-            metadata: metadata.clone(),
-        };
-        write_json_new(&path, &record).with_context(|| {
-            format!(
-                "failed to insert metadata for workspace {}",
-                metadata.workspace_name
-            )
+            let path = self.workspace_path(&metadata.workspace_name);
+            let record = WorkspaceRecord {
+                schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
+                metadata: metadata.clone(),
+            };
+            write_json_new(&path, &record).with_context(|| {
+                format!(
+                    "failed to insert metadata for workspace {}",
+                    metadata.workspace_name
+                )
+            })
         })
     }
 
@@ -180,23 +181,25 @@ impl WorkspaceMetadataStore {
         if !self.validate_existing_store()? {
             return Ok(false);
         }
-        let _lock = self.record_lock(&expected.workspace_name)?;
-        if self.get(&expected.workspace_name)?.as_ref() != Some(expected) {
-            return Ok(false);
-        }
+        self.with_record_lock(&expected.workspace_name, || {
+            let current = self.get(&expected.workspace_name)?;
+            if current.as_ref() != Some(expected) {
+                return Ok(false);
+            }
 
-        let record = WorkspaceRecord {
-            schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
-            metadata: replacement.clone(),
-        };
-        let path = self.workspace_path(&replacement.workspace_name);
-        write_json_atomic(&path, &record).with_context(|| {
-            format!(
-                "failed to replace metadata for workspace {}",
-                replacement.workspace_name
-            )
-        })?;
-        Ok(true)
+            let record = WorkspaceRecord {
+                schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
+                metadata: replacement.clone(),
+            };
+            let path = self.workspace_path(&replacement.workspace_name);
+            write_json_atomic(&path, &record).with_context(|| {
+                format!(
+                    "failed to replace metadata for workspace {}",
+                    replacement.workspace_name
+                )
+            })?;
+            Ok(true)
+        })
     }
 
     /// Atomically replaces one workspace record and returns its prior value.
@@ -207,21 +210,22 @@ impl WorkspaceMetadataStore {
     ) -> Result<Option<ManagedWorkspaceMetadata>> {
         validate_metadata(metadata)?;
         self.ensure_initialized()?;
-        let _lock = self.record_lock(&metadata.workspace_name)?;
-        let previous = self.get(&metadata.workspace_name)?;
+        self.with_record_lock(&metadata.workspace_name, || {
+            let previous = self.get(&metadata.workspace_name)?;
 
-        let record = WorkspaceRecord {
-            schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
-            metadata: metadata.clone(),
-        };
-        let path = self.workspace_path(&metadata.workspace_name);
-        write_json_atomic(&path, &record).with_context(|| {
-            format!(
-                "failed to write metadata for workspace {}",
-                metadata.workspace_name
-            )
-        })?;
-        Ok(previous)
+            let record = WorkspaceRecord {
+                schema_version: WORKSPACE_METADATA_SCHEMA_VERSION,
+                metadata: metadata.clone(),
+            };
+            let path = self.workspace_path(&metadata.workspace_name);
+            write_json_atomic(&path, &record).with_context(|| {
+                format!(
+                    "failed to write metadata for workspace {}",
+                    metadata.workspace_name
+                )
+            })?;
+            Ok(previous)
+        })
     }
 
     #[cfg(test)]
@@ -230,18 +234,19 @@ impl WorkspaceMetadataStore {
         if !self.validate_existing_store()? {
             return Ok(None);
         }
-        let _lock = self.record_lock(workspace_name)?;
-        let previous = self.get(workspace_name)?;
-        if previous.is_none() {
-            return Ok(None);
-        }
+        self.with_record_lock(workspace_name, || {
+            let previous = self.get(workspace_name)?;
+            if previous.is_none() {
+                return Ok(None);
+            }
 
-        match fs::remove_file(self.workspace_path(workspace_name)) {
-            Ok(()) => Ok(previous),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error)
-                .with_context(|| format!("failed to remove metadata for {workspace_name}")),
-        }
+            match fs::remove_file(self.workspace_path(workspace_name)) {
+                Ok(()) => Ok(previous),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error)
+                    .with_context(|| format!("failed to remove metadata for {workspace_name}")),
+            }
+        })
     }
 
     /// Removes a record only when its current contents match `expected`.
@@ -250,18 +255,19 @@ impl WorkspaceMetadataStore {
         if !self.validate_existing_store()? {
             return Ok(false);
         }
-        let _lock = self.record_lock(&expected.workspace_name)?;
-        if self.get(&expected.workspace_name)?.as_ref() != Some(expected) {
-            return Ok(false);
-        }
+        self.with_record_lock(&expected.workspace_name, || {
+            if self.get(&expected.workspace_name)?.as_ref() != Some(expected) {
+                return Ok(false);
+            }
 
-        match fs::remove_file(self.workspace_path(&expected.workspace_name)) {
-            Ok(()) => Ok(true),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to remove metadata for {}", expected.workspace_name)
-            }),
-        }
+            match fs::remove_file(self.workspace_path(&expected.workspace_name)) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error).with_context(|| {
+                    format!("failed to remove metadata for {}", expected.workspace_name)
+                }),
+            }
+        })
     }
 
     fn ensure_initialized(&self) -> Result<()> {
@@ -428,7 +434,11 @@ impl WorkspaceMetadataStore {
             .join(workspace_file_name(workspace_name))
     }
 
-    fn record_lock(&self, workspace_name: &str) -> Result<RecordLock> {
+    fn with_record_lock<T>(
+        &self,
+        workspace_name: &str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         let process_guard = PROCESS_METADATA_LOCK
             .lock()
             .map_err(|_| anyhow::anyhow!("metadata writer lock is poisoned"))?;
@@ -444,16 +454,11 @@ impl WorkspaceMetadataStore {
             .with_context(|| format!("failed to open metadata lock {}", path.display()))?;
         file.lock_exclusive()
             .with_context(|| format!("failed to lock metadata record {}", path.display()))?;
-        Ok(RecordLock {
-            _process_guard: process_guard,
-            _file: file,
-        })
+        let result = operation();
+        drop(file);
+        drop(process_guard);
+        result
     }
-}
-
-struct RecordLock {
-    _process_guard: MutexGuard<'static, ()>,
-    _file: File,
 }
 
 fn validate_metadata(metadata: &ManagedWorkspaceMetadata) -> Result<()> {
@@ -950,43 +955,46 @@ mod tests {
     fn concurrent_replacements_to_one_record_have_one_winner() {
         let tempdir = tempfile::tempdir().expect("create temp directory");
         let store = Arc::new(test_store(&tempdir));
-        let original = metadata("solver");
-        store.insert(&original).expect("insert original record");
-        let barrier = Arc::new(Barrier::new(2));
+        for round in 0..32 {
+            let workspace = format!("solver-{round}");
+            let original = metadata(&workspace);
+            store.insert(&original).expect("insert original record");
+            let barrier = Arc::new(Barrier::new(2));
 
-        let workers = (1..=2)
-            .map(|index| {
-                let store = Arc::clone(&store);
-                let barrier = Arc::clone(&barrier);
-                let original = original.clone();
-                std::thread::spawn(move || {
-                    let mut replacement = original.clone();
-                    replacement.creation_base_commit_id = format!("commit-{index}");
-                    barrier.wait();
-                    (
-                        store
-                            .replace_if_matches(&original, &replacement)
-                            .expect("replace record"),
-                        replacement,
-                    )
+            let workers = (1..=2)
+                .map(|index| {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    let original = original.clone();
+                    std::thread::spawn(move || {
+                        let mut replacement = original.clone();
+                        replacement.creation_base_commit_id = format!("replacement-{index}");
+                        barrier.wait();
+                        (
+                            store
+                                .replace_if_matches(&original, &replacement)
+                                .expect("replace record"),
+                            replacement,
+                        )
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>();
 
-        let results = workers
-            .into_iter()
-            .map(|worker| worker.join().expect("replacement thread succeeds"))
-            .collect::<Vec<_>>();
-        assert_eq!(results.iter().filter(|(replaced, _)| *replaced).count(), 1);
-        let winner = results
-            .into_iter()
-            .find_map(|(replaced, metadata)| replaced.then_some(metadata))
-            .expect("one replacement wins");
-        assert_eq!(
-            store.get("solver").expect("read winning record"),
-            Some(winner)
-        );
-        assert_eq!(store.list().expect("list records").len(), 1);
+            let results = workers
+                .into_iter()
+                .map(|worker| worker.join().expect("replacement thread succeeds"))
+                .collect::<Vec<_>>();
+            assert_eq!(results.iter().filter(|(replaced, _)| *replaced).count(), 1);
+            let winner = results
+                .into_iter()
+                .find_map(|(replaced, metadata)| replaced.then_some(metadata))
+                .expect("one replacement wins");
+            assert_eq!(
+                store.get(&workspace).expect("read winning record"),
+                Some(winner)
+            );
+        }
+        assert_eq!(store.list().expect("list records").len(), 32);
     }
 
     #[test]
