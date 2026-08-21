@@ -1,5 +1,7 @@
 use crate::jj::{JjClient, MINIMUM_SUPPORTED_JJ_VERSION};
+use crate::links::{self, LinkCheckState};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
+use crate::workspace;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -76,6 +78,7 @@ impl DoctorEngine {
             metadata.as_deref(),
             workspaces.as_deref(),
         );
+        self.check_workspace_links(&mut report, metadata.as_deref(), workspaces.as_deref());
         self.check_bookmarks_and_divergence(
             &mut report,
             operation_id.as_deref(),
@@ -293,15 +296,24 @@ impl DoctorEngine {
                 return None;
             }
         };
+        let current_root = query_current_workspace_root(&self.client, operation_id).ok();
 
         let mut problems = 0;
         for workspace in &mut workspaces {
-            match query_workspace_root(&self.client, operation_id, &workspace.name) {
+            let path = match query_workspace_root(&self.client, operation_id, &workspace.name) {
+                Ok(path) => Ok(path),
+                Err(_) if workspace.current && current_root.is_some() => {
+                    Ok(current_root.clone().expect("current root checked above"))
+                }
+                Err(error) => Err(error),
+            };
+            match path {
                 Ok(path) => {
                     workspace.path = Some(path.clone());
                     match validate_workspace_path(&path) {
                         Ok(()) => {}
                         Err(error) => {
+                            workspace.path = None;
                             problems += 1;
                             report.push(
                                 DoctorDiagnostic::error(
@@ -445,6 +457,142 @@ impl DoctorEngine {
         }
     }
 
+    fn check_workspace_links(
+        &self,
+        report: &mut DoctorReport,
+        metadata: Option<&[ManagedWorkspaceMetadata]>,
+        workspaces: Option<&[DoctorWorkspace]>,
+    ) {
+        let (Some(metadata), Some(workspaces)) = (metadata, workspaces) else {
+            report.push(DoctorDiagnostic::skipped(
+                DoctorCode::WorkspaceLink,
+                "workspace links were not checked because metadata or workspace discovery failed",
+                Some("fix the reported metadata or workspace-path problem, then rerun doctor"),
+            ));
+            return;
+        };
+
+        let workspace_by_name = workspaces
+            .iter()
+            .map(|workspace| (workspace.name.as_str(), workspace))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let mut inspectable = Vec::new();
+        for record in metadata {
+            let Some(workspace) = workspace_by_name.get(record.workspace_name.as_str()) else {
+                report.push(
+                    DoctorDiagnostic::skipped(
+                        DoctorCode::WorkspaceLink,
+                        "managed workspace has no matching JJ workspace; links could not be inspected",
+                        Some("restore the workspace or run `jw prune` after confirming it is gone"),
+                    )
+                    .with_subject(&record.workspace_name),
+                );
+                continue;
+            };
+            let Some(workspace_root) = workspace.path.as_deref() else {
+                report.push(
+                    DoctorDiagnostic::skipped(
+                        DoctorCode::WorkspaceLink,
+                        "managed workspace has no usable checkout; links could not be inspected",
+                        Some("restore the checkout or run `jw prune` if it was removed"),
+                    )
+                    .with_subject(&record.workspace_name),
+                );
+                continue;
+            };
+            inspectable.push((record, workspace_root));
+        }
+
+        if inspectable.is_empty() {
+            return;
+        }
+
+        let Some(config_root) = default_link_config_root(workspaces) else {
+            report.push(DoctorDiagnostic::skipped(
+                DoctorCode::WorkspaceLink,
+                "workspace links were not checked because the default workspace path is unavailable",
+                Some("restore the default workspace checkout, then rerun doctor"),
+            ));
+            return;
+        };
+
+        let Some(link_config) = (match links::load_link_config(&config_root) {
+            Ok(config) => config,
+            Err(error) => {
+                report.push(DoctorDiagnostic::error(
+                    DoctorCode::WorkspaceLink,
+                    format!("could not load configured workspace links: {error:#}"),
+                    Some("fix or remove the invalid .jwlinks.toml file, then rerun doctor"),
+                ));
+                return;
+            }
+        }) else {
+            return;
+        };
+
+        for (record, workspace_root) in inspectable {
+            let inspections =
+                match links::inspect_loaded_workspace_links(&link_config, workspace_root) {
+                    Ok(inspections) => inspections,
+                    Err(error) => {
+                        report.push(
+                        DoctorDiagnostic::error(
+                            DoctorCode::WorkspaceLink,
+                            format!("could not inspect configured workspace links: {error:#}"),
+                            Some("fix or remove the invalid .jwlinks.toml file, then rerun doctor"),
+                        )
+                        .with_subject(&record.workspace_name),
+                    );
+                        continue;
+                    }
+                };
+
+            let mut inspections = inspections;
+            inspections.sort_by(|left, right| left.source.cmp(&right.source));
+            for inspection in inspections {
+                let subject = format!(
+                    "{}:{}",
+                    record.workspace_name,
+                    display_link_path(workspace_root, &inspection.source)
+                );
+                let target = inspection.target.display();
+                let diagnostic = match inspection.state {
+                    LinkCheckState::Satisfied => DoctorDiagnostic::passed(
+                        DoctorCode::WorkspaceLink,
+                        format!("link is satisfied; target {}", target),
+                    ),
+                    LinkCheckState::Missing => DoctorDiagnostic::error(
+                        DoctorCode::WorkspaceLink,
+                        format!("link is missing; target {}", target),
+                        Some(
+                            "run `jw links apply` in the workspace or restore the required target",
+                        ),
+                    ),
+                    LinkCheckState::Skipped => DoctorDiagnostic::warning(
+                        DoctorCode::WorkspaceLink,
+                        format!(
+                            "optional link skipped because target is missing: {}",
+                            target
+                        ),
+                        Some("no action is needed if the optional target is intentionally absent"),
+                    ),
+                    LinkCheckState::Conflicting => DoctorDiagnostic::error(
+                        DoctorCode::WorkspaceLink,
+                        format!(
+                            "link conflicts with existing path; expected target {}",
+                            target
+                        ),
+                        Some(
+                            "move the private path or correct the link config, then run `jw links apply`",
+                        ),
+                    ),
+                };
+                report.push(diagnostic.with_subject(subject));
+            }
+        }
+    }
+
     fn check_bookmarks_and_divergence(
         &self,
         report: &mut DoctorReport,
@@ -583,7 +731,7 @@ impl DoctorReport {
                 .unwrap_or_default();
             output.push_str(&format!(
                 "{} {}{}: {}\n",
-                diagnostic.state.label(),
+                diagnostic.label(),
                 diagnostic.code.label(),
                 subject,
                 diagnostic.message
@@ -670,6 +818,29 @@ impl DoctorDiagnostic {
         }
     }
 
+    fn warning(
+        code: DoctorCode,
+        message: impl Into<String>,
+        remedy: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            code,
+            state: DoctorState::Skipped,
+            severity: DoctorSeverity::Warning,
+            subject: None,
+            message: message.into(),
+            remedy: remedy.map(Into::into),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        if self.severity == DoctorSeverity::Warning {
+            "WARN"
+        } else {
+            self.state.label()
+        }
+    }
+
     fn with_subject(mut self, subject: impl Into<String>) -> Self {
         self.subject = Some(subject.into());
         self
@@ -686,6 +857,7 @@ pub enum DoctorCode {
     MetadataIntegrity,
     WorkspacePath,
     MetadataConsistency,
+    WorkspaceLink,
     BookmarkConflict,
     DivergentChange,
     WorkingCopyStale,
@@ -702,6 +874,7 @@ impl DoctorCode {
             Self::MetadataIntegrity => "metadata-integrity",
             Self::WorkspacePath => "workspace-path",
             Self::MetadataConsistency => "metadata-consistency",
+            Self::WorkspaceLink => "workspace-link",
             Self::BookmarkConflict => "bookmark-conflict",
             Self::DivergentChange => "divergent-change",
             Self::WorkingCopyStale => "working-copy-stale",
@@ -769,6 +942,7 @@ struct DoctorWorkspace {
     name: String,
     commit_id: String,
     divergent: bool,
+    current: bool,
     path: Option<PathBuf>,
 }
 
@@ -796,9 +970,31 @@ fn query_workspaces(client: &JjClient, operation_id: &str) -> Result<Vec<DoctorW
             name: facts.name,
             commit_id: facts.commit_id,
             divergent: facts.divergent,
+            current: facts.current_working_copy,
             path: None,
         })
         .collect())
+}
+
+fn default_link_config_root(workspaces: &[DoctorWorkspace]) -> Option<PathBuf> {
+    if let Some(default) = workspaces
+        .iter()
+        .find(|workspace| workspace.name == "default")
+    {
+        return default.path.clone();
+    }
+
+    let current = workspaces.iter().find(|workspace| workspace.current)?;
+    let current_root = current.path.as_deref()?;
+    let base_root = workspace::workspace_base_root(current_root, &current.name).ok()?;
+    let canonical_current = fs::canonicalize(current_root).ok()?;
+    (fs::canonicalize(&base_root).ok()? == canonical_current).then(|| current_root.to_owned())
+}
+
+fn display_link_path(workspace_root: &Path, path: &Path) -> String {
+    path.strip_prefix(workspace_root)
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 fn query_workspace_root(client: &JjClient, operation_id: &str, name: &str) -> Result<PathBuf> {
@@ -814,6 +1010,23 @@ fn query_workspace_root(client: &JjClient, operation_id: &str, name: &str) -> Re
     let path = output.trimmed_stdout()?;
     if path.is_empty() {
         bail!("workspace root lookup returned an empty path")
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn query_current_workspace_root(client: &JjClient, operation_id: &str) -> Result<PathBuf> {
+    let output = client.run_at_unchecked(operation_id, ["workspace", "root"])?;
+    if !output.success() {
+        let message = output.stderr();
+        bail!(if message.is_empty() {
+            "current workspace root lookup failed".to_owned()
+        } else {
+            message
+        })
+    }
+    let path = output.trimmed_stdout()?;
+    if path.is_empty() {
+        bail!("current workspace root lookup returned an empty path")
     }
     Ok(PathBuf::from(path))
 }
@@ -989,6 +1202,14 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("corrupt"))
         );
+        assert_eq!(
+            diagnostics_for(&report, DoctorCode::WorkspaceLink)
+                .iter()
+                .filter(|diagnostic| diagnostic.state == DoctorState::Skipped)
+                .count(),
+            1,
+            "link inspection must report an unreadable metadata prerequisite"
+        );
     }
 
     #[test]
@@ -1008,6 +1229,21 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let store = fixture.metadata_store();
+        let base = fixture
+            .client()
+            .resolve_one("trunk()")
+            .expect("resolve fixture trunk");
+        store
+            .upsert(&ManagedWorkspaceMetadata {
+                workspace_name: "gone".to_owned(),
+                created_at_unix_ms: 1,
+                creation_operation_id: fixture.client().operation_id().expect("operation"),
+                creation_base_commit_id: base.commit_id,
+                associated_bookmark: None,
+                intended_remote: None,
+            })
+            .expect("write stale metadata");
         fs::remove_dir_all(&missing).expect("remove fixture checkout");
         let before = fixture.client().operation_id().expect("operation before");
 
@@ -1023,5 +1259,120 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.subject.as_deref() == Some("gone"))
         );
+        assert!(
+            diagnostics_for(&report, DoctorCode::WorkspaceLink)
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.subject.as_deref() == Some("gone")
+                        && diagnostic.state == DoctorState::Skipped
+                }),
+            "{}",
+            report.render_plain()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_links_report_optional_skip_and_private_conflict() {
+        let Some(fixture) = RepoFixture::init() else {
+            return;
+        };
+        let child = fixture.root.join("child");
+        let output = Command::new("jj")
+            .current_dir(&fixture.repo)
+            .args(["workspace", "add", "--name", "child"])
+            .arg(&child)
+            .output()
+            .expect("add child workspace");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        fs::write(
+            fixture.repo.join(".jwlinks.toml"),
+            r#"
+                [[link]]
+                source = "node_modules"
+                target = "missing-node-modules"
+                required = false
+            "#,
+        )
+        .expect("write link config");
+        fs::create_dir_all(child.join("node_modules")).expect("create private node_modules");
+
+        let store = fixture.metadata_store();
+        let base = fixture
+            .client()
+            .resolve_one("trunk()")
+            .expect("resolve fixture trunk");
+        for workspace_name in ["default", "child"] {
+            store
+                .upsert(&ManagedWorkspaceMetadata {
+                    workspace_name: workspace_name.to_owned(),
+                    created_at_unix_ms: 1,
+                    creation_operation_id: fixture.client().operation_id().expect("operation"),
+                    creation_base_commit_id: base.commit_id.clone(),
+                    associated_bookmark: None,
+                    intended_remote: None,
+                })
+                .expect("write metadata");
+        }
+
+        let report = fixture.doctor("trunk()");
+        let diagnostics = diagnostics_for(&report, DoctorCode::WorkspaceLink);
+        assert_eq!(diagnostics.len(), 2, "{}", report.render_plain());
+        let optional_skip = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("default:node_modules"))
+            .expect("default optional link diagnostic");
+        assert_eq!(optional_skip.state, DoctorState::Skipped);
+        assert_eq!(optional_skip.severity, DoctorSeverity::Warning);
+        let conflict = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("child:node_modules"))
+            .expect("child conflict diagnostic");
+        assert_eq!(conflict.state, DoctorState::Failed);
+        assert_eq!(conflict.severity, DoctorSeverity::Error);
+        assert!(
+            report
+                .render_plain()
+                .contains("WARN workspace-link [default:node_modules]")
+        );
+        assert!(
+            report
+                .render_plain()
+                .contains("FAIL workspace-link [child:node_modules]")
+        );
+        assert_eq!(report.summary.warnings, 1);
+        assert!(report.has_errors());
+
+        let json = serde_json::to_value(&report).expect("serialize doctor report");
+        assert_eq!(
+            json["diagnostics"]
+                .as_array()
+                .expect("diagnostics array")
+                .iter()
+                .find(|diagnostic| diagnostic["subject"] == "default:node_modules")
+                .expect("optional diagnostic")["severity"],
+            "warning"
+        );
+    }
+
+    #[test]
+    fn default_link_config_root_uses_current_workspace_when_default_name_is_absent() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let root = tempdir.path().join("repository");
+        fs::create_dir_all(root.join(".jj")).expect("create workspace root");
+        let workspaces = vec![DoctorWorkspace {
+            name: "feature".to_owned(),
+            commit_id: "commit".to_owned(),
+            divergent: false,
+            current: true,
+            path: Some(root.clone()),
+        }];
+
+        assert_eq!(default_link_config_root(&workspaces), Some(root));
     }
 }

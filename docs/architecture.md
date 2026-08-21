@@ -35,10 +35,12 @@ offline.
   derives `list`/`status` snapshots without renderer subprocesses.
 - `snapshot` defines schema-versioned JSON values and semantic status types.
 - `metadata` persists repository-scoped managed-workspace intent.
-- `doctor` runs independent read-only checks and always produces a complete report.
+- `doctor` runs independent read-only checks and always produces a complete report,
+  including configured-link health for every managed workspace.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
-- `links` owns config merging, path confinement, preflight, and filesystem changes.
+- `links` owns config merging, path confinement, link classification, preflight,
+  and filesystem changes.
 - `shell` owns shared shell behavior. Each shell adapter varies syntax, not policy.
 - `plugins/herdr` is a separate Cargo workspace and a UI adapter over `jw`. Its
   removal workflow closes Herdr before deleting provenance.
@@ -131,6 +133,28 @@ documented `config path --repo` query may initialize an empty secure-config
 directory. Snapshot and doctor commands still leave the JJ operation and working
 copy unchanged.
 
+## Workspace-link health
+
+The default workspace owns `.jwlinks.toml` and `.jwlinks.local.toml`. The local file
+overrides a shared entry with the same `source`. Each configured entry is evaluated
+once per managed workspace. Its `source` is relative to, and confined within, that
+receiving workspace; a relative `target` is resolved from the same receiver. Doctor
+does not inspect unmanaged workspaces because they have no `jw` link intent.
+
+The link classifier is shared with link application and recognizes four outcomes:
+
+| Outcome | Meaning | Doctor result |
+| --- | --- | --- |
+| Satisfied | Source resolves canonically to target, including an ordinary path | `PASS` |
+| Missing | Source is absent while its target exists, or a required target is absent | `FAIL` |
+| Skipped | Optional target is absent and source is absent or the correct dangling link | `WARN`/`SKIP` |
+| Conflicting | Source is occupied by an ordinary private path or a link to another target | `FAIL` |
+
+An existing managed record whose workspace path is stale or missing still appears in
+doctor's workspace checks; link inspection for that record is `SKIP` because the
+receiving root cannot be read. This keeps the workspace failure visible without
+guessing at paths.
+
 ## JSON schema version 1
 
 Any command that offers JSON uses one versioned envelope and writes only JSON to
@@ -163,6 +187,13 @@ snapshot requires one resolved trunk, while doctor must serialize useful checks
 when trunk resolves to zero or multiple revisions, metadata is corrupt, or a
 workspace path is missing. CLI rendering completes before an unhealthy doctor
 returns a failing exit status.
+
+Doctor's `workspace-link` diagnostic code is additive within schema version 1. The
+human renderer uses `PASS`, `WARN`, `FAIL`, and `SKIP`; machine output retains the
+existing `passed`, `failed`, and `skipped` states and uses severity to distinguish
+optional warnings from informational skips and errors. Consumers must ignore
+unknown additive diagnostic codes and fields. `jw status` remains a single-workspace
+snapshot and does not inspect link health.
 
 ## Failure order
 
