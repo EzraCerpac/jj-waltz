@@ -404,6 +404,88 @@ fn apply_links_rejects_source_paths_through_symlinked_parents() {
     assert!(!outside.join("link").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn apply_links_rejects_missing_source_below_a_nested_symlinked_parent() {
+    let env = LinkTestEnv::new();
+    let outside = env.tempdir.path().join("outside");
+    let target = env.workspace_root.join("target");
+    fs::create_dir_all(&outside).expect("create outside directory");
+    fs::create_dir_all(&target).expect("create target");
+    std::os::unix::fs::symlink(&outside, env.workspace_root.join("escaped-parent"))
+        .expect("create escaping parent symlink");
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"escaped-parent/missing/link\"",
+            "target = \"target\"",
+            "required = true",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write escaping source config");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &env.workspace_root)
+        .expect_err("must fail");
+    assert!(err.to_string().contains("parent cannot be a symlink"));
+    assert!(!outside.join("missing/link").exists());
+}
+
+#[test]
+fn apply_links_rejects_missing_source_below_a_non_directory_parent() {
+    let env = LinkTestEnv::new();
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"file-parent/missing\"",
+            "target = \"target\"",
+            "required = true",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write link config");
+    fs::write(env.workspace_root.join("file-parent"), "not a directory")
+        .expect("create non-directory parent");
+    fs::create_dir_all(env.workspace_root.join("target")).expect("create target");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &env.workspace_root)
+        .expect_err("must fail");
+    assert!(
+        err.to_string().contains("source parent is not a directory"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn apply_links_reports_unreadable_target_metadata() {
+    let env = LinkTestEnv::new();
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"cache\"",
+            "target = \"target-parent/missing\"",
+            "required = true",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write links config");
+
+    let receiver = env.tempdir.path().join("receiver");
+    fs::create_dir_all(&receiver).expect("create receiver");
+    fs::write(receiver.join("target-parent"), "not a directory").expect("create target parent");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &receiver)
+        .expect_err("target metadata must be reported as unreadable");
+    assert!(err.to_string().contains("link is unreadable"), "{err:#}");
+    assert!(!receiver.join("cache").exists());
+}
+
 fn assert_symlink(path: &Path) {
     let metadata = fs::symlink_metadata(path).expect("metadata");
     assert!(

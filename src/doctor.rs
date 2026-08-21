@@ -587,6 +587,11 @@ impl DoctorEngine {
                             "move the private path or correct the link config, then run `jw links apply`",
                         ),
                     ),
+                    LinkCheckState::Unreadable(error) => DoctorDiagnostic::error(
+                        DoctorCode::WorkspaceLink,
+                        format!("link could not be inspected: {error}"),
+                        Some("restore access to the source or target path, then rerun `jw doctor`"),
+                    ),
                 };
                 report.push(diagnostic.with_subject(subject));
             }
@@ -1358,6 +1363,64 @@ mod tests {
                 .expect("optional diagnostic")["severity"],
             "warning"
         );
+    }
+
+    #[test]
+    fn workspace_links_report_unreadable_rule_and_continue_with_later_rules() {
+        let Some(fixture) = RepoFixture::init() else {
+            return;
+        };
+        fs::write(fixture.repo.join("blocked"), "not a directory")
+            .expect("create unreadable target parent");
+        fs::create_dir_all(fixture.repo.join("valid-target")).expect("create valid target");
+        fs::write(
+            fixture.repo.join(".jwlinks.toml"),
+            r#"
+                [[link]]
+                source = "unreadable"
+                target = "blocked/missing"
+                required = true
+
+                [[link]]
+                source = "valid-target"
+                target = "valid-target"
+                required = true
+            "#,
+        )
+        .expect("write link config");
+
+        let store = fixture.metadata_store();
+        let base = fixture
+            .client()
+            .resolve_one("trunk()")
+            .expect("resolve fixture trunk");
+        store
+            .upsert(&ManagedWorkspaceMetadata {
+                workspace_name: "default".to_owned(),
+                created_at_unix_ms: 1,
+                creation_operation_id: fixture.client().operation_id().expect("operation"),
+                creation_base_commit_id: base.commit_id,
+                associated_bookmark: None,
+                intended_remote: None,
+            })
+            .expect("write metadata");
+
+        let report = fixture.doctor("trunk()");
+        let diagnostics = diagnostics_for(&report, DoctorCode::WorkspaceLink);
+        assert_eq!(diagnostics.len(), 2, "{}", report.render_plain());
+        let unreadable = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("default:unreadable"))
+            .expect("unreadable link diagnostic");
+        assert_eq!(unreadable.state, DoctorState::Failed);
+        assert_eq!(unreadable.severity, DoctorSeverity::Error);
+        assert!(unreadable.message.contains("could not be inspected"));
+        let valid = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("default:valid-target"))
+            .expect("valid link diagnostic");
+        assert_eq!(valid.state, DoctorState::Passed);
+        assert_eq!(valid.severity, DoctorSeverity::Info);
     }
 
     #[test]
