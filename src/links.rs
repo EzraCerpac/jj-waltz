@@ -233,13 +233,17 @@ impl LinkPlan {
         }
 
         let mut links_to_create = Vec::new();
+        let mut skipped_sources = Vec::new();
         let mut report = LinkApplyReport::default();
 
         for rule in rules {
             let check = classify_rule(&rule);
             match check.state {
                 LinkCheckState::Satisfied => report.satisfied += 1,
-                LinkCheckState::Skipped => report.skipped_missing_target += 1,
+                LinkCheckState::Skipped => {
+                    report.skipped_missing_target += 1;
+                    skipped_sources.push(check.source.clone());
+                }
                 LinkCheckState::Missing if check.target_exists => links_to_create.push(rule),
                 LinkCheckState::Missing => {
                     bail!(
@@ -273,7 +277,8 @@ impl LinkPlan {
             }
         }
 
-        let directories_to_create = preflight_creation_paths(workspace_root, &links_to_create)?;
+        let directories_to_create =
+            preflight_creation_paths(workspace_root, &links_to_create, &skipped_sources)?;
         report.linked = links_to_create.len();
 
         Ok(Self {
@@ -498,6 +503,7 @@ fn inspect_source_parents(
 fn preflight_creation_paths(
     workspace_root: &Path,
     links_to_create: &[LinkRule],
+    skipped_sources: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     let mut sources = links_to_create
         .iter()
@@ -506,12 +512,24 @@ fn preflight_creation_paths(
     sources.sort_unstable();
 
     for pair in sources.windows(2) {
-        if pair[1] == pair[0] || pair[1].starts_with(pair[0]) {
+        if paths_overlap(pair[0], pair[1]) {
             bail!(
                 "link sources overlap: {} and {}",
                 display_in_workspace(workspace_root, pair[0]),
                 display_in_workspace(workspace_root, pair[1])
             )
+        }
+    }
+
+    for skipped in skipped_sources {
+        for planned in &sources {
+            if paths_overlap(skipped, planned) {
+                bail!(
+                    "link sources overlap: {} and {}",
+                    display_in_workspace(workspace_root, skipped),
+                    display_in_workspace(workspace_root, planned)
+                )
+            }
         }
     }
 
@@ -560,6 +578,10 @@ fn preflight_creation_paths(
             .then_with(|| left.cmp(right))
     });
     Ok(directories)
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 fn create_planned_directory(path: &Path) -> Result<bool> {
@@ -637,26 +659,37 @@ fn remove_created_symlink(link: &CreatedLink) -> std::io::Result<()> {
 }
 
 fn same_existing_path(path_a: &Path, path_b: &Path) -> Result<bool> {
-    let path_a_exists = metadata_exists(path_a)?;
-    let path_b_exists = metadata_exists(path_b)?;
-    if path_a_exists && path_b_exists {
-        let left = path_a
-            .canonicalize()
-            .with_context(|| format!("failed to resolve {}", path_a.display()))?;
-        let right = path_b
-            .canonicalize()
-            .with_context(|| format!("failed to resolve {}", path_b.display()))?;
-        return Ok(left == right);
-    }
-
-    Ok(normalize_lexical(path_a) == normalize_lexical(path_b))
+    Ok(resolve_existing_prefix(path_a)? == resolve_existing_prefix(path_b)?)
 }
 
-fn metadata_exists(path: &Path) -> Result<bool> {
-    match fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut prefix = path.to_path_buf();
+    let mut missing_suffix = Vec::new();
+
+    loop {
+        match fs::canonicalize(&prefix) {
+            Ok(existing) => {
+                let mut resolved = existing;
+                for component in missing_suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(normalize_lexical(&resolved));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let Some(name) = prefix.file_name() else {
+                    return Ok(normalize_lexical(path));
+                };
+                missing_suffix.push(name.to_owned());
+                let Some(parent) = prefix.parent() else {
+                    return Ok(normalize_lexical(path));
+                };
+                prefix = parent.to_path_buf();
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to resolve {}", prefix.display()));
+            }
+        }
     }
 }
 

@@ -207,6 +207,34 @@ fn apply_links_rejects_wrong_dangling_link_even_when_target_is_optional() {
     assert!(error.to_string().contains("link conflict"));
 }
 
+#[cfg(unix)]
+#[test]
+fn apply_links_follows_symlink_before_parent_traversal_for_missing_paths() {
+    let env = LinkTestEnv::new();
+    let outside = env.tempdir.path().join("outside");
+    fs::create_dir_all(outside.join("subdir")).expect("create symlink target");
+    std::os::unix::fs::symlink(outside.join("subdir"), env.workspace_root.join("alias"))
+        .expect("create alias symlink");
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"cache\"",
+            "target = \"alias/../missing\"",
+            "required = false",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write link config");
+    std::os::unix::fs::symlink("missing", env.workspace_root.join("cache"))
+        .expect("create wrong dangling source link");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &env.workspace_root)
+        .expect_err("wrong dangling source must conflict");
+    assert!(err.to_string().contains("link conflict"), "{err:#}");
+}
+
 #[test]
 fn apply_links_resolves_relative_targets_from_each_receiving_workspace() {
     let env = LinkTestEnv::new();
@@ -373,6 +401,36 @@ fn apply_links_preflights_every_rule_before_mutating() {
         .expect_err("must fail");
     assert!(err.to_string().contains("link conflict"));
     assert!(!env.workspace_root.join("nested").exists());
+}
+
+#[test]
+fn apply_links_reserves_skipped_optional_sources_against_planned_descendants() {
+    let env = LinkTestEnv::new();
+    fs::write(
+        env.workspace_root.join(".jwlinks.toml"),
+        [
+            "[[link]]",
+            "source = \"cache\"",
+            "target = \"missing-cache\"",
+            "required = false",
+            "",
+            "[[link]]",
+            "source = \"cache/index\"",
+            "target = \"target-index\"",
+            "required = true",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write link config");
+    let receiver = env.tempdir.path().join("receiver");
+    fs::create_dir_all(&receiver).expect("create receiver");
+    fs::create_dir_all(receiver.join("target-index")).expect("create required target");
+
+    let err = links::apply_workspace_links(&env.workspace_root, &receiver)
+        .expect_err("skipped ancestor must reserve source path");
+    assert!(err.to_string().contains("link sources overlap"), "{err:#}");
+    assert!(!receiver.join("cache").exists());
 }
 
 #[cfg(unix)]

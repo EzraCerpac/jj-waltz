@@ -296,7 +296,13 @@ impl DoctorEngine {
                 return None;
             }
         };
-        let current_root = query_current_workspace_root(&self.client, operation_id).ok();
+        let current_root = (workspaces
+            .iter()
+            .filter(|workspace| workspace.current)
+            .count()
+            == 1)
+            .then(|| query_current_workspace_root(&self.client, operation_id).ok())
+            .flatten();
 
         let mut problems = 0;
         for workspace in &mut workspaces {
@@ -1257,6 +1263,94 @@ mod tests {
                     diagnostic.subject.as_deref() == Some("gone")
                         && diagnostic.state == DoctorState::Skipped
                 }),
+            "{}",
+            report.render_plain()
+        );
+    }
+
+    #[test]
+    fn shared_current_working_copy_does_not_reuse_current_root_for_stale_sibling() {
+        let Some(fixture) = RepoFixture::init() else {
+            return;
+        };
+        let child = fixture.root.join("child");
+        let output = Command::new("jj")
+            .current_dir(&fixture.repo)
+            .args(["workspace", "add", "--name", "child"])
+            .arg(&child)
+            .output()
+            .expect("add child workspace");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let child_change = Command::new("jj")
+            .current_dir(&child)
+            .args(["log", "-r", "@", "--no-graph", "-T", "change_id"])
+            .output()
+            .expect("read child change");
+        assert!(
+            child_change.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child_change.stderr)
+        );
+        let child_change = String::from_utf8_lossy(&child_change.stdout)
+            .trim()
+            .to_owned();
+        let output = Command::new("jj")
+            .current_dir(&fixture.repo)
+            .args(["edit", &child_change])
+            .output()
+            .expect("share child working copy target");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        fs::write(
+            fixture.repo.join(".jwlinks.toml"),
+            r#"
+                [[link]]
+                source = "cache"
+                target = "missing-cache"
+                required = false
+            "#,
+        )
+        .expect("write link config");
+        let store = fixture.metadata_store();
+        let base = fixture
+            .client()
+            .resolve_one("trunk()")
+            .expect("resolve fixture trunk");
+        for workspace_name in ["default", "child"] {
+            store
+                .upsert(&ManagedWorkspaceMetadata {
+                    workspace_name: workspace_name.to_owned(),
+                    created_at_unix_ms: 1,
+                    creation_operation_id: fixture.client().operation_id().expect("operation"),
+                    creation_base_commit_id: base.commit_id.clone(),
+                    associated_bookmark: None,
+                    intended_remote: None,
+                })
+                .expect("write metadata");
+        }
+        fs::remove_dir_all(fixture.repo.join(".jj/repo/workspace_store"))
+            .expect("remove workspace store");
+
+        let report = fixture.doctor("trunk()");
+        let link_diagnostics = diagnostics_for(&report, DoctorCode::WorkspaceLink);
+        let child_link = link_diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.subject.as_deref() == Some("child"))
+            .expect("stale child link prerequisite diagnostic");
+        assert_eq!(child_link.state, DoctorState::Skipped);
+        assert_eq!(child_link.severity, DoctorSeverity::Info);
+        assert!(
+            !link_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.subject.as_deref() == Some("child:cache")),
             "{}",
             report.render_plain()
         );
