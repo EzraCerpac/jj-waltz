@@ -27,6 +27,7 @@ to a warning rather than make local workspace management fail.
 
 ## Features
 
+- `jw context [PATH]` reports Git topology and JJ identity without changing either
 - `jw add <name>...` creates one or more JJ workspaces without switching
 - `jw switch <name>` creates or switches to a JJ workspace
 - `jw switch <name>...` creates any missing workspaces and switches to the last one
@@ -38,12 +39,34 @@ to a warning rather than make local workspace management fail.
 - `jw status [workspace]` explains one workspace from the same snapshot contract
 - `jw doctor` reports repository, trunk, metadata, and workspace consistency checks
 - `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
+- `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
 - `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
+
+## Checkout discovery and Codex
+
+Run `jw context` before choosing a workspace when an editor or agent starts in an
+unfamiliar checkout. `jw context PATH --format=json` returns schema version 1 with
+separate `git` and `jj` objects, nullable identity fields, and diagnostics. Git-only
+and non-repository paths are valid results. Inspect diagnostics even when the
+command succeeds; discovery never refreshes a working copy.
+
+A Git worktree can report a verified related JJ primary checkout without being a JJ
+workspace itself. For isolated Codex work, resolve the exact Git starting commit in
+that primary checkout, then use `jw add NAME --at COMMIT` and run task commands in
+the resulting JJ workspace. Check the original checkout for edits before routing.
+Existing workspace names require inspection before reuse; `--at` only controls
+creation.
+
+Codex's Git panel can continue showing its original checkout after an agent changes
+command directories. Report the selected JJ path and use JJ status and diff for
+that task. Keep Codex-owned worktrees out of jw cleanup. See the
+[Codex skill reference](skills/jj-waltz/references/codex.md) for the complete routing
+checks. This command does not enable JJ colocation inside linked Git worktrees.
 
 ## Install
 
@@ -76,7 +99,7 @@ workspace paths, links, bookmarks, and removal checks to it. See
 ## Workspace links
 
 If you keep large ignored data in one workspace and want it accessible from others,
-define links in the default workspace's `.jwlinks.toml`:
+define link relationships in the default workspace's `.jwlinks.toml`:
 
 ```toml
 [[link]]
@@ -85,16 +108,26 @@ target = "../ezra-cerpac/data"
 required = true
 ```
 
-When you run `jw switch`, `jw` creates symlinks in the target workspace unless you pass
-`--no-links`. You can also run `jw links apply` manually from any workspace; it still
-uses the default workspace's configuration. Relative targets resolve from the workspace
-receiving the links.
+When you run `jw switch`, `jw` creates symlinks in the receiving workspace unless you
+pass `--no-links`. You can also run `jw links apply` manually from any workspace; it
+still uses the default workspace's configuration. `.jwlinks.local.toml` overrides the
+shared file for an entry with the same `source`. Relative targets resolve from the
+workspace receiving the links, so the same rule can work across sibling and nested
+workspaces.
 
 Sources must stay inside the receiving workspace. Absolute sources and parent traversal
 such as `../outside` are rejected. All rules are checked before `jw` changes the filesystem,
 so a later conflict does not leave earlier links behind.
 
 For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep ignored).
+
+`jw doctor` checks these relationships in every managed workspace. A configured source
+is `PASS` when it resolves canonically to its target, including an ordinary path. A
+missing source when its target exists, a missing required target, or a source occupied
+by a private path or wrong link is `FAIL`. An optional missing target is `WARN`/`SKIP`
+only when the source is absent or is the correct dangling link. A managed workspace
+whose path is stale or missing gets a separate workspace diagnostic and link inspection
+is `SKIP`.
 
 ## Shell setup
 
@@ -220,10 +253,32 @@ resolved trunk IDs. Known missing values stay explicit `null`; JSON contains no
 ANSI escapes. `doctor` uses its own schema-versioned report because it must remain
 valid even when trunk or metadata is broken.
 
-`jw adopt NAME --base REVSET [--bookmark BOOKMARK]` records lifecycle intent for
-an existing workspace. It does not move revisions or bookmarks and does not
-refresh the working copy. Milestone 0 reports the exact base and current revision;
-workspace-stack analysis is deferred to milestone 1.
+Doctor keeps schema version 1 while adding the `workspace-link` diagnostic code.
+Consumers should ignore unknown additive diagnostic codes and fields. Human link
+results map to `PASS`, `WARN`, `FAIL`, or `SKIP`; machine output keeps the existing
+`passed`, `failed`, and `skipped` states, with severity distinguishing optional
+warnings from informational skips and errors. `jw status` does not inspect or expose
+link health in this change.
+
+`jw adopt NAME --base REVSET [--bookmark BOOKMARK | --no-bookmark]` records lifecycle
+intent for an existing workspace. Adoption is insert-only: it requires no existing
+managed record and never replaces one. It does not move revisions or bookmarks and
+does not refresh the working copy.
+
+`jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` repairs an
+existing readable managed record. `NAME` is literal; routing shortcuts such as `@`,
+`-`, and `^` are not accepted. The named workspace must be registered with JJ, and
+the base must resolve to exactly one revision. With `--bookmark`, the bookmark must
+already exist locally at one frozen JJ operation; `--no-bookmark` clears the recorded
+association. The checkout path does not need to be usable.
+
+Repair replaces only the recorded creation base and associated bookmark. It preserves
+the record's historical timestamps, creation operation, and intended remote. The
+metadata write is atomic, so validation or write failure leaves the old record intact.
+The command does not create or move bookmarks, rewrite commits, refresh working
+copies, or create a JJ operation. Doctor points invalid bases and missing associated
+bookmarks to `jw repair`; corrupt records still require manual restore, while missing
+records still use `jw adopt`.
 
 ## Semantic contracts
 
@@ -235,8 +290,10 @@ unlisted command is available; the feature list and `jw --help` are the current
 command surface.
 
 `jw` supports JJ 0.39 and newer within its tested compatibility window. CI pins
-the oldest supported release, 0.39.0, and the newer compatibility target, 0.44.0,
-instead of following a moving `latest` label.
+the oldest supported release, 0.39.0, and newer compatibility targets, 0.44.0
+and 0.45.1, instead of following a moving `latest` label. On JJ 0.45 and newer,
+doctor's divergence remedy can use `jj converge --no-interactive`; older supported
+versions retain the manual merge-or-abandon guidance.
 
 ## AI usage note
 

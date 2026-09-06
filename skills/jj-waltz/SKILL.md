@@ -23,6 +23,15 @@ realpath "$resolved_jw"
 "$resolved_jw" --version
 ```
 
+When a task starts in Codex, a Git worktree, or a path whose repository identity is
+unclear, run `jw context [PATH]` before routing or mutating. Use `--format=json` when
+another tool will consume the result. The check is read-only: keep Git checkout
+topology and JJ workspace identity separate, and read [`references/codex.md`](references/codex.md)
+before selecting or creating a JJ workspace for a Codex task.
+
+Check `jw --help` before relying on `context`; an older installed jw may need an
+authorized build or upgrade even when the source skill is current.
+
 Complete inspection when the executable identity, target workspaces, current state, and intended mutation are unambiguous.
 
 ### 2. Route and act
@@ -38,6 +47,13 @@ Choose only the branch the request needs. Load only the reference linked by that
 - Prefer `jw switch --execute <command> <name>` when a tool or agent should run inside the target. The command runs there without changing the parent shell's directory.
 
 Use `jw` rather than Git worktrees for JJ workspace lifecycle. Use ordinary `jj` commands for revision history, bookmarks outside `jw` lifecycle choices, and remotes.
+
+#### Codex checkout routing
+
+When the task starts from a Codex-owned Git checkout, or when Git and JJ point at
+different directories, read [`references/codex.md`](references/codex.md). It defines
+the clean-checkout, exact-starting-commit, explicit-working-directory, and external
+cleanup gates for routing into a JJ workspace.
 
 #### Shell navigation
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Add read-only `jw context [PATH] --format human|json` checkout discovery and
+  verified Git-worktree-to-JJ-primary association, with Codex routing guidance.
+- Exercise the compatibility matrix against JJ 0.45.1 and teach `jw doctor` to
+  recommend non-interactive `jj converge` for divergent changes on JJ 0.45 and
+  newer while retaining the manual recovery guidance for older supported JJ.
+
+## Version 0.5.0 (2026-08-21)
+
+- Make `jw doctor` inspect every configured workspace link for every managed
+  workspace, reporting satisfied, missing, skipped, conflicting, and unreadable
+  rules without hiding later diagnostics.
+- Add `jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` for
+  safe, atomic repair of an existing workspace's managed base and bookmark
+  metadata without changing JJ commits, bookmarks, operations, or checkouts.
+
 ## Version 0.4.1 (2026-08-15)
 
 - Keep `jw doctor` machine-readable when jj-waltz configuration cannot be read

@@ -7,9 +7,48 @@ Use the relevant `jw <command> --help` before relying on flags.
 ## Inspect and diagnose
 
 - `jw status [workspace] --refresh none` explains one workspace without refreshing a working copy; it defaults to `@`. Use this form for read-only inspection before lifecycle mutations.
-- `jw doctor` diagnoses repository, trunk, metadata, and workspace consistency without repairing them. `jw doctor --format=json` still emits a diagnostic report when configuration loading fails.
+- `jw doctor` diagnoses repository, trunk, metadata, workspace, and configured-link
+  consistency without repairing them. It checks links from the default workspace's
+  `.jwlinks.toml` plus `.jwlinks.local.toml` in every managed workspace. Relative
+  targets are resolved from each receiving workspace; unmanaged workspaces are not
+  link-health subjects. Read [links](links.md) for the classifier and remedies.
+- Doctor human link results are `PASS`, `WARN`, `FAIL`, or `SKIP`: optional absent
+  targets are `WARN`/`SKIP`; missing sources with available targets, required missing
+  targets, and occupied sources are `FAIL`; stale or unreadable managed paths are
+  `SKIP` for link inspection. `jw doctor --format=json` keeps schema version 1
+  and adds the `workspace-link` diagnostic
+  code; a complete report is emitted before a failing exit status.
+- `jw status` remains a one-workspace snapshot. It does not inspect or report link
+  health; use `jw doctor` for the repository-wide check.
+- For an invalid creation base or missing associated bookmark, follow the doctor
+  remedy with `jw repair`. A missing managed record still calls for `jw adopt`, and
+  a corrupt record needs manual restore.
 
 Complete diagnosis when the target workspace and reported hazards are identified without refreshing or otherwise mutating state.
+
+## Divergence recovery
+
+`jw doctor` is read-only. When it reports divergent mutable JJ changes, inspect the
+affected change IDs, all visible revisions for each ID, descendants, file conflicts,
+bookmarks, and other active work before rewriting anything. Preserve immutable and
+ambiguous history for explicit user direction.
+
+On JJ 0.45 or newer, process one inspected change ID at a time with an explicit
+revision search space and `jj converge --no-interactive --revision '<revset>'`.
+Convergence can rewrite descendants, move local bookmarks, or leave file conflicts;
+an automatic command exit is not proof that recovery is complete. If heuristics are
+inconclusive, `--no-interactive` leaves the divergence unchanged and reports a
+warning. On older supported JJ versions, do not pass this option; use the existing
+manual recovery workflow and report that automatic convergence is unavailable.
+
+After each recovery, inspect `jj status`, the affected graph and descendants,
+`jj bookmark list`, remaining divergence, file conflicts, `jj op show -p`, and
+`jj evolog`. Leave unresolved or ambiguous recovery untouched. Only continue to the
+next change ID after the previous one has been checked.
+
+Complete recovery when the requested change IDs have no remaining unexpected
+divergence or conflicts, affected descendants and bookmarks are understood, and the
+operation diff matches the intended repair.
 
 ## Adopt
 
@@ -18,6 +57,27 @@ Complete diagnosis when the target workspace and reported hazards are identified
 Inspect the workspace and resolve the base before adoption. Use `--bookmark` only to record an existing association. Use `--no-bookmark` when no association should be recorded, including when ignoring a stale legacy marker.
 
 Complete adoption when `jw status <name> --refresh none` reports the intended managed metadata and JJ revision/bookmark state is unchanged.
+
+## Repair metadata
+
+`jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` corrects an
+existing readable managed record. `NAME` must be literal; do not use `@`, `-`, `^`,
+or another routing shortcut. The named workspace must be registered with JJ, and
+the replacement base must resolve to exactly one revision at one frozen validation
+operation. A requested bookmark must already exist locally. The checkout path may be
+stale or unusable; JJ workspace registration is the safety gate.
+
+Repair replaces only the recorded creation base and bookmark association. It preserves
+creation time, creation operation ID, and intended remote. The replacement is atomic:
+validation, a changed record, or a write failure leaves the old record intact. Repair
+does not create a JJ operation, change commits or bookmarks, refresh a working copy,
+or create a checkout. Missing records still use `jw adopt`; corrupt records need
+manual restore.
+
+Complete repair when the command reports the old and new metadata values and the
+frozen validation operation, and a read-only doctor/status inspection shows the
+intended record without any JJ revision or bookmark mutation. Repair has no JSON
+output contract and does not add link health to `jw status`.
 
 ## Remove
 
