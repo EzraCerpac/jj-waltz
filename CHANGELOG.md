@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 0.6.0 (2026-09-07)
 
 - Add read-only `jw context [PATH] --format human|json` checkout discovery and
   verified Git-worktree-to-JJ-primary association, with Codex routing guidance.
