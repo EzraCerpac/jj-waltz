@@ -199,9 +199,9 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
     let bare = values[3] == "true";
     let checkout_root = if inside_work_tree {
         match run_git(path, ["rev-parse", "--show-toplevel"]) {
-            Ok(output) if output.status.success() => {
-                Some(canonical_or_path(PathBuf::from(trimmed(&output.stdout))))
-            }
+            Ok(output) if output.status.success() => Some(canonical_or_path(PathBuf::from(
+                path_output(&output.stdout),
+            ))),
             Ok(output) => {
                 diagnostics.push(ContextDiagnostic::error(
                     "git_metadata_invalid",
@@ -312,7 +312,7 @@ fn probe_jj(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> JjProbe {
         return JjProbe::default();
     }
 
-    let workspace_root = canonical_or_path(PathBuf::from(trimmed(&root.stdout)));
+    let workspace_root = canonical_or_path(PathBuf::from(path_output(&root.stdout)));
     let repository_path = match repository_path(&workspace_root) {
         Ok(path) => Some(path),
         Err(message) => {
@@ -479,7 +479,7 @@ fn jj_git_backend(
         // make the JJ identity unusable.
         return (None, None);
     }
-    let raw = trimmed(&output.stdout);
+    let raw = path_output(&output.stdout);
     if raw.is_empty() {
         diagnostics.push(ContextDiagnostic::warning(
             "jj_git_backend_invalid",
@@ -517,7 +517,7 @@ fn git_common_dir_for_backend(git_dir: &Path) -> Result<PathBuf, String> {
             &output,
         ));
     }
-    let common_dir = trimmed(&output.stdout);
+    let common_dir = path_output(&output.stdout);
     if common_dir.is_empty() {
         return Err("Git backend common directory query returned an empty path".to_owned());
     }
@@ -562,7 +562,7 @@ fn workspace_root_for(path: &Path, name: &str) -> Result<PathBuf, String> {
     if !output.status.success() {
         return Err(format_probe_failure("JJ workspace root failed", &output));
     }
-    let root = trimmed(&output.stdout);
+    let root = path_output(&output.stdout);
     if root.is_empty() {
         return Err("JJ workspace root query returned an empty path".to_owned());
     }
@@ -627,6 +627,7 @@ where
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
     ] {
         command.env_remove(variable);
     }
@@ -653,6 +654,7 @@ where
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
     ] {
         command.env_remove(variable);
     }
@@ -734,9 +736,17 @@ fn nonempty_lines(bytes: &[u8]) -> Vec<&str> {
     std::str::from_utf8(bytes)
         .unwrap_or_default()
         .lines()
-        .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+// CLI path output adds one line terminator; whitespace belongs to the path.
+fn path_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let path = text.strip_suffix('\n').unwrap_or(&text);
+    #[cfg(windows)]
+    let path = path.strip_suffix('\r').unwrap_or(path);
+    path.to_owned()
 }
 
 fn trimmed(bytes: &[u8]) -> String {

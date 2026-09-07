@@ -138,6 +138,10 @@ fn context_finds_primary_jj_checkout_for_linked_git_worktree() {
 
 #[test]
 fn workspace_command_explains_git_only_checkout() {
+    if !jj_available() {
+        eprintln!("skipping test because `jj` is not installed");
+        return;
+    }
     let temp = tempfile::tempdir().expect("tempdir");
     run("git", temp.path(), &["init"]);
     for command in ["list", "root", "current"] {
@@ -200,4 +204,86 @@ fn missing_jj_does_not_suggest_workspace_routing() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("failed to execute jj"));
     assert!(!error.contains("Git checkout without a JJ workspace"));
+}
+
+#[test]
+#[cfg(unix)]
+fn context_preserves_whitespace_paths_and_jj_associations() {
+    if !jj_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let repo = base.join("repo ");
+    let secondary = base.join("secondary ");
+    let linked = base.join("linked ");
+    run("jj", &base, &["git", "init", repo.to_str().unwrap()]);
+    run("git", &repo, &["commit", "--allow-empty", "-m", "initial"]);
+    run(
+        "jj",
+        &repo,
+        &[
+            "workspace",
+            "add",
+            "--name",
+            "secondary",
+            secondary.to_str().unwrap(),
+        ],
+    );
+    run(
+        "git",
+        &repo,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    for path in [&repo, &secondary, &linked] {
+        let output = Command::cargo_bin("jw")
+            .unwrap()
+            .current_dir(path)
+            .args(["context", "--format=json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["jj"]["primary_checkout"].as_str(), repo.to_str());
+        if path == &linked {
+            assert!(value["jj"]["workspace_root"].is_null());
+            assert_eq!(value["git"]["linked_worktree"], true);
+        } else {
+            assert_eq!(value["jj"]["workspace_root"].as_str(), path.to_str());
+            assert_eq!(
+                value["jj"]["repository_path"].as_str(),
+                repo.join(".jj/repo").to_str()
+            );
+        }
+        if path != &secondary {
+            assert_eq!(value["git"]["checkout_root"].as_str(), path.to_str());
+            assert_eq!(
+                value["git"]["common_dir"].as_str(),
+                repo.join(".git").to_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_nested_path_ignores_git_discovery_ceiling() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    run("git", &root, &["init"]);
+    let nested = root.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let output = Command::cargo_bin("jw")
+        .unwrap()
+        .current_dir(&root)
+        .env("GIT_CEILING_DIRECTORIES", &root)
+        .args(["context", nested.to_str().unwrap(), "--format=json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["git"]["checkout_root"].as_str(), root.to_str());
+    assert_eq!(
+        value["git"]["common_dir"].as_str(),
+        root.join(".git").to_str()
+    );
 }

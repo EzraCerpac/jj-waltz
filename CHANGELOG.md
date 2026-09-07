@@ -1,5 +1,11 @@
 # Changelog
 
+## Version 0.6.1 (2026-09-07)
+
+- Preserve whitespace in checkout and workspace paths reported by `jw context`.
+- Ignore inherited Git discovery ceilings when inspecting checkout paths.
+- Skip the JJ routing-hint test when JJ is unavailable.
+
 ## Version 0.6.0 (2026-09-07)
 
 - Add read-only `jw context [PATH] --format human|json` checkout discovery and
