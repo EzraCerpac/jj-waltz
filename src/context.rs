@@ -152,14 +152,7 @@ struct GitProbe {
 fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe {
     let topology = match run_git(
         path,
-        [
-            "rev-parse",
-            "--path-format=absolute",
-            "--absolute-git-dir",
-            "--git-common-dir",
-            "--is-inside-work-tree",
-            "--is-bare-repository",
-        ],
+        ["rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
     ) {
         Ok(output) => output,
         Err(error) => {
@@ -182,41 +175,27 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
     }
 
     let values = nonempty_lines(&topology.stdout);
-    if values.len() != 4 {
+    if values.len() != 2 {
         diagnostics.push(ContextDiagnostic::error(
             "git_metadata_invalid",
             format!(
-                "git topology query returned {} fields; expected 4",
+                "git topology query returned {} fields; expected 2",
                 values.len()
             ),
         ));
         return GitProbe::default();
     }
 
-    let git_dir = canonical_or_path(PathBuf::from(values[0]));
-    let common_dir = canonical_or_path(PathBuf::from(values[1]));
-    let inside_work_tree = values[2] == "true";
-    let bare = values[3] == "true";
+    let Some(git_dir) = git_path(path, "--absolute-git-dir", diagnostics) else {
+        return GitProbe::default();
+    };
+    let Some(common_dir) = git_path(path, "--git-common-dir", diagnostics) else {
+        return GitProbe::default();
+    };
+    let inside_work_tree = values[0] == "true";
+    let bare = values[1] == "true";
     let checkout_root = if inside_work_tree {
-        match run_git(path, ["rev-parse", "--show-toplevel"]) {
-            Ok(output) if output.status.success() => Some(canonical_or_path(PathBuf::from(
-                path_output(&output.stdout),
-            ))),
-            Ok(output) => {
-                diagnostics.push(ContextDiagnostic::error(
-                    "git_metadata_invalid",
-                    format_probe_failure("Git checkout root could not be read", &output),
-                ));
-                None
-            }
-            Err(error) => {
-                diagnostics.push(ContextDiagnostic::error(
-                    "git_unavailable",
-                    format!("could not read Git checkout root: {}", error.error),
-                ));
-                None
-            }
-        }
+        git_path(path, "--show-toplevel", diagnostics)
     } else {
         None
     };
@@ -233,6 +212,29 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
         },
     }
     .with_bare_warning(bare, diagnostics)
+}
+
+// Query paths individually: a path may itself contain line separators.
+fn git_path(path: &Path, field: &str, diagnostics: &mut Vec<ContextDiagnostic>) -> Option<PathBuf> {
+    match run_git(path, ["rev-parse", "--path-format=absolute", field]) {
+        Ok(output) if output.status.success() => Some(canonical_or_path(PathBuf::from(
+            path_output(&output.stdout),
+        ))),
+        Ok(output) => {
+            diagnostics.push(ContextDiagnostic::error(
+                "git_metadata_invalid",
+                format_probe_failure(&format!("Git {field} could not be read"), &output),
+            ));
+            None
+        }
+        Err(error) => {
+            diagnostics.push(ContextDiagnostic::error(
+                "git_unavailable",
+                format!("could not read Git {field}: {}", error.error),
+            ));
+            None
+        }
+    }
 }
 
 impl GitProbe {

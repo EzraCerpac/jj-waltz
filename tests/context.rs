@@ -212,55 +212,57 @@ fn context_preserves_whitespace_paths_and_jj_associations() {
     if !jj_available() {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
-    let base = temp.path().canonicalize().unwrap();
-    let repo = base.join("repo ");
-    let secondary = base.join("secondary ");
-    let linked = base.join("linked ");
-    run("jj", &base, &["git", "init", repo.to_str().unwrap()]);
-    run("git", &repo, &["commit", "--allow-empty", "-m", "initial"]);
-    run(
-        "jj",
-        &repo,
-        &[
-            "workspace",
-            "add",
-            "--name",
-            "secondary",
-            secondary.to_str().unwrap(),
-        ],
-    );
-    run(
-        "git",
-        &repo,
-        &["worktree", "add", "--detach", linked.to_str().unwrap()],
-    );
-    for path in [&repo, &secondary, &linked] {
-        let output = Command::cargo_bin("jw")
-            .unwrap()
-            .current_dir(path)
-            .args(["context", "--format=json"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["jj"]["primary_checkout"].as_str(), repo.to_str());
-        if path == &linked {
-            assert!(value["jj"]["workspace_root"].is_null());
-            assert_eq!(value["git"]["linked_worktree"], true);
-        } else {
-            assert_eq!(value["jj"]["workspace_root"].as_str(), path.to_str());
-            assert_eq!(
-                value["jj"]["repository_path"].as_str(),
-                repo.join(".jj/repo").to_str()
-            );
-        }
-        if path != &secondary {
-            assert_eq!(value["git"]["checkout_root"].as_str(), path.to_str());
-            assert_eq!(
-                value["git"]["common_dir"].as_str(),
-                repo.join(".git").to_str()
-            );
+    for suffix in [" ", "\nline", "\r"] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let repo = base.join(format!("repo{suffix}"));
+        let secondary = base.join(format!("secondary{suffix}"));
+        let linked = base.join(format!("linked{suffix}"));
+        run("jj", &base, &["git", "init", repo.to_str().unwrap()]);
+        run("git", &repo, &["commit", "--allow-empty", "-m", "initial"]);
+        run(
+            "jj",
+            &repo,
+            &[
+                "workspace",
+                "add",
+                "--name",
+                "secondary",
+                secondary.to_str().unwrap(),
+            ],
+        );
+        run(
+            "git",
+            &repo,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        for path in [&repo, &secondary, &linked] {
+            let output = Command::cargo_bin("jw")
+                .unwrap()
+                .current_dir(path)
+                .args(["context", "--format=json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["jj"]["primary_checkout"].as_str(), repo.to_str());
+            if path == &linked {
+                assert!(value["jj"]["workspace_root"].is_null());
+                assert_eq!(value["git"]["linked_worktree"], true);
+            } else {
+                assert_eq!(value["jj"]["workspace_root"].as_str(), path.to_str());
+                assert_eq!(
+                    value["jj"]["repository_path"].as_str(),
+                    repo.join(".jj/repo").to_str()
+                );
+            }
+            if path != &secondary {
+                assert_eq!(value["git"]["checkout_root"].as_str(), path.to_str());
+                assert_eq!(
+                    value["git"]["common_dir"].as_str(),
+                    repo.join(".git").to_str()
+                );
+            }
         }
     }
 }
