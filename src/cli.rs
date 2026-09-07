@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::context;
 use crate::doctor::DoctorEngine;
 use crate::jj::JjClient;
 use crate::lifecycle::{
@@ -35,6 +36,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Describe Git and JJ checkout context")]
+    Context(ContextCommand),
     #[command(about = "Create one or more workspaces")]
     Add(AddCommand),
     #[command(
@@ -225,6 +228,20 @@ struct DoctorCommand {
 }
 
 #[derive(Debug, Args)]
+struct ContextCommand {
+    #[arg(value_name = "PATH", default_value = ".")]
+    path: std::path::PathBuf,
+    #[arg(long, value_enum, default_value = "human")]
+    format: ContextFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ContextFormat {
+    Human,
+    Json,
+}
+
+#[derive(Debug, Args)]
 struct AdoptCommand {
     #[arg(
         value_name = "NAME",
@@ -337,7 +354,8 @@ pub fn run() -> Result<()> {
     shell::complete_if_requested(Cli::command);
     let cli = Cli::parse_from(normalized_args());
 
-    match cli.command {
+    let result = match cli.command {
+        Commands::Context(cmd) => run_context(cmd),
         Commands::Add(cmd) => run_add(cmd),
         Commands::Switch(cmd) => run_switch(cmd),
         Commands::List(cmd) => run_list(cmd),
@@ -348,12 +366,132 @@ pub fn run() -> Result<()> {
         Commands::Path(cmd) => run_path(cmd),
         Commands::Remove(cmd) => run_remove(cmd),
         Commands::Prune => run_prune(),
-        Commands::Root => print_line(workspace::workspace_root_current()?.display()),
-        Commands::Current => print_line(workspace::current_workspace_name()?),
+        Commands::Root => {
+            workspace::workspace_root_current().and_then(|root| print_line(root.display()))
+        }
+        Commands::Current => workspace::current_workspace_name().and_then(print_line),
         Commands::Shell(cmd) => run_shell(cmd),
         Commands::Links(cmd) => run_links(cmd),
         Commands::Completions(cmd) => run_completions(cmd.shell),
+    };
+    result.map_err(context::add_workspace_hint)
+}
+
+fn run_context(cmd: ContextCommand) -> Result<()> {
+    let report = context::discover(Some(&cmd.path));
+    match cmd.format {
+        ContextFormat::Human => write_text(&render_context_human(&report)),
+        ContextFormat::Json => write_json(&report),
     }
+}
+
+fn render_context_human(report: &context::ContextReport) -> String {
+    let mut output = String::new();
+    writeln!(output, "path: {}", report.path.display()).expect("write string");
+    writeln!(output, "git:").expect("write string");
+    let git = &report.git;
+    writeln!(
+        output,
+        "  checkout root: {}",
+        display_optional_path(git.checkout_root.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  git dir: {}",
+        display_optional_path(git.git_dir.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  common dir: {}",
+        display_optional_path(git.common_dir.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  linked worktree: {}",
+        display_optional(git.linked_worktree.as_ref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  HEAD: {}",
+        git.head_commit.as_deref().unwrap_or("(unknown)")
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  ref: {}",
+        git.head_ref.as_deref().unwrap_or("(detached or unknown)")
+    )
+    .expect("write string");
+    let jj = &report.jj;
+    writeln!(output, "jj:").expect("write string");
+    writeln!(
+        output,
+        "  workspace root: {}",
+        display_optional_path(jj.workspace_root.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  workspace name: {}",
+        jj.workspace_name.as_deref().unwrap_or("(unknown)")
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  repository: {}",
+        display_optional_path(jj.repository_path.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  Git backend: {}",
+        display_optional_path(jj.git_backend_dir.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  Git backend common dir: {}",
+        display_optional_path(jj.git_backend_common_dir.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  primary checkout: {}",
+        display_optional_path(jj.primary_checkout.as_deref())
+    )
+    .expect("write string");
+    writeln!(
+        output,
+        "  primary workspace: {}",
+        jj.primary_workspace.as_deref().unwrap_or("(unknown)")
+    )
+    .expect("write string");
+    if report.diagnostics.is_empty() {
+        output.push_str("diagnostics: none\n");
+    } else {
+        output.push_str("diagnostics:\n");
+        for diagnostic in &report.diagnostics {
+            writeln!(
+                output,
+                "  [{:?}] {}: {}",
+                diagnostic.severity, diagnostic.code, diagnostic.message
+            )
+            .expect("write string");
+        }
+    }
+    output
+}
+
+fn display_optional_path(value: Option<&Path>) -> String {
+    value.map_or_else(|| "(none)".to_owned(), |path| path.display().to_string())
+}
+
+fn display_optional<T: std::fmt::Display>(value: Option<&T>) -> String {
+    value.map_or_else(|| "(none)".to_owned(), ToString::to_string)
 }
 
 fn normalized_args() -> Vec<OsString> {

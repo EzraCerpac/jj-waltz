@@ -92,6 +92,58 @@
         "Uses the repository's stated Git worktree model or gives general task-splitting guidance.",
         "Does not treat generic parallelism as implicit permission to create JJ workspaces."
       ]
+    },
+    {
+      "id": 9,
+      "prompt": "I am starting a Codex task from a nested directory in a clean Git checkout linked to a JJ project. Use jw to route the task into an isolated JJ workspace without confusing the Codex checkout with the JJ workspace.",
+      "expected_output": "Runs read-only context discovery, separates Git and JJ identities, verifies the exact starting commit, creates or selects a task-shaped JJ workspace from the verified primary checkout, and reports the explicit working directory and ownership boundary.",
+      "files": [],
+      "expectations": [
+        "Runs `jw context` from the nested starting path, reports the discovered checkout root separately, and treats Git topology and JJ identity as separate facts.",
+        "Checks the discovered checkout root with `git --no-optional-locks status --porcelain=v1 --untracked-files=all` and requires empty output.",
+        "Uses the verified primary JJ checkout and an explicit `--at` starting commit for a missing isolated workspace.",
+        "Verifies an existing named workspace's path and base before reuse instead of assuming `--at` relocates or rebases it.",
+        "Sets and reports an explicit working directory for every task command.",
+        "Explains that commands in another directory do not retarget Codex's native Git panel and does not remove the Codex-owned Git worktree."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Codex started this task in a clean detached Git worktree at commit abc123. Create an isolated JJ workspace at exactly that commit.",
+      "expected_output": "Treats detached HEAD as a concrete starting commit, verifies abc123 resolves in JJ from the related primary checkout, then creates or selects the JJ workspace with that exact base.",
+      "files": [],
+      "expectations": [
+        "Runs `jw context` and records the full `git.head_commit` for the detached checkout.",
+        "Checks cleanliness with `git --no-optional-locks status --porcelain=v1 --untracked-files=all` from the checkout root.",
+        "Verifies the exact commit with `jj --ignore-working-copy --at-op=@ --repository <primary-jj-root> log -r <head-commit>` before creating the workspace.",
+        "Uses an explicit `--at abc123` base and does not silently substitute trunk or another working-copy revision.",
+        "Reports the selected JJ workspace path and keeps the Codex Git worktree externally owned."
+      ]
+    },
+    {
+      "id": 11,
+      "prompt": "Codex's Git checkout is linked to our JJ project, but it has uncommitted edits. Automatically route the task into a new JJ workspace.",
+      "expected_output": "Refuses automatic routing because the Codex checkout is dirty, explains the transfer or repair needed, and preserves the externally owned checkout without copying or resetting files.",
+      "files": [],
+      "expectations": [
+        "Runs `jw context` and checks the Git checkout root with `git --no-optional-locks status --porcelain=v1 --untracked-files=all` before routing.",
+        "Stops instead of creating a workspace from an uncertain or dirty starting state.",
+        "Does not copy files, reset the Codex checkout, silently choose trunk, or remove the Codex-owned worktree.",
+        "Explains what clean transfer or user direction is required before continuing."
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "Codex's clean Git checkout claims to start at deadbeef, but that exact commit cannot be resolved from the related JJ checkout. Route the task anyway using the nearest available revision.",
+      "expected_output": "Refuses automatic routing because the exact starting commit is unavailable, reports the discovery diagnostic, and waits for repair or explicit user direction instead of choosing a nearby base.",
+      "files": [],
+      "expectations": [
+        "Runs `jw context --format=json` or equivalent read-only discovery and reports the unavailable `git.head_commit` resolution.",
+        "Uses the explicit primary-root JJ query with `--ignore-working-copy --at-op=@` when checking the missing commit.",
+        "Does not silently substitute trunk, a nearby revision, or the primary working-copy revision.",
+        "Does not copy files or mutate either checkout while the starting identity is unresolved.",
+        "Explains the required repair or transfer and keeps the externally owned Codex worktree intact."
+      ]
     }
   ]
 }

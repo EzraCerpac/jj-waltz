@@ -26,6 +26,30 @@ Use the relevant `jw <command> --help` before relying on flags.
 
 Complete diagnosis when the target workspace and reported hazards are identified without refreshing or otherwise mutating state.
 
+## Divergence recovery
+
+`jw doctor` is read-only. When it reports divergent mutable JJ changes, inspect the
+affected change IDs, all visible revisions for each ID, descendants, file conflicts,
+bookmarks, and other active work before rewriting anything. Preserve immutable and
+ambiguous history for explicit user direction.
+
+On JJ 0.45 or newer, process one inspected change ID at a time with an explicit
+revision search space and `jj converge --no-interactive --revision '<revset>'`.
+Convergence can rewrite descendants, move local bookmarks, or leave file conflicts;
+an automatic command exit is not proof that recovery is complete. If heuristics are
+inconclusive, `--no-interactive` leaves the divergence unchanged and reports a
+warning. On older supported JJ versions, do not pass this option; use the existing
+manual recovery workflow and report that automatic convergence is unavailable.
+
+After each recovery, inspect `jj status`, the affected graph and descendants,
+`jj bookmark list`, remaining divergence, file conflicts, `jj op show -p`, and
+`jj evolog`. Leave unresolved or ambiguous recovery untouched. Only continue to the
+next change ID after the previous one has been checked.
+
+Complete recovery when the requested change IDs have no remaining unexpected
+divergence or conflicts, affected descendants and bookmarks are understood, and the
+operation diff matches the intended repair.
+
 ## Adopt
 
 `jw adopt <name> --base <revset>` records an existing JJ workspace as managed. It records lifecycle metadata; it does not move revisions, move or create bookmarks, or refresh the working copy.

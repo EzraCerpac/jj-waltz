@@ -1,4 +1,4 @@
-use crate::jj::{JjClient, MINIMUM_SUPPORTED_JJ_VERSION};
+use crate::jj::{JjClient, JjVersion, MINIMUM_SUPPORTED_JJ_VERSION};
 use crate::links::{self, LinkCheckState};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use crate::workspace;
@@ -61,7 +61,7 @@ impl DoctorEngine {
             ));
         }
 
-        self.check_jj_version(&mut report);
+        let jj_version = self.check_jj_version(&mut report);
         let operation_id = self.check_operation_snapshot(&mut report);
         let trunk = self.check_trunk(
             &mut report,
@@ -83,6 +83,7 @@ impl DoctorEngine {
             &mut report,
             operation_id.as_deref(),
             workspaces.as_deref(),
+            jj_version.as_ref(),
         );
 
         report.push(DoctorDiagnostic::skipped(
@@ -98,7 +99,7 @@ impl DoctorEngine {
         report.finish()
     }
 
-    fn check_jj_version(&self, report: &mut DoctorReport) {
+    fn check_jj_version(&self, report: &mut DoctorReport) -> Option<JjVersion> {
         match self.client.capabilities() {
             Ok(capabilities) if capabilities.is_supported() => {
                 report.repository.jj_version = Some(capabilities.version.to_string());
@@ -109,6 +110,7 @@ impl DoctorEngine {
                         capabilities.version
                     ),
                 ));
+                Some(capabilities.version)
             }
             Ok(capabilities) => {
                 report.repository.jj_version = Some(capabilities.version.to_string());
@@ -123,12 +125,16 @@ impl DoctorEngine {
                         MINIMUM_SUPPORTED_JJ_VERSION
                     )),
                 ));
+                Some(capabilities.version)
             }
-            Err(error) => report.push(DoctorDiagnostic::error(
-                DoctorCode::JjVersion,
-                format!("could not determine JJ capabilities: {error:#}"),
-                Some("install a supported JJ binary and ensure it is on PATH"),
-            )),
+            Err(error) => {
+                report.push(DoctorDiagnostic::error(
+                    DoctorCode::JjVersion,
+                    format!("could not determine JJ capabilities: {error:#}"),
+                    Some("install a supported JJ binary and ensure it is on PATH"),
+                ));
+                None
+            }
         }
     }
 
@@ -618,6 +624,7 @@ impl DoctorEngine {
         report: &mut DoctorReport,
         operation_id: Option<&str>,
         workspaces: Option<&[DoctorWorkspace]>,
+        jj_version: Option<&JjVersion>,
     ) {
         let Some(operation_id) = operation_id else {
             report.push(DoctorDiagnostic::skipped(
@@ -676,6 +683,7 @@ impl DoctorEngine {
             ));
         } else {
             for workspace in divergent {
+                let remedy = divergence_remedy(jj_version, &workspace.change_id);
                 report.push(
                     DoctorDiagnostic::error(
                         DoctorCode::DivergentChange,
@@ -683,13 +691,24 @@ impl DoctorEngine {
                             "workspace target {} has a divergent change ID",
                             workspace.commit_id
                         ),
-                        Some("merge or abandon the unintended divergent commit"),
+                        Some(remedy),
                     )
                     .with_subject(&workspace.name),
                 );
             }
         }
     }
+}
+
+fn divergence_remedy(jj_version: Option<&JjVersion>, change_id: &str) -> String {
+    if jj_version.is_some_and(|version| *version >= JjVersion::new(0, 45, 0)) {
+        return format!(
+            "inspect all variants and affected descendants, then run `jj converge --no-interactive --revision 'change_id(\"{change_id}\")'`; review file conflicts and `jj op show -p`"
+        );
+    }
+
+    "merge or abandon the unintended divergent commit; rerun `jw doctor` after resolving it"
+        .to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -960,6 +979,7 @@ impl DoctorSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DoctorWorkspace {
     name: String,
+    change_id: String,
     commit_id: String,
     divergent: bool,
     current: bool,
@@ -988,6 +1008,7 @@ fn query_workspaces(client: &JjClient, operation_id: &str) -> Result<Vec<DoctorW
         .into_values()
         .map(|facts| DoctorWorkspace {
             name: facts.name,
+            change_id: facts.change_id,
             commit_id: facts.commit_id,
             divergent: facts.divergent,
             current: facts.current_working_copy,
@@ -1140,6 +1161,18 @@ mod tests {
             .iter()
             .filter(|diagnostic| diagnostic.code == code)
             .collect()
+    }
+
+    #[test]
+    fn divergence_remedy_is_version_aware() {
+        let old = divergence_remedy(Some(&JjVersion::new(0, 44, 0)), "abc123");
+        assert!(old.contains("merge or abandon"));
+        assert!(!old.contains("jj converge"));
+
+        let new = divergence_remedy(Some(&JjVersion::new(0, 45, 0)), "abc123");
+        assert!(new.contains("jj converge --no-interactive --revision 'change_id(\"abc123\")'"));
+        assert!(!new.contains("--revision abc123`"));
+        assert!(new.contains("jj op show -p"));
     }
 
     #[test]
@@ -1630,6 +1663,7 @@ mod tests {
         fs::create_dir_all(root.join(".jj")).expect("create workspace root");
         let workspaces = vec![DoctorWorkspace {
             name: "feature".to_owned(),
+            change_id: "change".to_owned(),
             commit_id: "commit".to_owned(),
             divergent: false,
             current: true,

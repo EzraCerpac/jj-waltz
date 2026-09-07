@@ -240,7 +240,10 @@ cargo test --locked
 ```
 
 JJ 0.39.0 is the oldest supported release. CI runs root integration tests against
-0.39.0 and the newer pinned compatibility target, 0.44.0. A minimum-version bump
+0.39.0 and the newer pinned compatibility targets, 0.44.0 and 0.45.1. The adapter
+keeps version-specific behavior at the boundary: `jw doctor` recommends
+`jj converge --no-interactive` for divergence on JJ 0.45 and newer, while older
+supported versions receive manual recovery guidance. A minimum-version bump
 requires a documented public JJ capability that cannot reasonably be adapted.
 Newer JJ versions may work, but are not part of the declared window until the pin
 is advanced. Herdr is checked separately because it is a separate Cargo
