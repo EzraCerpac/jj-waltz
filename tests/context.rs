@@ -8,6 +8,12 @@ fn run(program: &str, cwd: &Path, args: &[&str]) {
     let output = Command::new(program)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", cwd.join("config"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
         .args(args)
         .output()
         .expect("run command");
