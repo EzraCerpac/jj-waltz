@@ -140,14 +140,64 @@ fn context_finds_primary_jj_checkout_for_linked_git_worktree() {
 fn workspace_command_explains_git_only_checkout() {
     let temp = tempfile::tempdir().expect("tempdir");
     run("git", temp.path(), &["init"]);
+    for command in ["list", "root", "current"] {
+        let output = Command::cargo_bin("jw")
+            .expect("binary")
+            .current_dir(temp.path())
+            .args([command])
+            .output()
+            .expect("run jw");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Git checkout without a JJ workspace")
+        );
+    }
+}
+
+#[test]
+fn context_reports_bare_git_topology() {
+    let temp = tempfile::tempdir().unwrap();
+    run("git", temp.path(), &["init", "--bare"]);
     let output = Command::cargo_bin("jw")
-        .expect("binary")
+        .unwrap()
         .current_dir(temp.path())
+        .args(["context", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    assert_eq!(value["git"]["git_dir"].as_str(), root.to_str());
+    assert_eq!(value["git"]["common_dir"].as_str(), root.to_str());
+    assert!(value["git"]["checkout_root"].is_null());
+    assert!(
+        value["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "bare_repository")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn missing_jj_does_not_suggest_workspace_routing() {
+    let temp = tempfile::tempdir().unwrap();
+    run("git", temp.path(), &["init"]);
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    std::os::unix::fs::symlink(git, temp.path().join("git")).unwrap();
+    let output = Command::cargo_bin("jw")
+        .unwrap()
+        .current_dir(temp.path())
+        .env("PATH", temp.path())
         .args(["list"])
         .output()
-        .expect("run jw");
+        .unwrap();
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Git checkout without a JJ workspace")
-    );
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("failed to execute jj"));
+    assert!(!error.contains("Git checkout without a JJ workspace"));
 }

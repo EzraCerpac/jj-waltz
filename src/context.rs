@@ -142,7 +142,6 @@ fn looks_like_missing_jj_repository(error: &Error) -> bool {
     text.contains("no jj repo")
         || text.contains("there is no jj repo")
         || text.contains("not a jj repo")
-        || text.contains("failed to execute jj")
 }
 
 #[derive(Debug, Default)]
@@ -156,7 +155,6 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
         [
             "rev-parse",
             "--path-format=absolute",
-            "--show-toplevel",
             "--absolute-git-dir",
             "--git-common-dir",
             "--is-inside-work-tree",
@@ -184,27 +182,49 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
     }
 
     let values = nonempty_lines(&topology.stdout);
-    if values.len() != 5 {
+    if values.len() != 4 {
         diagnostics.push(ContextDiagnostic::error(
             "git_metadata_invalid",
             format!(
-                "git topology query returned {} fields; expected 5",
+                "git topology query returned {} fields; expected 4",
                 values.len()
             ),
         ));
         return GitProbe::default();
     }
 
-    let checkout_root = canonical_or_path(PathBuf::from(values[0]));
-    let git_dir = canonical_or_path(PathBuf::from(values[1]));
-    let common_dir = canonical_or_path(PathBuf::from(values[2]));
-    let inside_work_tree = values[3] == "true";
-    let bare = values[4] == "true";
+    let git_dir = canonical_or_path(PathBuf::from(values[0]));
+    let common_dir = canonical_or_path(PathBuf::from(values[1]));
+    let inside_work_tree = values[2] == "true";
+    let bare = values[3] == "true";
+    let checkout_root = if inside_work_tree {
+        match run_git(path, ["rev-parse", "--show-toplevel"]) {
+            Ok(output) if output.status.success() => {
+                Some(canonical_or_path(PathBuf::from(trimmed(&output.stdout))))
+            }
+            Ok(output) => {
+                diagnostics.push(ContextDiagnostic::error(
+                    "git_metadata_invalid",
+                    format_probe_failure("Git checkout root could not be read", &output),
+                ));
+                None
+            }
+            Err(error) => {
+                diagnostics.push(ContextDiagnostic::error(
+                    "git_unavailable",
+                    format!("could not read Git checkout root: {}", error.error),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let (head_commit, head_ref) = git_head(path, diagnostics);
 
     GitProbe {
         context: GitContext {
-            checkout_root: Some(checkout_root),
+            checkout_root,
             git_dir: Some(git_dir.clone()),
             common_dir: Some(common_dir.clone()),
             linked_worktree: Some(inside_work_tree && git_dir != common_dir),

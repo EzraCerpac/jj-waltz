@@ -366,8 +366,10 @@ pub fn run() -> Result<()> {
         Commands::Path(cmd) => run_path(cmd),
         Commands::Remove(cmd) => run_remove(cmd),
         Commands::Prune => run_prune(),
-        Commands::Root => print_line(workspace::workspace_root_current()?.display()),
-        Commands::Current => print_line(workspace::current_workspace_name()?),
+        Commands::Root => {
+            workspace::workspace_root_current().and_then(|root| print_line(root.display()))
+        }
+        Commands::Current => workspace::current_workspace_name().and_then(print_line),
         Commands::Shell(cmd) => run_shell(cmd),
         Commands::Links(cmd) => run_links(cmd),
         Commands::Completions(cmd) => run_completions(cmd.shell),
