@@ -152,14 +152,7 @@ struct GitProbe {
 fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe {
     let topology = match run_git(
         path,
-        [
-            "rev-parse",
-            "--path-format=absolute",
-            "--absolute-git-dir",
-            "--git-common-dir",
-            "--is-inside-work-tree",
-            "--is-bare-repository",
-        ],
+        ["rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
     ) {
         Ok(output) => output,
         Err(error) => {
@@ -182,41 +175,27 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
     }
 
     let values = nonempty_lines(&topology.stdout);
-    if values.len() != 4 {
+    if values.len() != 2 {
         diagnostics.push(ContextDiagnostic::error(
             "git_metadata_invalid",
             format!(
-                "git topology query returned {} fields; expected 4",
+                "git topology query returned {} fields; expected 2",
                 values.len()
             ),
         ));
         return GitProbe::default();
     }
 
-    let git_dir = canonical_or_path(PathBuf::from(values[0]));
-    let common_dir = canonical_or_path(PathBuf::from(values[1]));
-    let inside_work_tree = values[2] == "true";
-    let bare = values[3] == "true";
+    let Some(git_dir) = git_path(path, "--absolute-git-dir", diagnostics) else {
+        return GitProbe::default();
+    };
+    let Some(common_dir) = git_path(path, "--git-common-dir", diagnostics) else {
+        return GitProbe::default();
+    };
+    let inside_work_tree = values[0] == "true";
+    let bare = values[1] == "true";
     let checkout_root = if inside_work_tree {
-        match run_git(path, ["rev-parse", "--show-toplevel"]) {
-            Ok(output) if output.status.success() => {
-                Some(canonical_or_path(PathBuf::from(trimmed(&output.stdout))))
-            }
-            Ok(output) => {
-                diagnostics.push(ContextDiagnostic::error(
-                    "git_metadata_invalid",
-                    format_probe_failure("Git checkout root could not be read", &output),
-                ));
-                None
-            }
-            Err(error) => {
-                diagnostics.push(ContextDiagnostic::error(
-                    "git_unavailable",
-                    format!("could not read Git checkout root: {}", error.error),
-                ));
-                None
-            }
-        }
+        git_path(path, "--show-toplevel", diagnostics)
     } else {
         None
     };
@@ -233,6 +212,29 @@ fn probe_git(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> GitProbe 
         },
     }
     .with_bare_warning(bare, diagnostics)
+}
+
+// Query paths individually: a path may itself contain line separators.
+fn git_path(path: &Path, field: &str, diagnostics: &mut Vec<ContextDiagnostic>) -> Option<PathBuf> {
+    match run_git(path, ["rev-parse", "--path-format=absolute", field]) {
+        Ok(output) if output.status.success() => Some(canonical_or_path(PathBuf::from(
+            path_output(&output.stdout),
+        ))),
+        Ok(output) => {
+            diagnostics.push(ContextDiagnostic::error(
+                "git_metadata_invalid",
+                format_probe_failure(&format!("Git {field} could not be read"), &output),
+            ));
+            None
+        }
+        Err(error) => {
+            diagnostics.push(ContextDiagnostic::error(
+                "git_unavailable",
+                format!("could not read Git {field}: {}", error.error),
+            ));
+            None
+        }
+    }
 }
 
 impl GitProbe {
@@ -312,7 +314,7 @@ fn probe_jj(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> JjProbe {
         return JjProbe::default();
     }
 
-    let workspace_root = canonical_or_path(PathBuf::from(trimmed(&root.stdout)));
+    let workspace_root = canonical_or_path(PathBuf::from(path_output(&root.stdout)));
     let repository_path = match repository_path(&workspace_root) {
         Ok(path) => Some(path),
         Err(message) => {
@@ -479,7 +481,7 @@ fn jj_git_backend(
         // make the JJ identity unusable.
         return (None, None);
     }
-    let raw = trimmed(&output.stdout);
+    let raw = path_output(&output.stdout);
     if raw.is_empty() {
         diagnostics.push(ContextDiagnostic::warning(
             "jj_git_backend_invalid",
@@ -517,7 +519,7 @@ fn git_common_dir_for_backend(git_dir: &Path) -> Result<PathBuf, String> {
             &output,
         ));
     }
-    let common_dir = trimmed(&output.stdout);
+    let common_dir = path_output(&output.stdout);
     if common_dir.is_empty() {
         return Err("Git backend common directory query returned an empty path".to_owned());
     }
@@ -562,7 +564,7 @@ fn workspace_root_for(path: &Path, name: &str) -> Result<PathBuf, String> {
     if !output.status.success() {
         return Err(format_probe_failure("JJ workspace root failed", &output));
     }
-    let root = trimmed(&output.stdout);
+    let root = path_output(&output.stdout);
     if root.is_empty() {
         return Err("JJ workspace root query returned an empty path".to_owned());
     }
@@ -627,6 +629,7 @@ where
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
     ] {
         command.env_remove(variable);
     }
@@ -653,6 +656,7 @@ where
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
     ] {
         command.env_remove(variable);
     }
@@ -734,9 +738,17 @@ fn nonempty_lines(bytes: &[u8]) -> Vec<&str> {
     std::str::from_utf8(bytes)
         .unwrap_or_default()
         .lines()
-        .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+// CLI path output adds one line terminator; whitespace belongs to the path.
+fn path_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let path = text.strip_suffix('\n').unwrap_or(&text);
+    #[cfg(windows)]
+    let path = path.strip_suffix('\r').unwrap_or(path);
+    path.to_owned()
 }
 
 fn trimmed(bytes: &[u8]) -> String {
