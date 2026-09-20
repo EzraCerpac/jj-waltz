@@ -42,6 +42,12 @@ offline.
 - `links` owns config merging, path confinement, link classification, preflight,
   and filesystem changes.
 - `shell` owns shared shell behavior. Each shell adapter varies syntax, not policy.
+- `manager` owns the interactive terminal adapter. `manager::ui` owns the Ratatui
+  0.30.2 event loop, rendering, keyboard/mouse input, search, and multi-selection;
+  it uses Ratatui's crossterm re-export and remains compatible with Rust 1.88.
+  `manager::status` derives display state from completed snapshots, while
+  `manager::removal` plans and executes eligible removals and
+  `manager::preferences` persists the user-local bookmark policy.
 - `plugins/herdr` is a separate Cargo workspace and a UI adapter over `jw`. Its
   removal workflow closes Herdr before deleting provenance.
 
@@ -60,6 +66,11 @@ execution. Lifecycle services own the port contracts; concrete adapters implemen
 them and translate external results back into domain values. A separate-process
 view such as Herdr crosses through the CLI/JSON boundary. Renderers consume
 completed snapshots or plans and never run their own JJ queries.
+
+The interactive manager is another renderer and action adapter at this boundary.
+It does not introduce a second repository model or a second JSON contract. Search
+and selection stay in manager state; repository services receive named targets and
+return completed per-target outcomes.
 
 Do not create one source directory per conceptual noun. Existing deep modules can
 own these responsibilities until a split reduces coupling.
@@ -171,6 +182,42 @@ An existing managed record whose workspace path is stale or missing still appear
 doctor's workspace checks; link inspection for that record is `SKIP` because the
 receiving root cannot be read. This keeps the workspace failure visible without
 guessing at paths.
+
+## Interactive manager boundaries
+
+The manager compares recorded bookmark targets and workspace publish tips with
+resolved trunk independently. Only local ancestry establishes “in trunk”; a squash
+merge is not inferred. Unmanaged workspaces have no authoritative association.
+The existing JSON schema and CLI status contracts remain unchanged.
+
+The UI renders immediately, then receives completed snapshots from one background
+worker. Search, selection, and rendering do not start JJ processes. Explicit
+inspection and removal preparation refresh named working copies; browsing does
+not. Generation IDs reject obsolete results. Repository-changing work is serialized
+and must finish before switching or exiting; terminal state is restored on failure.
+
+Removal previews list every target and its directory, associated local bookmark,
+risks, and ignored content. Default/current workspaces and unsafe or unreadable
+identities are blocked. Risky rows require explicit inclusion; ignored content
+requires one batch acknowledgement. The final check compares filesystem identity,
+workspace revision, metadata, bookmark targets, and ignored-file inventory with
+the reviewed plan. Changed targets require another review. Independent targets
+continue after failure, and outcomes describe any partial progress. A directory
+removal is permanent; JJ history cannot restore unrecorded files.
+
+Bookmarks associated with surviving managed workspaces are retained. The last
+confirmed keep/delete choice is user-global state in
+`$XDG_STATE_HOME/jj-waltz/ui.json`, falling back to
+`~/.local/state/jj-waltz/ui.json`. It is separate from static configuration and uses
+the existing atomic file writer. Network and remote bookmark operations are absent.
+
+Shell adapters reserve stdout for a selected destination through `--ui-path`;
+the interface and diagnostics use stderr. Cancellation emits no destination.
+The initial screen clear also uses stderr: Ratatui's cursor-preserving clear
+queries the cursor through stdout and cannot be used on the captured path channel.
+
+Keep Ratatui and its crossterm re-export inside the terminal adapter. Lifecycle
+services own creation and switching; doctor supplies read-only health results.
 
 ## JSON schema version 1
 

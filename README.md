@@ -38,6 +38,7 @@ to a warning rather than make local workspace management fail.
 - `jw list` (`jw l`, `jw ls`) keeps its compact legacy output; `--format=json` emits a frozen repository snapshot
 - `jw status [workspace]` explains one workspace from the same snapshot contract
 - `jw doctor` reports repository, trunk, metadata, and workspace consistency checks
+- `jw` opens the interactive workspace manager in a terminal; `jw ui` selects it explicitly
 - `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
 - `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
 - `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
@@ -180,6 +181,55 @@ jw doctor
 jw remove frontend tests
 ```
 
+## Interactive workspace manager
+
+In a terminal, bare `jw` opens the Ratatui workspace manager by default. The
+bare command can instead run the legacy list or help view through the top-level
+config setting:
+
+```toml
+default_command = "ui" # "ui", "list", or "help"
+```
+
+A bare invocation outside a terminal prints help; explicit `jw ui` requires a
+terminal. Build from source with Rust 1.88 or newer.
+
+Use arrows or `j/k` to move, `Space` to mark a row, `a` to select visible rows,
+`c` to clear selection, `/` to search, and `?` for help. Click a checkbox to select
+with the mouse. Selections survive searches and filters; the header counts hidden
+selections too. `Enter` switches to the highlighted workspace and exits.
+Re-source `jw shell init ...` after updating to enable this shell behavior.
+
+`f` cycles filters; `1`–`4` select all, integrated bookmarks, unfinished work, or
+problems. Bookmark integration and workspace work are separate columns: a merged
+bookmark can still have newer workspace work. “In trunk” means local graph
+ancestry, not squash-merge equivalence or GitHub merge status. The resolved trunk
+is shown above the table. File state starts as unchecked; `i` refreshes the
+highlighted workspace, and removal refreshes its selected targets.
+
+`n` creates a workspace from an editable trunk, highlighted-workspace, or custom
+revision. `h` opens the read-only health report, `y` requests copying the path via
+the terminal clipboard protocol, and `Tab` opens details on narrow terminals.
+Clipboard support depends on the terminal; the path is also shown in the notice.
+
+`d` previews removal of the marked rows, or the highlighted row when none are
+marked. `p` previews pruning confirmed missing directories. Current and default
+workspaces cannot be removed by the manager. Risky rows are excluded initially;
+`r` explicitly includes them. `i` acknowledges deleting the listed ignored or
+unrecorded content. Directory deletion is permanent, including ignored files.
+JJ's operation log is not a full undo for directory removal.
+
+In the preview, `b` toggles keeping or deleting eligible associated **local**
+bookmarks. The last confirmed choice is remembered across repositories in
+`$XDG_STATE_HOME/jj-waltz/ui.json`, falling back to
+`~/.local/state/jj-waltz/ui.json`. The initial choice is keep. Bookmarks associated
+with surviving managed workspaces are preserved; remote bookmarks are untouched.
+
+Each target is revalidated before mutation. Changed targets require another
+review. Independent rows continue after a failure; results identify partial
+progress, and failed rows remain selected for an explicit retry. No batch rollback
+or automatic repair is performed.
+
 ## Removing workspaces
 
 When a workspace has a bookmark created by `jw`, `jw remove` asks before deleting
@@ -294,6 +344,13 @@ the oldest supported release, 0.39.0, and newer compatibility targets, 0.44.0
 and 0.45.1, instead of following a moving `latest` label. On JJ 0.45 and newer,
 doctor's divergence remedy can use `jj converge --no-interactive`; older supported
 versions retain the manual merge-or-abandon guidance.
+
+## Development checks
+
+Run `cargo test --locked --all-targets` for the Rust tests. On Unix, build with
+`cargo build --locked`, then run `uv run --with pyte tests/terminal_ui.py` for
+real terminal interaction, shell switching, terminal restoration, and a
+50-workspace responsiveness check. The terminal checks use disposable repositories.
 
 ## AI usage note
 

@@ -773,10 +773,12 @@ pub(crate) fn workspace_base_root(current_root: &Path, current_name: &str) -> Re
     if current_name != "default" && base.ends_with(&suffix) {
         let new_len = base.len() - suffix.len();
         base.truncate(new_len);
-    } else if current_name != "default" && base == current_name && base.contains('.') {
-        if let Some((prefix, _)) = base.rsplit_once('.') {
-            base = prefix.to_owned();
-        }
+    } else if current_name != "default"
+        && base == current_name
+        && base.contains('.')
+        && let Some((prefix, _)) = base.rsplit_once('.')
+    {
+        base = prefix.to_owned();
     }
 
     Ok(parent.join(base))

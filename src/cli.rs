@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, DefaultCommand};
 use crate::context;
 use crate::doctor::DoctorEngine;
 use crate::jj::JjClient;
@@ -17,7 +17,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -26,16 +26,20 @@ use std::process::{Command, Stdio};
     name = "jw",
     version,
     about = "Jujutsu workspace switching",
-    long_about = None,
-    arg_required_else_help = true
+    long_about = None
 )]
 pub struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+    /// Shell adapters reserve stdout for a selected workspace path.
+    #[arg(long, hide = true, global = true)]
+    ui_path: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Open the interactive workspace manager")]
+    Ui,
     #[command(about = "Describe Git and JJ checkout context")]
     Context(ContextCommand),
     #[command(about = "Create one or more workspaces")]
@@ -354,7 +358,11 @@ pub fn run() -> Result<()> {
     shell::complete_if_requested(Cli::command);
     let cli = Cli::parse_from(normalized_args());
 
-    let result = match cli.command {
+    let Some(command) = cli.command else {
+        return run_default(cli.ui_path).map_err(context::add_workspace_hint);
+    };
+    let result = match command {
+        Commands::Ui => run_ui(cli.ui_path),
         Commands::Context(cmd) => run_context(cmd),
         Commands::Add(cmd) => run_add(cmd),
         Commands::Switch(cmd) => run_switch(cmd),
@@ -375,6 +383,67 @@ pub fn run() -> Result<()> {
         Commands::Completions(cmd) => run_completions(cmd.shell),
     };
     result.map_err(context::add_workspace_hint)
+}
+
+fn print_help(shell_path: bool) -> Result<()> {
+    let help = Cli::command().render_help().to_string();
+    if shell_path {
+        writeln!(io::stderr(), "{help}")?;
+    } else {
+        print_line(help)?;
+    }
+    Ok(())
+}
+
+fn run_default(shell_path: bool) -> Result<()> {
+    // Pipes and scripts never unexpectedly enter raw terminal mode, even if config says `ui`.
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return print_help(shell_path);
+    }
+    match Config::load()?.default_command {
+        DefaultCommand::Ui => run_ui(shell_path),
+        DefaultCommand::Help => print_help(shell_path),
+        DefaultCommand::List => {
+            if shell_path {
+                write!(io::stderr(), "{}", render_list_plain()?)?;
+                Ok(())
+            } else {
+                run_list_plain()
+            }
+        }
+    }
+}
+
+fn run_ui(shell_path: bool) -> Result<()> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        bail!("jw ui requires a terminal on stdin and stderr; use jw list for scripts")
+    }
+    let config = Config::load()?;
+    validate_trunk_revset(&config.trunk.revset)?;
+    let Some(name) = crate::manager::run(&config.trunk.revset)? else {
+        return Ok(());
+    };
+    // A selected row must still exist. Do not let switch's create-if-missing policy recreate it.
+    let inventory = workspace::WorkspaceInventory::load()?;
+    if !inventory.entries().iter().any(|entry| entry.name == name) {
+        bail!("selected workspace `{name}` no longer exists; reopen the manager")
+    }
+    run_switch(SwitchCommand {
+        names: vec![name],
+        at: None,
+        bookmark: None,
+        no_bookmark: false,
+        execute: None,
+        print_path: true,
+        no_links: false,
+        execute_args: Vec::new(),
+    })?;
+    if !shell_path {
+        eprintln!(
+            "The destination is printed above. Enable `jw shell init <shell>` to change your shell directory automatically."
+        );
+    }
+    Ok(())
 }
 
 fn run_context(cmd: ContextCommand) -> Result<()> {
@@ -618,7 +687,12 @@ fn run_list(cmd: ListCommand) -> Result<()> {
 // Compatibility contract: plain list remains the pre-snapshot implementation. In particular, it
 // does not load config, metadata, or trunk and therefore keeps its exact historical output.
 fn run_list_plain() -> Result<()> {
+    write_text(&render_list_plain()?)
+}
+
+fn render_list_plain() -> Result<String> {
     let inventory = workspace::WorkspaceInventory::load()?;
+    let mut output = String::new();
     for entry in inventory.entries() {
         let marker = inventory.marker(&entry.name);
 
@@ -627,10 +701,10 @@ fn run_list_plain() -> Result<()> {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "(missing)".to_owned());
-        println!("{marker} {}\t{path}", entry.name);
+        writeln!(output, "{marker} {}\t{path}", entry.name).expect("write string");
     }
 
-    Ok(())
+    Ok(output)
 }
 
 fn run_status(cmd: StatusCommand) -> Result<()> {

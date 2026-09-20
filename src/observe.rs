@@ -2,7 +2,7 @@ use crate::jj::{JjClient, JjCommandError, JjErrorKind, WorkspaceTargetFacts};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use crate::snapshot::{
     Hazard, HazardId, ManagementState, RepositorySnapshot, ResolvedTrunk, SnapshotCommand,
-    SnapshotEnvelope, WorkingCopyStatus, WorkspaceRole, WorkspaceSnapshot,
+    SnapshotEnvelope, SnapshotWarning, WorkingCopyStatus, WorkspaceRole, WorkspaceSnapshot,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,6 +74,21 @@ impl ObservationEngine {
         self.capture(CaptureSelection::List, refresh)
     }
 
+    /// Captures the complete list after refreshing only the explicitly named workspaces.
+    ///
+    /// Keeping the refresh set inside the capture loop means inventory, refreshes, and the final
+    /// frozen operation are still one observation, while avoiding one full inventory pass per
+    /// target.
+    pub(crate) fn capture_list_named(&self, names: &[String]) -> Result<SnapshotEnvelope> {
+        let names = names.iter().cloned().collect();
+        self.capture_with_named_refresh(
+            CaptureSelection::List,
+            RefreshMode::None,
+            Some(&names),
+            true,
+        )
+    }
+
     /// Capture one workspace. `workspace` accepts `@` for current, `-` for previous, and `^` or
     /// `default` for default. Any other value is treated as a literal workspace name.
     pub fn capture_status(
@@ -89,14 +104,30 @@ impl ObservationEngine {
         selection: CaptureSelection,
         refresh: RefreshMode,
     ) -> Result<SnapshotEnvelope> {
+        self.capture_with_named_refresh(selection, refresh, None, false)
+    }
+
+    fn capture_with_named_refresh(
+        &self,
+        selection: CaptureSelection,
+        refresh: RefreshMode,
+        named_refresh: Option<&BTreeSet<String>>,
+        manager_fast_path: bool,
+    ) -> Result<SnapshotEnvelope> {
         let mut last_drift = None;
 
         for attempt in 0..CAPTURE_ATTEMPTS {
+            let before_refresh_operation = manager_fast_path
+                .then(|| self.client.operation_id())
+                .transpose()?;
             let inventory = PreliminaryInventory::discover(&self.client)?;
             let resolved_selection = selection.resolve(&inventory)?;
 
-            let refresh_names = resolved_selection.refresh_names(&inventory, refresh);
-            let refresh_states = self.refresh_sequentially(&inventory, &refresh_names)?;
+            let refresh_names = named_refresh
+                .cloned()
+                .unwrap_or_else(|| resolved_selection.refresh_names(&inventory, refresh));
+            let (refresh_states, refresh_warnings) =
+                self.refresh_sequentially(&inventory, &refresh_names, named_refresh.is_some())?;
 
             let operation_id = self.client.operation_id()?;
             let captured_at_unix_ms = unix_time_ms()?;
@@ -132,8 +163,13 @@ impl ObservationEngine {
                     )
                 })?;
 
-            let final_paths =
-                self.workspace_paths_at(&operation_id, final_facts.keys(), &inventory.current)?;
+            let final_paths = if manager_fast_path
+                && before_refresh_operation.as_deref() == Some(operation_id.as_str())
+            {
+                inventory.roots.clone()
+            } else {
+                self.workspace_paths_at(&operation_id, final_facts.keys(), &inventory.current)?
+            };
 
             // One metadata read per successful capture. All joins and status derivation after this
             // point happen in memory; creation-base existence is queried at the frozen operation.
@@ -143,8 +179,11 @@ impl ObservationEngine {
                 .into_iter()
                 .map(|entry| (entry.workspace_name.clone(), entry))
                 .collect::<BTreeMap<_, _>>();
-            let missing_creation_bases =
-                self.missing_creation_bases_at(&operation_id, &metadata, final_facts.keys());
+            let missing_creation_bases = if manager_fast_path {
+                self.missing_creation_bases_batched_at(&operation_id, &metadata, final_facts.keys())
+            } else {
+                self.missing_creation_bases_at(&operation_id, &metadata, final_facts.keys())
+            };
 
             let workspaces = resolved_selection
                 .selected_facts(&final_facts)?
@@ -179,7 +218,7 @@ impl ObservationEngine {
                     },
                 },
                 workspaces,
-                Vec::new(),
+                refresh_warnings,
             ));
         }
 
@@ -195,10 +234,15 @@ impl ObservationEngine {
         &self,
         inventory: &PreliminaryInventory,
         selected: &BTreeSet<String>,
-    ) -> Result<BTreeMap<String, RefreshState>> {
+        tolerate_errors: bool,
+    ) -> Result<(BTreeMap<String, RefreshState>, Vec<SnapshotWarning>)> {
         let mut states = BTreeMap::new();
+        let mut warnings = Vec::new();
         for name in selected {
-            let Some(root) = inventory.roots.get(name).and_then(Option::as_deref) else {
+            let Some(root_entry) = inventory.roots.get(name) else {
+                bail!("refresh target is not a JJ workspace: {name}")
+            };
+            let Some(root) = root_entry.as_deref() else {
                 continue;
             };
             let workspace_client = JjClient::new(root);
@@ -209,6 +253,12 @@ impl ObservationEngine {
                 Err(error) if is_stale_working_copy_error(&error) => {
                     states.insert(name.clone(), RefreshState::Stale);
                 }
+                Err(error) if tolerate_errors => {
+                    warnings.push(SnapshotWarning::new(
+                        format!("refresh-failed:{name}"),
+                        format!("failed to refresh workspace `{name}`: {error:#}"),
+                    ));
+                }
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("failed to refresh workspace `{name}` at {}", root.display())
@@ -216,7 +266,7 @@ impl ObservationEngine {
                 }
             }
         }
-        Ok(states)
+        Ok((states, warnings))
     }
 
     fn workspace_facts_at(
@@ -260,6 +310,78 @@ impl ObservationEngine {
             })
             .collect()
     }
+
+    /// Checks all managed creation bases with one frozen graph query for manager captures.
+    ///
+    /// Metadata stores exact commit IDs. Invalid IDs are therefore known missing without a JJ
+    /// query; an unexpected batch-query failure falls back to the older per-record probes so a
+    /// malformed record still degrades to a hazard instead of aborting the complete snapshot.
+    fn missing_creation_bases_batched_at<'a>(
+        &self,
+        operation_id: &str,
+        metadata: &BTreeMap<String, ManagedWorkspaceMetadata>,
+        workspace_names: impl Iterator<Item = &'a String>,
+    ) -> BTreeSet<String> {
+        let workspace_names = workspace_names.collect::<Vec<_>>();
+        let mut valid_ids = BTreeSet::new();
+        let mut missing = BTreeSet::new();
+        for name in &workspace_names {
+            let Some(entry) = metadata.get(*name) else {
+                continue;
+            };
+            if is_commit_id(&entry.creation_base_commit_id) {
+                valid_ids.insert(entry.creation_base_commit_id.clone());
+            } else {
+                missing.insert((*name).clone());
+            }
+        }
+        if valid_ids.is_empty() {
+            return missing;
+        }
+
+        let revset = valid_ids
+            .iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let query = self.client.run_at(
+            operation_id,
+            [
+                "log",
+                "-r",
+                revset.as_str(),
+                "--no-graph",
+                "--template",
+                "commit_id ++ \"\\n\"",
+            ],
+        );
+        let resolved = match query.and_then(|output| output.stdout().map(str::to_owned)) {
+            Ok(output) => output
+                .lines()
+                .map(ToOwned::to_owned)
+                .collect::<BTreeSet<_>>(),
+            Err(_) => {
+                return self.missing_creation_bases_at(
+                    operation_id,
+                    metadata,
+                    workspace_names.into_iter(),
+                );
+            }
+        };
+        for name in workspace_names {
+            let Some(entry) = metadata.get(name) else {
+                continue;
+            };
+            if !resolved.contains(&entry.creation_base_commit_id) {
+                missing.insert(name.clone());
+            }
+        }
+        missing
+    }
+}
+
+fn is_commit_id(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone)]
@@ -608,10 +730,12 @@ fn derive_default_workspace(
     let suffix = format!(".{current}");
     if current != "default" && base.ends_with(&suffix) {
         base.truncate(base.len() - suffix.len());
-    } else if current != "default" && base == current && base.contains('.') {
-        if let Some((prefix, _)) = base.rsplit_once('.') {
-            base = prefix.to_owned();
-        }
+    } else if current != "default"
+        && base == current
+        && base.contains('.')
+        && let Some((prefix, _)) = base.rsplit_once('.')
+    {
+        base = prefix.to_owned();
     }
     let base_root = parent.join(base);
     Ok(

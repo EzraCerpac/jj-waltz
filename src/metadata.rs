@@ -616,7 +616,7 @@ fn is_manifest_temporary_file(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|name| name.starts_with(&format!(".{MANIFEST_FILE}.tmp-")))
 }
 
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     #[cfg(test)]
     if FAIL_NEXT_ATOMIC_WRITE.with(|failure| failure.replace(false)) {
         bail!("injected atomic metadata write failure");
