@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in copy-on-write workspace creation with `jw add --cow`,
+  `jw switch --cow`, or `workspace.copy_on_write = true`. New workspaces clone
+  the current workspace's tracked files on APFS, Btrfs, or XFS and match a full
+  checkout of the creation base. Unsupported filesystems fall back to a full
+  checkout with a warning; `--no-cow` opts out for one command.
+
 ## Version 0.6.1 (2026-09-07)
 
 - Preserve whitespace in checkout and workspace paths reported by `jw context`.

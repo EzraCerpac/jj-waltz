@@ -44,6 +44,7 @@ to a warning rather than make local workspace management fail.
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
+- optional copy-on-write workspace creation (`--cow`) on APFS, Btrfs, and XFS
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
 
@@ -128,6 +129,31 @@ by a private path or wrong link is `FAIL`. An optional missing target is `WARN`/
 only when the source is absent or is the correct dangling link. A managed workspace
 whose path is stale or missing gets a separate workspace diagnostic and link inspection
 is `SKIP`.
+
+## Copy-on-write workspaces
+
+`jw add --cow` and `jw switch --cow` fill a new workspace by cloning the current
+workspace's tracked files instead of letting JJ write each one. Clones share
+storage until either copy changes: APFS `clonefile(2)` on macOS and reflinks on
+Linux filesystems such as Btrfs and XFS. Creation is typically several times
+faster, and a new workspace uses almost no extra disk space. Enable it for every
+new workspace in config, and use `--no-cow` to opt out for one command:
+
+```toml
+[workspace]
+copy_on_write = true
+```
+
+The result is the same as a full checkout. Only files JJ tracks are cloned, so
+ignored and untracked files such as `.env` or `node_modules` never reach the new
+workspace; use [workspace links](#workspace-links) to share those. JJ adopts the
+clone with the current workspace's working-copy state, then `jw` restores `@` from
+its parent, so uncommitted edits in the current workspace never leak into the new
+one.
+
+When the filesystem cannot clone, `jw` warns and falls back to a full checkout.
+With watchman configured as JJ's filesystem monitor, JJ hashes the cloned files
+instead of reusing the working-copy state.
 
 ## Shell setup
 

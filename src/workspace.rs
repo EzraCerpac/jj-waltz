@@ -1,4 +1,5 @@
-use crate::jj::JjClient;
+use crate::cow;
+use crate::jj::{self, JjClient};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
@@ -41,6 +42,8 @@ pub struct AddOptions {
     /// Full commit ID resolved before any workspace mutation.
     pub base_commit_id: String,
     pub bookmark: Option<String>,
+    /// Clone tracked files from this checkout root instead of letting JJ write them.
+    pub clone_from: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,29 +512,31 @@ fn add_workspace_by_name_with_inventory(
     args.push("--revision".to_owned());
     args.push(options.base_commit_id.clone());
 
+    if options.clone_from.is_some() {
+        // JJ writes no files; the clone below supplies them.
+        args.push("--sparse-patterns".to_owned());
+        args.push("empty".to_owned());
+    }
+
     args.push(path.display().to_string());
     let client = JjClient::current()?;
     client.run(&args)?;
 
+    if let Some(source) = &options.clone_from
+        && let Err(error) = materialize_clone(source, &path)
+    {
+        return Err(rollback_failed_add(error, name, &path, None));
+    }
+
     // Capture provenance before bookmark creation records another JJ operation.
     let creation_operation_id = match client.operation_id() {
         Ok(operation_id) => operation_id,
-        Err(error) => {
-            let cleanup = rollback_workspace_parts(name, &path, None).err();
-            if let Some(cleanup) = cleanup {
-                bail!("{error}; cleanup also failed: {cleanup}")
-            }
-            bail!(error)
-        }
+        Err(error) => return Err(rollback_failed_add(error, name, &path, None)),
     };
 
     if let Some(bookmark) = &options.bookmark {
         if let Err(error) = JjClient::new(&path).run(["bookmark", "create", bookmark, "-r", "@"]) {
-            let cleanup = rollback_workspace_parts(name, &path, None).err();
-            if let Some(cleanup) = cleanup {
-                bail!("{error}; cleanup also failed: {cleanup}")
-            }
-            bail!(error)
+            return Err(rollback_failed_add(error, name, &path, None));
         }
         if let Err(error) = fs::write(workspace_bookmark_file(&path), format!("{bookmark}\n")) {
             let cleanup = rollback_workspace_parts(name, &path, Some(bookmark)).err();
@@ -551,6 +556,62 @@ fn add_workspace_by_name_with_inventory(
         creation_operation_id,
         creation_base_commit_id: options.base_commit_id.clone(),
     })
+}
+
+/// Fill a sparse-empty workspace from a copy-on-write clone of another checkout.
+///
+/// Only the files JJ tracks in the source's working-copy commit are cloned, so
+/// ignored and untracked files never reach the new workspace. JJ adopts the clone
+/// through the source's working-copy state, or by expanding the sparse patterns
+/// when it rejects that state. Restoring `@` from its parent then rewrites every
+/// file that differs from the creation base, so the result matches a full checkout.
+fn materialize_clone(source_root: &Path, path: &Path) -> Result<()> {
+    let files = JjClient::new(source_root).tracked_files()?;
+    cow::clone_files(source_root, &files, path).with_context(|| {
+        format!(
+            "failed to clone files from {}; retry with --no-cow for a full checkout",
+            source_root.display()
+        )
+    })?;
+    let client = JjClient::new(path);
+    if !adopt_source_tree_state(&client, source_root, path)? {
+        // JJ skips files that already exist on disk while expanding the sparse
+        // patterns, then hashes every one of them in the next snapshot.
+        client.run(["sparse", "reset"])?;
+    }
+    client.run(["restore"])?;
+    Ok(())
+}
+
+/// Let the new workspace reuse the source checkout's working-copy state.
+///
+/// The clone preserves sizes and modification times, so JJ's snapshot only stats
+/// files instead of hashing them. The copied state also carries the source's
+/// sparse patterns, matching `jj workspace add`'s default. Returns `false` when
+/// JJ rejects the copied state and must hash every file instead.
+fn adopt_source_tree_state(client: &JjClient, source_root: &Path, path: &Path) -> Result<bool> {
+    if client.uses_watchman()? {
+        return Ok(false);
+    }
+    let previous = jj::copy_tree_state(source_root, path)?;
+    if client.run(["status"]).is_ok() {
+        return Ok(true);
+    }
+    jj::write_tree_state(path, &previous)?;
+    Ok(false)
+}
+
+fn rollback_failed_add(
+    error: impl Into<anyhow::Error>,
+    name: &str,
+    path: &Path,
+    bookmark: Option<&str>,
+) -> anyhow::Error {
+    let error = error.into();
+    match rollback_workspace_parts(name, path, bookmark) {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!("cleanup also failed: {cleanup}")),
+    }
 }
 
 pub(crate) fn preflight_add_workspace(inventory: &WorkspaceInventory, name: &str) -> Result<()> {
@@ -744,7 +805,10 @@ pub(crate) fn legacy_workspace_bookmark(root: &Path) -> Result<Option<String>> {
     }
 }
 
-fn workspace_dir_for_name(name: &str, inventory: &WorkspaceInventory) -> Result<PathBuf> {
+pub(crate) fn workspace_dir_for_name(
+    name: &str,
+    inventory: &WorkspaceInventory,
+) -> Result<PathBuf> {
     let default_root = workspace_base_root(inventory.current_root(), inventory.current_name())?;
     if name == "default" {
         Ok(default_root)

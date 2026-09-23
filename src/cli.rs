@@ -103,6 +103,19 @@ struct AddCommand {
     no_bookmark: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
     no_links: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_cow",
+        help = "Clone new workspace files from the current workspace with copy-on-write"
+    )]
+    cow: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Let JJ write every file of a new workspace, ignoring config"
+    )]
+    no_cow: bool,
 }
 
 #[derive(Debug, Args)]
@@ -144,6 +157,19 @@ struct SwitchCommand {
     print_path: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
     no_links: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_cow",
+        help = "Clone new workspace files from the current workspace with copy-on-write"
+    )]
+    cow: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Let JJ write every file of a new workspace, ignoring config"
+    )]
+    no_cow: bool,
     #[arg(last = true)]
     execute_args: Vec<String>,
 }
@@ -514,10 +540,13 @@ fn run_add(cmd: AddCommand) -> Result<()> {
         cmd.bookmark,
         cmd.no_bookmark,
         cmd.no_links,
+        copy_on_write_override(cmd.cow, cmd.no_cow),
         cmd.names.len(),
     )?;
-    for created in lifecycle::add_workspaces(&cmd.names, &policy)? {
-        print_created_workspace(&created, false);
+    let outcome = lifecycle::add_workspaces(&cmd.names, &policy)?;
+    print_warnings(&outcome.warnings);
+    for created in &outcome.created {
+        print_created_workspace(created, false);
     }
 
     Ok(())
@@ -532,9 +561,11 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         cmd.bookmark,
         cmd.no_bookmark,
         cmd.no_links,
+        copy_on_write_override(cmd.cow, cmd.no_cow),
         cmd.names.len(),
     )?;
     let outcome = lifecycle::switch_workspaces(&cmd.names, &policy)?;
+    print_warnings(&outcome.warnings);
     for created in &outcome.intermediate {
         if !cmd.print_path {
             print_created_workspace(created, false);
@@ -572,6 +603,20 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         println!("  bookmark: {bookmark}");
     }
     Ok(())
+}
+
+fn copy_on_write_override(cow: bool, no_cow: bool) -> Option<bool> {
+    match (cow, no_cow) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+fn print_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("jw: warning: {warning}");
+    }
 }
 
 fn print_created_workspace(created: &CreatedWorkspace, quiet: bool) {

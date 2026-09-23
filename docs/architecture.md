@@ -39,6 +39,11 @@ offline.
   including configured-link health for every managed workspace.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
+- `cow` owns copy-on-write file cloning and filesystem capability probing. The
+  `workspace` module orchestrates JJ adoption of the clone. The `jj` adapter owns
+  listing tracked files and reading and writing JJ's local working-copy state,
+  which is not a public interface: every copied state is validated by JJ and
+  replaced on rejection.
 - `links` owns config merging, path confinement, link classification, preflight,
   and filesystem changes.
 - `shell` owns shared shell behavior. Each shell adapter varies syntax, not policy.
@@ -214,6 +219,18 @@ snapshot and does not inspect link health.
 
 Metadata repair is a human lifecycle command. It does not add a JSON schema or link
 health field to `jw status`.
+
+## Copy-on-write creation
+
+When copy-on-write is requested, creation probes the destination filesystem before
+any mutation and falls back to a full checkout with a warning if it cannot clone.
+Otherwise it adds the workspace with empty sparse patterns, clones the files JJ
+tracks in the current workspace's working-copy commit, and copies the current
+workspace's working-copy state. Ignored and untracked files are never cloned.
+A JJ snapshot validates the copied state; if JJ rejects it, the previous state is
+restored and `jj sparse reset` adopts the files by hashing them instead. `jj
+restore` then makes `@` match the creation base exactly before provenance is
+captured, so the recorded creation operation describes a complete checkout.
 
 ## Failure order
 
