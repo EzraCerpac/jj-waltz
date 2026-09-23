@@ -1,6 +1,7 @@
 pub mod cli;
 pub(crate) mod config;
 pub mod context;
+pub(crate) mod cow;
 pub mod doctor;
 pub mod jj;
 pub(crate) mod lifecycle;

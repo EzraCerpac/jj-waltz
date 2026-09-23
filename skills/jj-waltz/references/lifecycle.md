@@ -50,6 +50,14 @@ Complete recovery when the requested change IDs have no remaining unexpected
 divergence or conflicts, affected descendants and bookmarks are understood, and the
 operation diff matches the intended repair.
 
+## Copy-on-write creation
+
+`jw add --cow` and `jw switch --cow` clone the current workspace's tracked files
+into the new workspace on APFS, Btrfs, or XFS. `workspace.copy_on_write = true`
+makes it the default; `--no-cow` opts out. The result matches a full checkout of
+the creation base: ignored and untracked files are not carried over. A warning on
+stderr means the filesystem could not clone and a full checkout was used.
+
 ## Adopt
 
 `jw adopt <name> --base <revset>` records an existing JJ workspace as managed. It records lifecycle metadata; it does not move revisions, move or create bookmarks, or refresh the working copy.
