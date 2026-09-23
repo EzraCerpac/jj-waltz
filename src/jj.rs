@@ -20,6 +20,7 @@ const REVISION_TEMPLATE: &str =
     "change_id ++ \"\\0\" ++ commit_id ++ \"\\0\" ++ description.first_line() ++ \"\\0\"";
 const LOCAL_BOOKMARK_NAMES_TEMPLATE: &str = r#"if(remote, "", json(name) ++ "\n")"#;
 const BOOKMARK_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
+const TRACKED_FILES_TEMPLATE: &str = r#"json(path) ++ "\n""#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjVersion {
@@ -544,6 +545,39 @@ impl JjClient {
         Ok(PathBuf::from(value))
     }
 
+    /// List the files tracked in this workspace's working-copy commit, relative to
+    /// the workspace root, without snapshotting the working copy.
+    pub fn tracked_files(&self) -> Result<Vec<PathBuf>> {
+        let output = self.run([
+            "--ignore-working-copy",
+            "file",
+            "list",
+            "-r",
+            "@",
+            "-T",
+            TRACKED_FILES_TEMPLATE,
+        ])?;
+        // JJ repository paths are always `/`-separated, independent of platform.
+        Ok(parse_json_string_lines(output.stdout()?, "file path")?
+            .into_iter()
+            .map(|path| path.split('/').collect())
+            .collect())
+    }
+
+    /// Whether the watchman filesystem monitor is configured.
+    ///
+    /// Watchman's clock is recorded in the working-copy state and only describes the
+    /// checkout that recorded it.
+    pub fn uses_watchman(&self) -> Result<bool> {
+        let output = self.run_unchecked([
+            "--ignore-working-copy",
+            "config",
+            "get",
+            "fsmonitor.backend",
+        ])?;
+        Ok(output.success() && output.trimmed_stdout()? == "watchman")
+    }
+
     fn execute(&self, args: &[OsString]) -> Result<JjOutput> {
         let output = Command::new("jj")
             .current_dir(&self.cwd)
@@ -559,6 +593,41 @@ impl JjClient {
             })?;
         Ok(JjOutput { output })
     }
+}
+
+/// Replace a workspace's local working-copy state with a copy of another workspace's,
+/// returning the replaced state.
+///
+/// The state records the checked-out tree, sparse patterns, and each file's size and
+/// modification time, which lets JJ trust unchanged files without hashing them. Its
+/// location is JJ's local working-copy layout rather than a public interface, so
+/// callers must validate the result with a JJ command and restore the returned state
+/// if JJ rejects it.
+pub fn copy_tree_state(source_root: &Path, workspace_root: &Path) -> Result<Vec<u8>> {
+    let source = tree_state_path(source_root);
+    let state =
+        std::fs::read(&source).with_context(|| format!("failed to read {}", source.display()))?;
+    let previous = std::fs::read(tree_state_path(workspace_root)).with_context(|| {
+        format!(
+            "failed to read working-copy state in {}",
+            workspace_root.display()
+        )
+    })?;
+    write_tree_state(workspace_root, &state)?;
+    Ok(previous)
+}
+
+/// Write a workspace's local working-copy state, as returned by [`copy_tree_state`].
+pub fn write_tree_state(workspace_root: &Path, state: &[u8]) -> Result<()> {
+    let path = tree_state_path(workspace_root);
+    std::fs::write(&path, state).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn tree_state_path(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .join(".jj")
+        .join("working_copy")
+        .join("tree_state")
 }
 
 fn collect_args<I, S>(args: I) -> Vec<OsString>
