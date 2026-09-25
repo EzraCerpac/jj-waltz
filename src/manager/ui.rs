@@ -820,6 +820,12 @@ impl App {
             WorkerReply::Capture { generation, result } => match result {
                 Ok(snapshot) if generation >= self.last_capture => {
                     self.last_capture = generation;
+                    let names = snapshot
+                        .rows
+                        .iter()
+                        .map(|row| &row.workspace.name)
+                        .collect::<HashSet<_>>();
+                    self.selected.retain(|name| names.contains(name));
                     self.snapshot = Some(snapshot);
                     self.clamp_cursor();
                 }
@@ -2394,6 +2400,31 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(!app.selected.contains("alpha"));
         assert!(app.selected.contains("beta"));
+    }
+
+    #[test]
+    fn refresh_drops_removed_selections_but_keeps_filtered_rows() {
+        let mut app = App::new("trunk()".to_owned(), false);
+        app.selected
+            .extend(["alpha", "beta", "removed"].map(str::to_owned));
+        app.query = "alpha".to_owned();
+        let (tx, _rx) = mpsc::channel();
+        app.apply_reply(
+            WorkerReply::Capture {
+                generation: 1,
+                result: Ok(snapshot(vec![
+                    row("alpha", Integration::OutsideTrunk),
+                    row("beta", Integration::InTrunk),
+                ])),
+            },
+            &tx,
+        )
+        .unwrap();
+        assert_eq!(
+            app.selected,
+            HashSet::from(["alpha".to_owned(), "beta".to_owned()])
+        );
+        assert_eq!(app.hidden_selection_count(), 1);
     }
 
     #[test]
