@@ -75,8 +75,29 @@ fn fish_init() -> String {
     format!(
         r#"function jw --description 'Jujutsu workspace switching'
     if test (count $argv) -eq 0
-        command jw
-        return $status
+        set -l target (command jw --ui-path)
+        set -l command_status $status
+        if test $command_status -ne 0
+            return $command_status
+        end
+        if test (count $target) -gt 0
+            cd -- "$target"
+            return $status
+        end
+        return 0
+    end
+
+    if test "$argv[1]" = ui; and test (count $argv) -eq 1
+        set -l target (command jw --ui-path ui)
+        set -l command_status $status
+        if test $command_status -ne 0
+            return $command_status
+        end
+        if test (count $target) -gt 0
+            cd -- "$target"
+            return $status
+        end
+        return 0
     end
 
     set -l switch_commands {switch_commands}
@@ -114,6 +135,24 @@ fn posix_init(shell_name: &str) -> String {
 
     format!(
         r#"jw() {{
+    if [ "$#" -eq 0 ]; then
+        local target
+        target="$(command jw --ui-path)" || return $?
+        if [ -n "$target" ]; then
+            cd "$target" || return $?
+        fi
+        return 0
+    fi
+
+    if [ "$1" = ui ] && [ "$#" -eq 1 ]; then
+        local target
+        target="$(command jw --ui-path ui)" || return $?
+        if [ -n "$target" ]; then
+            cd "$target" || return $?
+        fi
+        return 0
+    fi
+
     case "$1" in
         {switch_commands})
             local arg
@@ -152,7 +191,15 @@ fn elvish_init() -> String {
     format!(
         r#"fn jw {{|@args|
     if (== (count $args) 0) {{
-        e:command jw
+        var target = (e:command jw --ui-path)
+        if (> (count $target) 0) {{
+            cd $target
+        }}
+    }} elif (and (== $args[0] ui) (== (count $args) 1)) {{
+        var target = (e:command jw --ui-path ui)
+        if (> (count $target) 0) {{
+            cd $target
+        }}
     }} elif (has-value [{switch_commands}] $args[0]) {{
         var attached-execute = (keep-if {{|arg| or (str:has-prefix $arg '{ATTACHED_EXECUTE_LONG}') (str:has-prefix $arg '{ATTACHED_EXECUTE_SHORT}') }} $args)
         if (or {passthrough_condition} (> (count $attached-execute) 0)) {{
@@ -182,7 +229,20 @@ function jw {{
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
 
     if ($Args.Length -eq 0) {{
-        & $script:__jwExecutable
+        $target = (& $script:__jwExecutable --ui-path | Out-String).TrimEnd("`r", "`n")
+        if ($LASTEXITCODE -ne 0) {{ return }}
+        if ($target.Length -gt 0) {{
+            Set-Location -LiteralPath $target
+        }}
+        return
+    }}
+
+    if (($Args[0] -eq 'ui') -and ($Args.Length -eq 1)) {{
+        $target = (& $script:__jwExecutable --ui-path ui | Out-String).TrimEnd("`r", "`n")
+        if ($LASTEXITCODE -ne 0) {{ return }}
+        if ($target.Length -gt 0) {{
+            Set-Location -LiteralPath $target
+        }}
         return
     }}
 

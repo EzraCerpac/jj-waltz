@@ -616,15 +616,16 @@ fn compare_prerelease(left: Option<&str>, right: Option<&str>) -> Ordering {
 
 fn parse_resolved_revisions(output: &str) -> Result<Vec<ResolvedRevision>> {
     let fields = output.split_terminator('\0').collect::<Vec<_>>();
-    if fields.len() % 3 != 0 {
+    let (revisions, remainder) = fields.as_chunks::<3>();
+    if !remainder.is_empty() {
         bail!("JJ revision query returned malformed template output")
     }
-    Ok(fields
-        .chunks_exact(3)
-        .map(|fields| ResolvedRevision {
-            change_id: fields[0].to_owned(),
-            commit_id: fields[1].to_owned(),
-            description: fields[2].to_owned(),
+    Ok(revisions
+        .iter()
+        .map(|[change_id, commit_id, description]| ResolvedRevision {
+            change_id: (*change_id).to_owned(),
+            commit_id: (*commit_id).to_owned(),
+            description: (*description).to_owned(),
         })
         .collect())
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## Version 0.7.0 (2026-09-25)
+
+- Add a persistent workspace manager with `jw ui` and bare `jw` in a terminal,
+  with search, filters, multi-selection, workspace creation, and shell switching.
+- Show bookmark integration separately from workspace work using local trunk
+  ancestry, with explicit unknown, conflict, and unchecked states.
+- Preview bulk removal and missing-workspace pruning, protect current/default
+  workspaces, and require a choice before deleting files not recorded by JJ.
+- Keep unmanaged bookmarks and bookmarks shared with surviving workspaces;
+  report partial failures without blocking independent removals or retries.
+- Add semantic terminal colors and a mouse/text-selection toggle (`m`), with
+  readable default foreground text across terminal themes.
+- Support configurable bare-command behavior and retain existing CLI/JSON commands.
+- Raise the minimum Rust version to 1.88.
+
 ## Version 0.6.1 (2026-09-07)
 
 - Preserve whitespace in checkout and workspace paths reported by `jw context`.

@@ -83,6 +83,17 @@ by itself a claim that a command exposing that concept already exists.
   policy native completion and parent-shell directory changes.
 - **Herdr container** — a Herdr workspace or tab associated with one JJ workspace
   through a provenance marker.
+- **Bookmark integration** — whether the recorded associated bookmark points to
+  a revision reachable from resolved trunk. A missing or conflicted bookmark
+  cannot establish integration; an absent association is a separate state.
+- **Workspace integration** — whether the workspace's publish tip is reachable
+  from resolved trunk. It is independent of the associated bookmark's position
+  and does not establish freshness of files on disk.
+- **Removal eligibility** — the per-target result of revalidating whether a
+  workspace and its selected directory and bookmark actions may be removed.
+  Shared bookmarks are not eligible for incidental deletion.
+- **Removal selection** — the named workspaces chosen for a batch. Selection
+  survives search and filter changes; hidden selections remain part of the batch.
 
 ## Invariants
 
