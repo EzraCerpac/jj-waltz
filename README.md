@@ -200,6 +200,14 @@ with the mouse. Selections survive searches and filters; the header counts hidde
 selections too. `Enter` switches to the highlighted workspace and exits.
 Re-source `jw shell init ...` after updating to enable this shell behavior.
 
+Press `m` outside text-entry fields to toggle mouse controls. In text-selection
+mode, drag normally to select text using your terminal; keyboard controls still
+work. Press `m` again to restore row clicks and mouse scrolling. The footer shows
+the active mode. Colors follow your terminal palette: cyan identifies focus and
+shortcuts, magenta bookmarks, green integrated work and success, yellow unfinished
+work and warnings, and red conflicts, errors, and destructive actions. Text labels
+remain visible alongside the colors.
+
 `f` cycles filters; `1`–`4` select all, integrated bookmarks, unfinished work, or
 problems. Bookmark integration and workspace work are separate columns: a merged
 bookmark can still have newer workspace work. “In trunk” means local graph
@@ -213,10 +221,16 @@ the terminal clipboard protocol, and `Tab` opens details on narrow terminals.
 Clipboard support depends on the terminal; the path is also shown in the notice.
 
 `d` previews removal of the marked rows, or the highlighted row when none are
-marked. `p` previews pruning confirmed missing directories. Current and default
-workspaces cannot be removed by the manager. Risky rows are excluded initially;
-`r` explicitly includes them. `i` acknowledges deleting the listed ignored or
-unrecorded content. Directory deletion is permanent, including ignored files.
+marked. `p` opens **Prune missing workspaces**: it forgets registrations whose
+directories are already gone. Remove also permanently deletes existing directories.
+Current and default workspaces cannot be removed by the manager.
+Risky rows are excluded initially;
+`r` explicitly includes them. The preview shows how many rows will be removed,
+skipped, or blocked and explains why. If eligible workspaces contain files not
+recorded by JJ, choose `i` to delete the listed files or `s` to skip those
+workspaces. These files can include ignored caches, build output, and private
+files; JJ cannot restore them after deletion. Enter waits for this choice and
+does nothing if no workspace is eligible. Directory deletion is permanent.
 JJ's operation log is not a full undo for directory removal.
 
 In the preview, `b` toggles keeping or deleting eligible associated **local**
@@ -224,6 +238,8 @@ bookmarks. The last confirmed choice is remembered across repositories in
 `$XDG_STATE_HOME/jj-waltz/ui.json`, falling back to
 `~/.local/state/jj-waltz/ui.json`. The initial choice is keep. Bookmarks associated
 with surviving managed workspaces are preserved; remote bookmarks are untouched.
+Unmanaged workspaces never have inferred bookmarks deleted. If saving the choice
+fails, removal still runs and reports a separate preference warning.
 
 Each target is revalidated before mutation. Changed targets require another
 review. Independent rows continue after a failure; results identify partial

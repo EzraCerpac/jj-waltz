@@ -349,13 +349,6 @@ fn relation_for_revision(
     if node.conflicted {
         return Integration::Conflicted;
     }
-    if node.parents.len() > 1 {
-        warnings.push(format!(
-            "revision `{revision}` has {} parents; ancestry is ambiguous",
-            node.parents.len()
-        ));
-        return Integration::Unknown;
-    }
     if graph
         .change_counts
         .get(&node.change_id)
@@ -605,6 +598,86 @@ mod tests {
     }
 
     #[test]
+    fn real_jj_classifies_an_exact_merge_bookmark_by_trunk_ancestry() {
+        let (directory, client) = repo();
+        let base = commit(&client, &directory, "base", "base");
+        let left = commit(&client, &directory, "left.txt", "left");
+        client.run(["new", &base]).unwrap();
+        let right = commit(&client, &directory, "right.txt", "right");
+        client.run(["new", &left, &right]).unwrap();
+        fs::write(directory.path().join("merge.txt"), "merge").unwrap();
+        client.run(["commit", "-m", "merge"]).unwrap();
+        let merge = client.resolve_one("@-").unwrap().commit_id;
+        let parent_count = client
+            .run(["log", "-r", &merge, "--no-graph", "-T", "parents.len()"])
+            .unwrap()
+            .trimmed_stdout()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(
+            parent_count, 2,
+            "fixture must contain an exact merge commit"
+        );
+
+        let trunk = commit(&client, &directory, "trunk.txt", "after merge");
+        client
+            .run(["bookmark", "create", "published", "-r", &merge])
+            .unwrap();
+        // Keep lifecycle metadata outside the checkout: editing the historical merge below
+        // replaces the working tree and must not erase the fixture itself.
+        let metadata_directory = tempfile::tempdir().unwrap();
+        let metadata = WorkspaceMetadataStore::from_repo_config_path(
+            metadata_directory.path().join("repo-config"),
+        )
+        .unwrap();
+        store(&metadata, "default", Some("published"));
+        assert_eq!(metadata.list().unwrap().len(), 1);
+        let engine = ObservationEngine::with_metadata_store(client.clone(), &trunk, metadata);
+
+        client.run(["edit", &merge]).unwrap();
+        let result = capture_with_engine(&client, &engine, &[]).unwrap();
+        let row = &result.rows[0];
+        assert_eq!(row.bookmark_integration, Integration::InTrunk, "{row:?}");
+        assert_eq!(row.work_integration, Integration::InTrunk, "{row:?}");
+        assert_eq!(row.workspace.commit_id, merge);
+
+        client.run(["new", &base]).unwrap();
+        let outside_left = commit(&client, &directory, "outside-left.txt", "left");
+        client.run(["new", &base]).unwrap();
+        let outside_right = commit(&client, &directory, "outside-right.txt", "right");
+        client.run(["new", &outside_left, &outside_right]).unwrap();
+        fs::write(directory.path().join("outside-merge.txt"), "merge").unwrap();
+        client.run(["commit", "-m", "outside merge"]).unwrap();
+        let outside_merge = client.resolve_one("@-").unwrap().commit_id;
+        let parent_count = client
+            .run([
+                "log",
+                "-r",
+                &outside_merge,
+                "--no-graph",
+                "-T",
+                "parents.len()",
+            ])
+            .unwrap()
+            .trimmed_stdout()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(
+            parent_count, 2,
+            "fixture must contain a second merge commit"
+        );
+        client.run(["edit", &outside_merge]).unwrap();
+
+        let outside = capture_with_engine(&client, &engine, &[]).unwrap();
+        let row = &outside.rows[0];
+        assert_eq!(row.bookmark_integration, Integration::InTrunk, "{row:?}");
+        assert_eq!(row.work_integration, Integration::OutsideTrunk, "{row:?}");
+        assert_eq!(row.workspace.commit_id, outside_merge);
+    }
+
+    #[test]
     fn real_jj_uses_the_sole_parent_of_an_empty_working_copy() {
         let (directory, client) = repo();
         let base = commit(&client, &directory, "base", "base");
@@ -721,8 +794,10 @@ mod tests {
             b"invalid state",
         )
         .unwrap();
+        let engine =
+            ObservationEngine::with_metadata_store(client.clone(), "root()", test_store(&siblings));
         let captured =
-            capture_with_client(&client, "root()", &["broken".into(), "healthy".into()]).unwrap();
+            capture_with_engine(&client, &engine, &["broken".into(), "healthy".into()]).unwrap();
         let broken = captured
             .rows
             .iter()

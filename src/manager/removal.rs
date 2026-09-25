@@ -162,7 +162,7 @@ pub fn prepare(trunk: &str, names: &[String], prune: bool) -> Result<BatchPlan> 
         append_review_warnings(&status_row, &mut warnings);
         if !ignored.is_empty() {
             warnings.push(format!(
-                "{} ignored or otherwise unrecorded path(s) will be deleted",
+                "{} path(s) not recorded by JJ are present",
                 ignored.len()
             ));
         }
@@ -241,7 +241,7 @@ pub fn execute(
             if !row.ignored.is_empty() && !acknowledge_ignored {
                 return skipped(
                     &row.name,
-                    "excluded until ignored and unrecorded paths are acknowledged",
+                    "skipped because files not recorded by JJ were not approved for deletion",
                 );
             }
 
@@ -334,7 +334,13 @@ fn execute_one(
             ))
         } else {
             let inventory = workspace::WorkspaceInventory::load()?;
-            let low_level = workspace::plan_remove_workspace(&inventory, Some(&name), true)?;
+            let mut low_level = workspace::plan_remove_workspace(&inventory, Some(&name), true)?;
+            // The general-purpose lifecycle command can infer bookmark ownership for unmanaged
+            // workspaces. The manager has no authoritative association for those rows, so its
+            // explicit removal approval covers only the workspace and directory.
+            if expected.metadata.is_none() {
+                low_level.bookmarks.clear();
+            }
             if store.get(&name)? != expected.metadata {
                 bail!("workspace metadata changed during final removal planning; review it again")
             }
@@ -1170,6 +1176,31 @@ mod tests {
     }
 
     #[test]
+    fn approved_unmanaged_removal_preserves_an_inferred_bookmark() {
+        let repo = Repo::new();
+        let workspace = repo.add_workspace("unmanaged");
+        run_with_config(
+            repo.path(),
+            &repo.config,
+            &["bookmark", "create", "wip/unmanaged", "-r", "unmanaged@"],
+        );
+        run_scenario(&repo, "unmanaged-inferred-bookmark");
+
+        assert!(!workspace.exists());
+        assert!(
+            !repo
+                .workspace_names()
+                .iter()
+                .any(|name| name == "unmanaged")
+        );
+        assert!(
+            repo.bookmark_names()
+                .iter()
+                .any(|name| name == "wip/unmanaged")
+        );
+    }
+
+    #[test]
     fn mixed_batch_removes_safe_row_and_excludes_risky_row() {
         let repo = Repo::new();
         repo.add_workspace("safe");
@@ -1319,6 +1350,39 @@ mod tests {
                 assert!(client.resolve_one("wip/shared").is_ok());
                 assert!(client.workspace_names().unwrap().contains(&"two".into()));
             }
+            "unmanaged-inferred-bookmark" => {
+                let inventory = workspace::WorkspaceInventory::load().unwrap();
+                let lifecycle_plan =
+                    workspace::plan_remove_workspace(&inventory, Some("unmanaged"), true).unwrap();
+                assert!(lifecycle_plan.bookmarks.contains(&"wip/unmanaged".into()));
+
+                let store = metadata_store(&JjClient::current().unwrap()).unwrap();
+                assert!(store.get("unmanaged").unwrap().is_none());
+                let manager_plan = prepare("default@", &["unmanaged".to_owned()], false).unwrap();
+                let row = &manager_plan.rows[0];
+                assert!(
+                    row.risky,
+                    "the operator must explicitly approve unmanaged removal"
+                );
+                assert_eq!(
+                    row.bookmark, None,
+                    "unmanaged bookmark is not an authoritative association"
+                );
+                assert!(
+                    row.warnings
+                        .iter()
+                        .any(|warning| warning.contains("no bookmark will be inferred"))
+                );
+                let outcomes = execute(manager_plan, true, true, true);
+                assert!(outcomes[0].success(), "{}", outcomes[0].message);
+                assert!(
+                    JjClient::current()
+                        .unwrap()
+                        .resolve_one("wip/unmanaged")
+                        .is_ok(),
+                    "approved removal must preserve the unmanaged bookmark"
+                );
+            }
             "mixed" => {
                 manage_here("safe", None);
                 let plan =
@@ -1440,6 +1504,7 @@ mod tests {
                 assert_eq!(plan.rows[0].ignored, ["ignored.tmp"]);
                 let outcomes = execute(plan, false, false, false);
                 assert_eq!(outcomes[0].state, OutcomeState::Skipped);
+                assert!(outcomes[0].message.contains("not approved for deletion"));
 
                 let plan = prepare("default@", &["ignored".to_owned()], false).unwrap();
                 let outcomes = execute(plan, false, false, true);

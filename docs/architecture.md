@@ -193,13 +193,16 @@ The existing JSON schema and CLI status contracts remain unchanged.
 The UI renders immediately, then receives completed snapshots from one background
 worker. Search, selection, and rendering do not start JJ processes. Explicit
 inspection and removal preparation refresh named working copies; browsing does
-not. Generation IDs reject obsolete results. Repository-changing work is serialized
+not. Rendering is event-driven so idle frames do not disturb native terminal text
+selection. The mouse-mode toggle releases terminal mouse capture without changing
+keyboard controls. Generation IDs reject obsolete results. Repository-changing work is serialized
 and must finish before switching or exiting; terminal state is restored on failure.
 
 Removal previews list every target and its directory, associated local bookmark,
 risks, and ignored content. Default/current workspaces and unsafe or unreadable
-identities are blocked. Risky rows require explicit inclusion; ignored content
-requires one batch acknowledgement. The final check compares filesystem identity,
+identities are blocked. Risky rows require explicit inclusion. For eligible rows
+with unrecorded content, the preview requires a batch choice to delete that content
+or skip those workspaces before execution. The final check compares filesystem identity,
 workspace revision, metadata, bookmark targets, and ignored-file inventory with
 the reviewed plan. Changed targets require another review. Independent targets
 continue after failure, and outcomes describe any partial progress. A directory
@@ -209,7 +212,8 @@ Bookmarks associated with surviving managed workspaces are retained. The last
 confirmed keep/delete choice is user-global state in
 `$XDG_STATE_HOME/jj-waltz/ui.json`, falling back to
 `~/.local/state/jj-waltz/ui.json`. It is separate from static configuration and uses
-the existing atomic file writer. Network and remote bookmark operations are absent.
+the existing atomic file writer. A preference-write failure is reported separately
+and does not block a confirmed removal. Network and remote bookmark operations are absent.
 
 Shell adapters reserve stdout for a selected destination through `--ui-path`;
 the interface and diagnostics use stderr. Cancellation emits no destination.

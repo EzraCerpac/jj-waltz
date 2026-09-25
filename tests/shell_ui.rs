@@ -26,14 +26,18 @@ exit 0
 "#;
 
 fn shell_init(shell: &str) -> String {
+    let adapter = match shell {
+        "pwsh" => "powershell",
+        _ => shell,
+    };
     let output = Command::cargo_bin("jw")
         .expect("jw binary")
-        .args(["shell", "init", shell])
+        .args(["shell", "init", adapter])
         .output()
         .expect("generate shell init script");
     assert!(
         output.status.success(),
-        "jw shell init {shell} failed: {}",
+        "jw shell init {adapter} for {shell} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("shell init is UTF-8")
@@ -181,7 +185,14 @@ fn available_adapters_keep_cancellation_and_failure_in_the_caller() {
             "{shell} changed directory after cancellation"
         );
 
-        let output = run_shell(shell, &init, "jw", &temp, None, Some(17));
+        let failure_command = if matches!(shell, "powershell" | "pwsh") {
+            // PowerShell's process exit code comes from `exit`; expose the
+            // native `jw` command's code after exercising the adapter.
+            "jw; exit $LASTEXITCODE"
+        } else {
+            "jw"
+        };
+        let output = run_shell(shell, &init, failure_command, &temp, None, Some(17));
         assert_eq!(
             output.status.code(),
             Some(17),

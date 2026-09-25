@@ -4,6 +4,7 @@ Uses disposable repositories only. Build jw first with cargo build.
 """
 
 import errno
+import atexit
 import fcntl
 import os
 from pathlib import Path
@@ -44,6 +45,12 @@ class Terminal:
         self.process = subprocess.Popen(command, cwd=cwd, env=env, stdin=self.slave,
                                         stdout=self.slave, stderr=self.slave,
                                         preexec_fn=child_terminal)
+        atexit.register(self.stop_if_running)
+
+    def stop_if_running(self):
+        if self.process.poll() is None:
+            os.killpg(self.process.pid, signal.SIGKILL)
+            self.process.wait()
 
     @property
     def text(self):
@@ -109,6 +116,7 @@ def run():
         (config / "jj-waltz/config.toml").write_text('[trunk]\nrevset = "root()"\n')
         env = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(config),
                    XDG_STATE_HOME=str(root / "state"))
+        env.pop("NO_COLOR", None)
         jj = shutil.which("jj")
         assert jj
 
@@ -125,6 +133,16 @@ def run():
         first_frame = time.monotonic() - started
         terminal.wait(lambda text: "feature-09" in text)
         loaded = time.monotonic() - started
+        terminal.send("m")
+        terminal.wait(lambda text: "mouse: text selection" in text)
+        assert b"\x1b[?1000l" in terminal.raw, "mouse reporting remains enabled"
+        terminal.pump(0.1)
+        quiet_start = len(terminal.raw)
+        for _ in range(5):
+            terminal.pump(0.1)
+        assert len(terminal.raw) == quiet_start, "idle rendering interrupts text selection"
+        terminal.send("m")
+        terminal.wait(lambda text: "mouse: controls" in text)
         terminal.send("?")
         terminal.wait(lambda text: "Help —" in text)
         terminal.send("\x1b")
@@ -174,6 +192,10 @@ def run():
 
         terminal = Terminal([str(binary), "ui"], repo, env, columns=80, lines=25)
         terminal.wait(lambda text: "feature-09" in text)
+        terminal.send("m")
+        terminal.wait(lambda text: "mouse: text selection" in text)
+        terminal.send("m")
+        terminal.wait(lambda text: "mouse: controls" in text)
         terminal.send("\t")
         terminal.wait(lambda text: "Details" in text)
         terminal.send("\t")
@@ -181,7 +203,7 @@ def run():
         terminal.send("n")
         terminal.wait(lambda text: "New workspace" in text)
         terminal.send("created-demo\r")
-        terminal.wait(lambda text: "created-demo" in text and "New workspace" not in text)
+        terminal.wait(lambda text: "created-demo" in text and "workspace created" in text)
         terminal.send("q")
         terminal.finish()
         assert command([str(binary), "path", "created-demo"]).stdout.strip()
@@ -202,9 +224,12 @@ def run():
         terminal.send("c")
         terminal.search("risky-demo")
         terminal.send("d")
-        terminal.wait(lambda text: "PERMANENT" in text and "ignored: private/" in text)
+        terminal.wait(lambda text: "PERMANENT" in text and "not recorded by JJ: private/" in text and "RISKY" in text)
         assert "RISKY" in terminal.text, terminal.text
-        terminal.send("rbi\r")
+        terminal.send("rb\r")
+        terminal.wait(lambda text: "choose" in text.lower() and "Removal preview" in text)
+        assert risky_path.exists(), "unacknowledged content was deleted"
+        terminal.send("i\r")
         terminal.wait(lambda text: "Removal results" in text)
         assert "DONE risky-demo" in terminal.text, terminal.text
         terminal.send("\x1b")
@@ -215,6 +240,37 @@ def run():
         assert "wip/risky-demo" not in command([jj, "bookmark", "list"]).stdout
         assert json.loads((root / "state/jj-waltz/ui.json").read_text())["delete_bookmarks"] is True
         print("Mouse selection, risky override, ignored acknowledgement, bookmark toggle and persistence passed")
+
+        # Explicitly skipping unrecorded files preserves that row while another completes.
+        command([str(binary), "add", "skip-files", "remove-clean", "--at", "root()", "--no-links"])
+        skip_path = Path(command([str(binary), "path", "skip-files"]).stdout.strip())
+        (skip_path / ".gitignore").write_text("private/\n")
+        (skip_path / "private").mkdir()
+        (skip_path / "private/data").write_text("keep this\n")
+        unavailable_state = root / "state-is-a-file"
+        unavailable_state.write_text("cannot store preferences here\n")
+        terminal = Terminal([str(binary), "ui"], repo,
+                            dict(env, XDG_STATE_HOME=str(unavailable_state)))
+        terminal.wait(lambda text: "skip-files" in text)
+        terminal.search("skip-files")
+        terminal.send(" ")
+        terminal.wait(lambda text: "selected:1" in text)
+        terminal.search("remove-clean")
+        terminal.send(" ")
+        terminal.wait(lambda text: "selected:2" in text)
+        terminal.send("d")
+        terminal.wait(lambda text: "Removal preview" in text and "not recorded by JJ: private/" in text)
+        terminal.send("rs\r")
+        terminal.wait(lambda text: "Removal results" in text)
+        assert "DONE remove-clean" in terminal.text, terminal.text
+        assert "SKIPPED skip-files" in terminal.text, terminal.text
+        assert "save" in terminal.text.lower() and "choice" in terminal.text.lower(), terminal.text
+        assert (skip_path / "private/data").read_text() == "keep this\n"
+        terminal.send("\x1b")
+        terminal.wait(lambda text: "Removal results" not in text and "selected:1" in text)
+        terminal.send("q")
+        terminal.finish()
+        print("Explicit skip retains files and selection; unavailable preferences do not block removal")
 
         for default_command, expected_text in [("list", "feature-02"), ("help", "Usage:")]:
             (config / "jj-waltz/config.toml").write_text(f'default_command = "{default_command}"\n[trunk]\nrevset = "root()"\n')

@@ -19,7 +19,7 @@ use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use std::collections::HashSet;
@@ -31,6 +31,37 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const TICK: Duration = Duration::from_millis(50);
+
+// Semantic foregrounds only: the terminal keeps its own background and palette.
+mod palette {
+    use ratatui::style::{Color, Modifier, Style};
+
+    pub fn focus() -> Style {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    }
+    pub fn bookmark() -> Style {
+        Style::default().fg(Color::Magenta)
+    }
+    pub fn good() -> Style {
+        Style::default().fg(Color::Green)
+    }
+    pub fn caution() -> Style {
+        Style::default().fg(Color::Yellow)
+    }
+    pub fn danger() -> Style {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
+    pub fn muted() -> Style {
+        Style::default().fg(Color::DarkGray)
+    }
+    pub fn heading() -> Style {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    }
+}
 
 /// Opens the current repository's workspace manager.
 ///
@@ -75,9 +106,13 @@ fn event_loop(
     task_tx: &Sender<WorkerTask>,
     reply_rx: &Receiver<WorkerReply>,
 ) -> Result<Option<String>> {
+    let mut dirty = true;
     loop {
-        drain_replies(app, task_tx, reply_rx)?;
-        terminal.draw(|frame| app.render(frame))?;
+        dirty |= drain_replies(app, task_tx, reply_rx)?;
+        if dirty {
+            terminal.draw(|frame| app.render(frame))?;
+            dirty = false;
+        }
         if let Some(done) = app.done.take() {
             return Ok(done);
         }
@@ -88,8 +123,10 @@ fn event_loop(
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let action = app.handle_key(key);
                 apply_action(app, terminal, task_tx, action)?;
+                dirty = true;
             }
-            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            Event::Mouse(mouse) if app.mouse_capture => dirty |= app.handle_mouse(mouse),
+            Event::Resize(_, _) => dirty = true,
             _ => {}
         }
     }
@@ -99,15 +136,21 @@ fn drain_replies(
     app: &mut App,
     task_tx: &Sender<WorkerTask>,
     reply_rx: &Receiver<WorkerReply>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut changed = false;
     loop {
         match reply_rx.try_recv() {
-            Ok(reply) => app.apply_reply(reply, task_tx)?,
-            Err(TryRecvError::Empty) => return Ok(()),
+            Ok(reply) => {
+                app.apply_reply(reply, task_tx)?;
+                changed = true;
+            }
+            Err(TryRecvError::Empty) => return Ok(changed),
             Err(TryRecvError::Disconnected) => {
-                app.busy = None;
-                app.notice = Some("background worker stopped".to_owned());
-                return Ok(());
+                if app.busy.take().is_some() {
+                    app.notice = Some("background worker stopped".to_owned());
+                    changed = true;
+                }
+                return Ok(changed);
             }
         }
     }
@@ -125,6 +168,14 @@ fn apply_action(
     }
     match action {
         Action::None => {}
+        Action::ToggleMouse => {
+            if app.mouse_capture {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            }
+            app.mouse_capture = !app.mouse_capture;
+        }
         Action::Quit => {
             if app.busy.as_ref().is_some_and(Busy::is_mutating) {
                 app.notice =
@@ -314,18 +365,23 @@ impl Worker {
                         include_risky,
                         acknowledge_ignored,
                     } => {
-                        let result = save_delete_bookmarks(delete_bookmarks)
-                            .context("could not save the bookmark removal choice")
-                            .map(|()| {
+                        let (outcomes, preference_warning) = execute_with_preference(
+                            delete_bookmarks,
+                            save_delete_bookmarks,
+                            || {
                                 removal::execute(
                                     plan,
                                     delete_bookmarks,
                                     include_risky,
                                     acknowledge_ignored,
                                 )
-                            })
-                            .map_err(format_error);
-                        WorkerReply::Execute { generation, result }
+                            },
+                        );
+                        WorkerReply::Execute {
+                            generation,
+                            result: Ok(outcomes),
+                            preference_warning,
+                        }
                     }
                 };
                 if replies.send(reply).is_err() {
@@ -355,6 +411,22 @@ impl Drop for Worker {
 
 fn format_error(error: anyhow::Error) -> String {
     format!("{error:#}")
+}
+
+fn execute_with_preference<T, F, E>(
+    delete_bookmarks: bool,
+    save: F,
+    execute: E,
+) -> (T, Option<String>)
+where
+    F: FnOnce(bool) -> Result<()>,
+    E: FnOnce() -> T,
+{
+    let warning = save(delete_bookmarks)
+        .err()
+        .map(|error| format!("Bookmark choice was not saved for next time: {error:#}"));
+    let outcomes = execute();
+    (outcomes, warning)
 }
 
 enum WorkerTask {
@@ -407,6 +479,7 @@ enum WorkerReply {
     Execute {
         generation: u64,
         result: std::result::Result<Vec<BatchOutcome>, String>,
+        preference_warning: Option<String>,
     },
 }
 
@@ -553,7 +626,53 @@ struct Preview {
 struct PreviewOptions {
     delete_bookmarks: bool,
     include_risky: bool,
-    acknowledge_ignored: bool,
+    unrecorded_files: UnrecordedChoice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnrecordedChoice {
+    Undecided,
+    Delete,
+    Skip,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PreviewCounts {
+    remove: usize,
+    skip: usize,
+    blocked: usize,
+    undecided: usize,
+}
+
+impl Preview {
+    fn counts(&self) -> PreviewCounts {
+        preview_counts(&self.plan.rows, self.options)
+    }
+
+    fn ready(&self) -> bool {
+        let counts = self.counts();
+        counts.remove > 0 && counts.undecided == 0
+    }
+}
+
+fn preview_counts(rows: &[removal::RemovalRow], options: PreviewOptions) -> PreviewCounts {
+    let mut counts = PreviewCounts::default();
+    for row in rows {
+        if row.blocked.is_some() {
+            counts.blocked += 1;
+        } else if row.risky && !options.include_risky {
+            counts.skip += 1;
+        } else if !row.ignored.is_empty() {
+            match options.unrecorded_files {
+                UnrecordedChoice::Undecided => counts.undecided += 1,
+                UnrecordedChoice::Delete => counts.remove += 1,
+                UnrecordedChoice::Skip => counts.skip += 1,
+            }
+        } else {
+            counts.remove += 1;
+        }
+    }
+    counts
 }
 
 impl PreviewOptions {
@@ -561,7 +680,7 @@ impl PreviewOptions {
         Self {
             delete_bookmarks,
             include_risky: false,
-            acknowledge_ignored: false,
+            unrecorded_files: UnrecordedChoice::Undecided,
         }
     }
 }
@@ -581,6 +700,7 @@ enum Screen {
 
 enum Action {
     None,
+    ToggleMouse,
     Quit,
     Choose(String),
     Capture(Vec<String>),
@@ -631,6 +751,7 @@ struct App {
     generation: u64,
     last_capture: u64,
     delete_bookmarks: bool,
+    mouse_capture: bool,
     done: Option<Option<String>>,
 }
 
@@ -652,6 +773,7 @@ impl App {
             generation: 0,
             last_capture: 0,
             delete_bookmarks,
+            mouse_capture: true,
             done: None,
         }
     }
@@ -733,7 +855,11 @@ impl App {
                 }
                 Err(error) => self.open_error("Removal preview failed", error),
             },
-            WorkerReply::Execute { result, .. } => {
+            WorkerReply::Execute {
+                result,
+                preference_warning,
+                ..
+            } => {
                 let outcomes = match result {
                     Ok(outcomes) => outcomes,
                     Err(error) => {
@@ -761,6 +887,13 @@ impl App {
                     body: lines.join("\n"),
                     scroll: 0,
                 };
+                if let Some(warning) = preference_warning {
+                    self.notice = Some(warning.clone());
+                    if let Screen::Report { body, .. } = &mut self.screen {
+                        body.push_str("\n\nPREFERENCE WARNING: ");
+                        body.push_str(&warning);
+                    }
+                }
                 self.request_capture(tx, Vec::new())?;
             }
         }
@@ -778,6 +911,11 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> Action {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Quit;
+        }
+        if key.code == KeyCode::Char('m')
+            && !matches!(self.screen, Screen::Search | Screen::Create(_))
+        {
+            return Action::ToggleMouse;
         }
         match &mut self.screen {
             Screen::Main => self.handle_main_key(key),
@@ -881,15 +1019,30 @@ impl App {
                     Action::None
                 }
                 KeyCode::Char('i') => {
-                    preview.options.acknowledge_ignored = !preview.options.acknowledge_ignored;
+                    preview.options.unrecorded_files = UnrecordedChoice::Delete;
                     Action::None
                 }
-                KeyCode::Enter => Action::Execute {
+                KeyCode::Char('s') => {
+                    preview.options.unrecorded_files = UnrecordedChoice::Skip;
+                    Action::None
+                }
+                KeyCode::Enter if preview.ready() => Action::Execute {
                     plan: preview.plan.clone(),
                     delete_bookmarks: preview.options.delete_bookmarks,
                     include_risky: preview.options.include_risky,
-                    acknowledge_ignored: preview.options.acknowledge_ignored,
+                    acknowledge_ignored: preview.options.unrecorded_files
+                        == UnrecordedChoice::Delete,
                 },
+                KeyCode::Enter => {
+                    let counts = preview.counts();
+                    self.notice = Some(if counts.undecided > 0 {
+                        "Choose [i] delete listed files or [s] skip those workspaces first"
+                            .to_owned()
+                    } else {
+                        "No eligible workspace to remove".to_owned()
+                    });
+                    Action::None
+                }
                 _ => Action::None,
             },
             Screen::Report { scroll, .. } => {
@@ -1005,20 +1158,28 @@ impl App {
         Action::None
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.screen, Screen::Main) {
-            return;
+            return false;
         }
         match mouse.kind {
-            MouseEventKind::ScrollDown => self.move_cursor(1),
-            MouseEventKind::ScrollUp => self.move_cursor(-1),
+            MouseEventKind::ScrollDown => {
+                let old = self.cursor;
+                self.move_cursor(1);
+                self.cursor != old
+            }
+            MouseEventKind::ScrollUp => {
+                let old = self.cursor;
+                self.move_cursor(-1);
+                self.cursor != old
+            }
             MouseEventKind::Down(MouseButton::Left)
                 if self.table_area.contains((mouse.column, mouse.row).into()) =>
             {
                 // Border, header, and the header's bottom margin are not rows.
                 let first_row = self.table_area.y.saturating_add(3);
                 if mouse.row < first_row {
-                    return;
+                    return false;
                 }
                 let visible_row = mouse.row - first_row;
                 let index = self
@@ -1026,18 +1187,24 @@ impl App {
                     .offset()
                     .saturating_add(visible_row as usize);
                 if index < self.visible_indices().len() {
+                    let old = self.cursor;
                     self.cursor = index;
                     // The first cell begins just inside the border and highlight
                     // symbol. Clicking its checkbox mirrors Space.
+                    let mut changed = self.cursor != old;
                     if mouse.column <= self.table_area.x.saturating_add(7)
                         && let Some(name) = self.current_name()
-                        && !self.selected.remove(&name)
                     {
-                        self.selected.insert(name);
+                        if !self.selected.remove(&name) {
+                            self.selected.insert(name);
+                        }
+                        changed = true;
                     }
+                    return changed;
                 }
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -1138,24 +1305,27 @@ impl App {
     fn render_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let hidden = self.hidden_selection_count();
         let mut spans = vec![
-            Span::styled(" jj-waltz ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "{} workspaces",
-                self.snapshot.as_ref().map_or(0, |s| s.rows.len())
-            )),
-            Span::raw("  "),
+            Span::styled(" jj-waltz ", palette::heading()),
             Span::styled(
-                format!("filter:{}", self.filter.label()),
-                Style::default().fg(Color::Cyan),
+                format!(
+                    "{} workspaces",
+                    self.snapshot.as_ref().map_or(0, |s| s.rows.len())
+                ),
+                palette::muted(),
             ),
+            Span::raw("  "),
+            Span::styled(format!("filter:{}", self.filter.label()), palette::focus()),
         ];
         if !self.query.is_empty() {
-            spans.push(Span::raw(format!("  search:{}", self.query)));
+            spans.push(Span::styled(
+                format!("  search:{}", self.query),
+                palette::focus(),
+            ));
         }
         if !self.selected.is_empty() {
             spans.push(Span::styled(
                 format!("  selected:{} (+{} hidden)", self.selected.len(), hidden),
-                Style::default().fg(Color::Yellow),
+                palette::caution(),
             ));
         }
         let repository_warnings = self
@@ -1165,7 +1335,7 @@ impl App {
         if repository_warnings != 0 {
             spans.push(Span::styled(
                 format!("  repository warnings:{repository_warnings}"),
-                Style::default().fg(Color::Yellow),
+                palette::caution(),
             ));
         }
         let trunk = self.snapshot.as_ref().map_or_else(
@@ -1180,9 +1350,18 @@ impl App {
                 )
             },
         );
-        let block = Block::default().borders(Borders::BOTTOM);
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(palette::muted());
         frame.render_widget(
-            Paragraph::new(vec![Line::from(spans), Line::from(trunk)]).block(block),
+            Paragraph::new(vec![
+                Line::from(spans),
+                Line::from(vec![
+                    Span::styled(" ", palette::muted()),
+                    Span::styled(trunk, palette::focus()),
+                ]),
+            ])
+            .block(block),
             area,
         );
     }
@@ -1192,7 +1371,14 @@ impl App {
             frame.render_widget(
                 Paragraph::new("Checking the current repository…")
                     .alignment(Alignment::Center)
-                    .block(Block::default().borders(Borders::ALL).title(" Workspaces ")),
+                    .style(palette::muted())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(palette::muted())
+                            .title(" Workspaces ")
+                            .title_style(palette::heading()),
+                    ),
                 area,
             );
             return;
@@ -1215,7 +1401,8 @@ impl App {
         let rows = self.snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
             indices
                 .iter()
-                .map(|index| {
+                .enumerate()
+                .map(|(visible_index, index)| {
                     let row = &snapshot.rows[*index];
                     let workspace = &row.workspace;
                     let selected = if self.selected.contains(&workspace.name) {
@@ -1233,20 +1420,30 @@ impl App {
                         " "
                     };
                     let bookmark = workspace.associated_bookmark.as_deref().unwrap_or("—");
-                    let warning = if row.warnings.is_empty() && workspace.hazards.is_empty() {
-                        ""
+                    let warned = !row.warnings.is_empty() || !workspace.hazards.is_empty();
+                    let name_style = if visible_index == self.cursor {
+                        palette::focus()
                     } else {
-                        "!"
+                        Style::default()
                     };
                     Row::new(vec![
-                        Cell::from(format!("{selected} {role} {}", workspace.name)),
-                        Cell::from(bookmark.to_owned()),
-                        Cell::from(integration_short(&row.bookmark_integration)),
-                        Cell::from(integration_short(&row.work_integration)),
+                        Cell::from(format!("{selected} {role} {}", workspace.name))
+                            .style(name_style),
+                        Cell::from(bookmark.to_owned()).style(palette::bookmark()),
+                        Cell::from(integration_short(&row.bookmark_integration))
+                            .style(integration_style(&row.bookmark_integration)),
+                        Cell::from(integration_short(&row.work_integration))
+                            .style(integration_style(&row.work_integration)),
                         Cell::from(format!(
-                            "{} {warning}",
-                            working_copy_label(workspace.working_copy)
-                        )),
+                            "{} {}",
+                            working_copy_label(workspace.working_copy),
+                            if warned { "!" } else { "" }
+                        ))
+                        .style(if warned {
+                            palette::caution()
+                        } else {
+                            working_copy_style(workspace.working_copy)
+                        }),
                     ])
                 })
                 .collect()
@@ -1258,7 +1455,7 @@ impl App {
             "work state",
             "checkout",
         ])
-        .style(Style::default().add_modifier(Modifier::BOLD))
+        .style(palette::heading())
         .bottom_margin(1);
         let table = Table::new(
             rows,
@@ -1271,13 +1468,14 @@ impl App {
             ],
         )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Workspaces "))
-        .row_highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(palette::muted())
+                .title(" Workspaces ")
+                .title_style(palette::heading()),
         )
+        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED))
         .highlight_symbol("› ");
         self.table_state
             .select((!indices.is_empty()).then_some(self.cursor));
@@ -1290,9 +1488,13 @@ impl App {
             .map(detail_text)
             .unwrap_or_else(|| Text::from("No matching workspace"));
         frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::ALL).title(" Details ")),
+            Paragraph::new(text).wrap(Wrap { trim: false }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(palette::muted())
+                    .title(" Details ")
+                    .title_style(palette::heading()),
+            ),
             area,
         );
     }
@@ -1305,25 +1507,76 @@ impl App {
 
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
         let status = if let Some(busy) = self.busy {
-            Line::from(Span::styled(
-                format!("{}…", busy.label()),
-                Style::default().fg(Color::Yellow),
-            ))
+            Span::styled(format!("{}…", busy.label()), palette::caution())
         } else if let Some(notice) = &self.notice {
-            Line::from(notice.clone())
+            Span::styled(notice.clone(), palette::caution())
         } else {
-            Line::from(format!(
-                "{} visible · {} selected",
-                self.visible_indices().len(),
-                self.selected.len()
-            ))
+            Span::styled(
+                format!(
+                    "{} visible · {} selected",
+                    self.visible_indices().len(),
+                    self.selected.len()
+                ),
+                palette::muted(),
+            )
         };
+        let mouse_mode = if self.mouse_capture {
+            "mouse: controls"
+        } else {
+            "mouse: text selection"
+        };
+        let bindings: &[(&str, &str)] = if area.width < 100 {
+            &[
+                ("↑↓", "move"),
+                ("Space", "mark"),
+                ("Enter", "switch"),
+                ("/", "search"),
+                ("d", "remove"),
+                ("n", "new"),
+                ("?", "help"),
+            ]
+        } else {
+            &[
+                ("↑↓/jk", "move"),
+                ("Space", "mark"),
+                ("Enter", "switch"),
+                ("/", "search"),
+                ("f", "filter"),
+                ("n", "new"),
+                ("p", "prune missing"),
+                ("d", "remove"),
+                ("?", "help"),
+            ]
+        };
+        let shortcuts = bindings
+            .iter()
+            .flat_map(|(key, label)| {
+                [
+                    Span::styled(
+                        *key,
+                        if *key == "d" {
+                            palette::danger()
+                        } else {
+                            palette::focus()
+                        },
+                    ),
+                    Span::raw(format!(" {label}  ")),
+                ]
+            })
+            .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from("↑↓/jk move  Space mark  Enter switch  / search  f filter  n new  d remove  ? help"),
-                status,
+                Line::from(shortcuts),
+                Line::from(vec![
+                    Span::styled(format!(" [m] {mouse_mode} · "), palette::focus()),
+                    status,
+                ]),
             ])
-            .block(Block::default().borders(Borders::TOP)),
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(palette::muted()),
+            ),
             area,
         );
     }
@@ -1396,35 +1649,75 @@ fn integration_detail(integration: &Integration) -> &'static str {
     }
 }
 
+fn integration_style(integration: &Integration) -> Style {
+    match integration {
+        Integration::InTrunk => palette::good(),
+        Integration::OutsideTrunk | Integration::Missing => palette::caution(),
+        Integration::Conflicted => palette::danger(),
+        Integration::Unassociated | Integration::Unknown => palette::muted(),
+    }
+}
+
+fn working_copy_style(status: WorkingCopyStatus) -> Style {
+    match status {
+        WorkingCopyStatus::Empty => palette::good(),
+        WorkingCopyStatus::Modified { .. } | WorkingCopyStatus::Stale => palette::caution(),
+        WorkingCopyStatus::Conflicted { .. } => palette::danger(),
+        WorkingCopyStatus::Unknown => palette::muted(),
+    }
+}
+
 fn detail_text(row: &ManagerRow) -> Text<'static> {
     let workspace = &row.workspace;
     let mut lines = vec![
-        Line::from(Span::styled(
-            workspace.name.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(format!(
-            "path: {}",
-            workspace
-                .path
-                .as_ref()
-                .map_or_else(|| "missing".to_owned(), |path| path.display().to_string())
-        )),
-        Line::from(format!(
-            "bookmark: {} ({})",
-            workspace.associated_bookmark.as_deref().unwrap_or("none"),
-            integration_detail(&row.bookmark_integration)
-        )),
-        Line::from(format!(
-            "work: {}",
-            integration_detail(&row.work_integration)
-        )),
-        Line::from(format!(
-            "checkout: {}",
-            working_copy_label(workspace.working_copy)
-        )),
-        Line::from(format!("change: {}", workspace.change_id)),
-        Line::from(format!("commit: {}", short_id(&workspace.commit_id))),
+        Line::from(Span::styled(workspace.name.clone(), palette::heading())),
+        Line::from(vec![
+            Span::styled("path: ", palette::muted()),
+            Span::raw(
+                workspace
+                    .path
+                    .as_ref()
+                    .map_or_else(|| "missing".to_owned(), |path| path.display().to_string()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("bookmark: ", palette::muted()),
+            Span::styled(
+                workspace
+                    .associated_bookmark
+                    .clone()
+                    .unwrap_or_else(|| "none".to_owned()),
+                palette::bookmark(),
+            ),
+            Span::raw(" ("),
+            Span::styled(
+                integration_detail(&row.bookmark_integration),
+                integration_style(&row.bookmark_integration),
+            ),
+            Span::raw(")"),
+        ]),
+        Line::from(vec![
+            Span::styled("work: ", palette::muted()),
+            Span::styled(
+                integration_detail(&row.work_integration),
+                integration_style(&row.work_integration),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("checkout: ", palette::muted()),
+            Span::styled(
+                working_copy_label(workspace.working_copy),
+                working_copy_style(workspace.working_copy),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("change: ", palette::muted()),
+            Span::raw(workspace.change_id.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("commit: ", palette::muted()),
+            Span::raw(short_id(&workspace.commit_id).to_owned()),
+        ]),
         Line::from(""),
         Line::from(workspace.description.clone()),
     ];
@@ -1432,21 +1725,19 @@ fn detail_text(row: &ManagerRow) -> Text<'static> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Warnings",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            palette::caution().add_modifier(Modifier::BOLD),
         )));
         lines.extend(
-            row.warnings
-                .iter()
-                .map(|warning| Line::from(format!("• {warning}"))),
+            row.warnings.iter().map(|warning| {
+                Line::from(Span::styled(format!("• {warning}"), palette::caution()))
+            }),
         );
-        lines.extend(
-            workspace
-                .hazards
-                .iter()
-                .map(|hazard| Line::from(format!("• {}", hazard.message))),
-        );
+        lines.extend(workspace.hazards.iter().map(|hazard| {
+            Line::from(Span::styled(
+                format!("• {}", hazard.message),
+                palette::caution(),
+            ))
+        }));
     }
     Text::from(lines)
 }
@@ -1454,33 +1745,58 @@ fn detail_text(row: &ManagerRow) -> Text<'static> {
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let popup = centered(area, 78, 82);
     frame.render_widget(Clear, popup);
-    let lines = [
-        "↑/↓ or j/k   move",
-        "Space         mark/unmark workspace",
-        "a / c         mark all visible / clear marks",
-        "Enter         return highlighted workspace",
-        "/             search (Enter accepts, Esc closes)",
-        "f or 1–4      cycle / select all, integrated, unfinished, problems",
-        "Tab           show details on a narrow terminal",
-        "n             create workspace",
-        "i             refresh highlighted checkout details",
-        "h             repository health report",
-        "y             copy workspace path with OSC 52",
-        "p / d         prune preview / remove preview",
-        "q             cancel",
-        "",
-        "@ current   - previous   ^ default   ! warning",
-        "",
-        "Any destructive action opens a complete preview first.",
+    let bindings = [
+        ("↑/↓ or j/k", "move"),
+        ("Space", "mark/unmark workspace"),
+        ("a / c", "mark all visible / clear marks"),
+        ("Enter", "switch to highlighted workspace"),
+        ("/", "search (Enter accepts, Esc closes)"),
+        (
+            "f or 1–4",
+            "filter all / integrated / unfinished / problems",
+        ),
+        ("Tab", "show details on a narrow terminal"),
+        ("n", "create workspace"),
+        ("i", "refresh highlighted checkout details"),
+        ("h", "repository health report"),
+        ("y", "copy workspace path with OSC 52"),
+        (
+            "p",
+            "prune missing workspaces: forget registrations with missing directories",
+        ),
+        (
+            "d",
+            "remove: forget registrations and delete existing directories",
+        ),
+        ("m", "toggle mouse controls / native text selection"),
+        ("q", "cancel"),
     ];
+    let mut lines = bindings
+        .into_iter()
+        .map(|(key, action)| {
+            Line::from(vec![
+                Span::styled(format!("{key:<14}"), palette::focus()),
+                Span::raw(action),
+            ])
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "@ current   - previous   ^ default   ! warning",
+        palette::muted(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Removing a directory is permanent. Review every row before Enter.",
+        palette::caution(),
+    )));
     frame.render_widget(
-        Paragraph::new(lines.join("\n"))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Help — any key closes "),
-            ),
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(palette::muted())
+                .title(" Help — any key closes ")
+                .title_style(palette::heading()),
+        ),
         popup,
     );
 }
@@ -1489,10 +1805,12 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, query: &str) {
     let popup = centered_fixed(area, 70, 5);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(query).block(
+        Paragraph::new(query).style(palette::focus()).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Search — Enter accepts "),
+                .border_style(palette::focus())
+                .title(" Search — Enter accepts ")
+                .title_style(palette::heading()),
         ),
         popup,
     );
@@ -1514,26 +1832,31 @@ fn render_create(frame: &mut Frame<'_>, area: Rect, form: &CreateForm, trunk: &s
     );
     let lines = vec![
         Line::from(vec![
-            Span::raw("workspace  "),
+            Span::styled("workspace  ", palette::muted()),
             Span::styled(&form.name, name_style),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::raw("start at   "),
+            Span::styled("start at   ", palette::muted()),
             Span::styled(choices, base_style),
         ]),
         Line::from(vec![
-            Span::raw("revset    "),
+            Span::styled("revset    ", palette::muted()),
             Span::styled(base, base_style),
         ]),
         Line::from(""),
-        Line::from("Tab changes field · ←/→ changes base · Enter creates · Esc cancels"),
+        Line::from(Span::styled(
+            "Tab changes field · ←/→ changes base · Enter creates · Esc cancels",
+            palette::focus(),
+        )),
     ];
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" New workspace "),
+                .border_style(palette::muted())
+                .title(" New workspace ")
+                .title_style(palette::heading()),
         ),
         popup,
     );
@@ -1546,52 +1869,117 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(4),
-            Constraint::Length(5),
+            Constraint::Length(7),
         ])
         .split(inner);
+    let counts = preview.counts();
+    let warning = if preview.plan.prune {
+        "Prune missing workspaces: forget registrations whose directories are already gone."
+    } else {
+        "PERMANENT: confirmed directories are deleted along with their registrations."
+    };
     frame.render_widget(
-        Paragraph::new(Span::styled(
-            "PERMANENT: confirmed rows are forgotten and their directories may be deleted.",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )),
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                warning,
+                if preview.plan.prune {
+                    palette::caution()
+                } else {
+                    palette::danger()
+                },
+            )),
+            Line::from(vec![
+                Span::styled(format!("remove: {}  ", counts.remove), palette::good()),
+                Span::styled(format!("skip: {}  ", counts.skip), palette::caution()),
+                Span::styled(format!("blocked: {}  ", counts.blocked), palette::danger()),
+                Span::styled(
+                    format!("needs choice: {}", counts.undecided),
+                    palette::caution(),
+                ),
+            ]),
+        ])
+        .wrap(Wrap { trim: false }),
         chunks[0],
     );
     let mut lines = Vec::new();
     for row in &preview.plan.rows {
+        let disposition = if let Some(reason) = &row.blocked {
+            (format!("BLOCKED: {reason}"), palette::danger())
+        } else if row.risky && !preview.options.include_risky {
+            (
+                "SKIP: risky work; press [r] to include".to_owned(),
+                palette::caution(),
+            )
+        } else if !row.ignored.is_empty() {
+            match preview.options.unrecorded_files {
+                UnrecordedChoice::Undecided => (
+                    "NEEDS CHOICE: files not recorded by JJ".to_owned(),
+                    palette::caution(),
+                ),
+                UnrecordedChoice::Delete => (
+                    if preview.plan.prune {
+                        "PRUNE: forget registration"
+                    } else {
+                        "REMOVE: delete directory and listed files"
+                    }
+                    .to_owned(),
+                    palette::danger(),
+                ),
+                UnrecordedChoice::Skip => (
+                    "SKIP: keep directory with files not recorded by JJ".to_owned(),
+                    palette::caution(),
+                ),
+            }
+        } else {
+            (
+                if preview.plan.prune {
+                    "PRUNE: forget registration"
+                } else {
+                    "REMOVE: delete directory"
+                }
+                .to_owned(),
+                palette::good(),
+            )
+        };
         lines.push(Line::from(Span::styled(
             row.name.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
+            palette::heading(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", disposition.0),
+            disposition.1,
         )));
         if let Some(path) = &row.path {
-            lines.push(Line::from(format!("  path: {}", path.display())));
+            lines.push(Line::from(vec![
+                Span::styled("  path: ", palette::muted()),
+                Span::raw(path.display().to_string()),
+            ]));
         }
         if let Some(bookmark) = &row.bookmark {
-            lines.push(Line::from(format!("  bookmark: {bookmark}")));
-        }
-        if let Some(blocked) = &row.blocked {
-            lines.push(Line::from(Span::styled(
-                format!("  BLOCKED: {blocked}"),
-                Style::default().fg(Color::Red),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("  local bookmark: ", palette::muted()),
+                Span::styled(bookmark.clone(), palette::bookmark()),
+            ]));
         }
         if row.risky {
             lines.push(Line::from(Span::styled(
-                "  RISKY: skipped unless risky rows are included",
-                Style::default().fg(Color::Yellow),
+                "  RISKY: work outside trunk, conflict, unknown, or uncertain association",
+                palette::caution(),
             )));
         }
         lines.extend(
             row.warnings
                 .iter()
-                .map(|value| Line::from(format!("  ! {value}"))),
+                .map(|value| Line::from(Span::styled(format!("  ! {value}"), palette::caution()))),
         );
-        lines.extend(
-            row.ignored
-                .iter()
-                .map(|value| Line::from(format!("  ignored: {value}"))),
-        );
+        lines.extend(row.ignored.iter().map(|value| {
+            Line::from(vec![
+                Span::styled("  not recorded by JJ: ", palette::caution()),
+                Span::raw(value.clone()),
+            ])
+        }));
         lines.push(Line::from(""));
     }
     frame.render_widget(
@@ -1601,26 +1989,102 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
         chunks[1],
     );
     let bookmark = if preview.options.delete_bookmarks {
-        "delete"
+        "DELETE"
     } else {
-        "keep"
+        "KEEP"
     };
-    let options = format!(
-        "[b] bookmark: {bookmark}   [r] include risky: {}   [i] acknowledge ignored: {}\nEnter confirms permanently · Esc cancels · ↑↓ scroll",
-        checked(preview.options.include_risky),
-        checked(preview.options.acknowledge_ignored)
-    );
-    frame.render_widget(Paragraph::new(options), chunks[2]);
+    let choice = match preview.options.unrecorded_files {
+        UnrecordedChoice::Undecided => "choose before confirmation",
+        UnrecordedChoice::Delete => "DELETE listed files",
+        UnrecordedChoice::Skip => "SKIP those workspaces",
+    };
+    let confirm = if preview.ready() {
+        "Enter confirms permanently · Esc cancels · ↑↓ scroll"
+    } else if counts.undecided > 0 {
+        "Enter disabled: choose how to handle listed files first · Esc cancels"
+    } else {
+        "Enter disabled: no eligible workspace · Esc cancels"
+    };
     frame.render_widget(
-        Block::default().borders(Borders::ALL).title(format!(
-            " Removal preview — {} target{} ",
-            preview.plan.rows.len(),
-            if preview.plan.rows.len() == 1 {
-                ""
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("[b]", palette::focus()),
+                Span::raw(" local bookmarks: "),
+                Span::styled(
+                    bookmark,
+                    if preview.options.delete_bookmarks {
+                        palette::danger()
+                    } else {
+                        palette::good()
+                    },
+                ),
+                Span::raw("  "),
+                Span::styled("[r]", palette::focus()),
+                Span::styled(
+                    format!(" include risky: {}", checked(preview.options.include_risky)),
+                    if preview.options.include_risky {
+                        palette::danger()
+                    } else {
+                        palette::muted()
+                    },
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Files not recorded by JJ may include caches, build output, or private files:",
+                palette::caution(),
+            )),
+            Line::from(vec![
+                Span::styled("[i]", palette::danger()),
+                Span::raw(" delete listed files   "),
+                Span::styled("[s]", palette::focus()),
+                Span::raw(" skip those workspaces"),
+            ]),
+            Line::from(vec![
+                Span::styled("choice: ", palette::muted()),
+                Span::styled(
+                    choice,
+                    if preview.options.unrecorded_files == UnrecordedChoice::Delete {
+                        palette::danger()
+                    } else {
+                        palette::caution()
+                    },
+                ),
+            ]),
+            Line::from(Span::styled(
+                confirm,
+                if preview.ready() {
+                    palette::focus()
+                } else {
+                    palette::caution()
+                },
+            )),
+        ])
+        .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(palette::muted())
+            .title(format!(
+                " {} — {} target{} ",
+                if preview.plan.prune {
+                    "Prune missing workspaces"
+                } else {
+                    "Removal preview"
+                },
+                preview.plan.rows.len(),
+                if preview.plan.rows.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ))
+            .title_style(if preview.plan.prune {
+                palette::heading()
             } else {
-                "s"
-            }
-        )),
+                palette::danger()
+            }),
         popup,
     );
 }
@@ -1629,24 +2093,40 @@ fn render_report(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str, scr
     let popup = centered(area, 90, 88);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(body)
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {title} — ↑↓ scroll, any other key closes ")),
-            ),
+        Paragraph::new(Text::from(
+            body.lines().map(report_line).collect::<Vec<_>>(),
+        ))
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(palette::muted())
+                .title(format!(" {title} — ↑↓ scroll, any other key closes "))
+                .title_style(palette::heading()),
+        ),
         popup,
     );
 }
 
+fn report_line(line: &str) -> Line<'static> {
+    let prefix = line
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(':');
+    let style = match prefix {
+        "DONE" | "PASS" | "OK" => palette::good(),
+        "FAILED" | "FAIL" | "BLOCKED" | "ERROR" => palette::danger(),
+        "SKIPPED" | "SKIP" | "PARTIAL" | "WARN" | "WARNING" | "PREFERENCE" => palette::caution(),
+        _ => Style::default(),
+    };
+    Line::from(Span::styled(line.to_owned(), style))
+}
+
 fn field_style(active: bool) -> Style {
     if active {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        palette::focus().add_modifier(Modifier::UNDERLINED)
     } else {
         Style::default()
     }
@@ -1799,7 +2279,103 @@ mod tests {
         let options = PreviewOptions::new(true);
         assert!(options.delete_bookmarks);
         assert!(!options.include_risky);
-        assert!(!options.acknowledge_ignored);
+        assert_eq!(options.unrecorded_files, UnrecordedChoice::Undecided);
+    }
+
+    #[test]
+    fn preview_counts_track_blocked_risky_and_unrecorded_choices() {
+        let make_row = |name: &str| removal::RemovalRow {
+            name: name.to_owned(),
+            path: None,
+            bookmark: None,
+            warnings: Vec::new(),
+            ignored: Vec::new(),
+            blocked: None,
+            risky: false,
+        };
+        let mut rows = vec![
+            make_row("safe"),
+            make_row("risky"),
+            make_row("unrecorded"),
+            make_row("blocked"),
+        ];
+        rows[1].risky = true;
+        rows[2].ignored = vec!["private/data".to_owned()];
+        rows[3].blocked = Some("current workspace".to_owned());
+        let mut options = PreviewOptions::new(false);
+        assert_eq!(
+            preview_counts(&rows, options),
+            PreviewCounts {
+                remove: 1,
+                skip: 1,
+                blocked: 1,
+                undecided: 1
+            }
+        );
+        options.unrecorded_files = UnrecordedChoice::Skip;
+        assert_eq!(
+            preview_counts(&rows, options),
+            PreviewCounts {
+                remove: 1,
+                skip: 2,
+                blocked: 1,
+                undecided: 0
+            }
+        );
+        options.unrecorded_files = UnrecordedChoice::Delete;
+        options.include_risky = true;
+        assert_eq!(
+            preview_counts(&rows, options),
+            PreviewCounts {
+                remove: 3,
+                skip: 0,
+                blocked: 1,
+                undecided: 0
+            }
+        );
+        rows.remove(0);
+        options.unrecorded_files = UnrecordedChoice::Skip;
+        options.include_risky = false;
+        assert_eq!(preview_counts(&rows, options).remove, 0);
+    }
+
+    #[test]
+    fn mouse_toggle_is_available_on_nonediting_screens() {
+        let mut app = App::new("trunk()".to_owned(), false);
+        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(app.handle_key(m), Action::ToggleMouse));
+        app.screen = Screen::Help;
+        assert!(matches!(app.handle_key(m), Action::ToggleMouse));
+        assert!(matches!(app.screen, Screen::Help));
+        app.screen = Screen::Report {
+            title: "Report".to_owned(),
+            body: String::new(),
+            scroll: 0,
+        };
+        assert!(matches!(app.handle_key(m), Action::ToggleMouse));
+        assert!(matches!(app.screen, Screen::Report { .. }));
+        app.screen = Screen::Search;
+        assert!(matches!(app.handle_key(m), Action::None));
+        assert_eq!(app.query, "m");
+        app.screen = Screen::Create(CreateForm::new("trunk()", None));
+        assert!(matches!(app.handle_key(m), Action::None));
+        assert!(matches!(&app.screen, Screen::Create(form) if form.name == "m"));
+    }
+
+    #[test]
+    fn preference_write_failure_does_not_stop_confirmed_work() {
+        let executed = std::cell::Cell::new(false);
+        let (result, warning) = execute_with_preference(
+            true,
+            |_| Err(anyhow!("state directory is unwritable")),
+            || {
+                executed.set(true);
+                "completed"
+            },
+        );
+        assert!(executed.get());
+        assert_eq!(result, "completed");
+        assert!(warning.unwrap().contains("state directory is unwritable"));
     }
 
     #[test]
@@ -1883,6 +2459,7 @@ mod tests {
                     state: OutcomeState::Failed,
                     message: "still has work".to_owned(),
                 }]),
+                preference_warning: None,
             },
             &tx,
         )
@@ -1974,5 +2551,34 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("feature-09"));
         assert!(rendered.contains("work on feature-09"));
+    }
+
+    #[test]
+    fn highlighted_row_keeps_semantic_foregrounds_and_default_background() {
+        let backend = TestBackend::new(120, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new("trunk()".to_owned(), false);
+        let mut feature = row("feature-09", Integration::OutsideTrunk);
+        feature.bookmark_integration = Integration::InTrunk;
+        app.snapshot = Some(snapshot(vec![feature]));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let cell_at = |needle: &str| {
+            let chars = needle.chars().collect::<Vec<_>>();
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width.saturating_sub(chars.len() as u16) {
+                    if chars.iter().enumerate().all(|(index, character)| {
+                        buffer[(x + index as u16, y)].symbol() == character.to_string()
+                    }) {
+                        return &buffer[(x, y)];
+                    }
+                }
+            }
+            panic!("missing {needle}");
+        };
+        let integrated = cell_at("in trunk");
+        assert_eq!(integrated.fg, ratatui::style::Color::Green);
+        assert_eq!(integrated.bg, ratatui::style::Color::Reset);
+        assert_eq!(cell_at("wip/feature-09").fg, ratatui::style::Color::Magenta);
     }
 }
