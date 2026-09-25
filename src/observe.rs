@@ -381,7 +381,7 @@ impl ObservationEngine {
 }
 
 fn is_commit_id(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone)]
@@ -792,6 +792,16 @@ fn display_names(names: &BTreeSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn creation_base_ids_accept_backend_lengths_but_not_revset_expressions() {
+        for length in [40, 64, 128] {
+            assert!(super::is_commit_id(&"a".repeat(length)));
+        }
+        for invalid in ["", "@", "root()", "abcd | efab", "xyz"] {
+            assert!(!super::is_commit_id(invalid));
+        }
+    }
+
     use super::*;
     use std::process::Command;
 
