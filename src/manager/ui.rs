@@ -877,7 +877,7 @@ impl App {
                         OutcomeState::Skipped => "SKIPPED",
                     };
                     lines.push(format!("{label} {}: {}", outcome.name, outcome.message));
-                    if outcome.success() {
+                    if outcome.success() || outcome.state == OutcomeState::Partial {
                         self.selected.remove(&outcome.name);
                     } else {
                         self.selected.insert(outcome.name);
@@ -2468,6 +2468,53 @@ mod tests {
         assert!(app.selected.contains("blocked"));
         assert!(matches!(app.screen, Screen::Report { .. }));
         assert!(matches!(rx.try_recv(), Ok(WorkerTask::Capture { .. })));
+    }
+
+    #[test]
+    fn removal_results_keep_only_failed_and_skipped_names_selected() {
+        let mut app = App::new("trunk()".to_owned(), false);
+        app.selected.extend(
+            ["failed", "skipped", "partial", "completed"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        app.busy = Some(Busy::Remove(1));
+        let (tx, _rx) = mpsc::channel();
+        app.apply_reply(
+            WorkerReply::Execute {
+                generation: 1,
+                result: Ok(vec![
+                    BatchOutcome {
+                        name: "failed".to_owned(),
+                        state: OutcomeState::Failed,
+                        message: "still has work".to_owned(),
+                    },
+                    BatchOutcome {
+                        name: "skipped".to_owned(),
+                        state: OutcomeState::Skipped,
+                        message: "not eligible for removal".to_owned(),
+                    },
+                    BatchOutcome {
+                        name: "partial".to_owned(),
+                        state: OutcomeState::Partial,
+                        message: "workspace was forgotten; later cleanup failed".to_owned(),
+                    },
+                    BatchOutcome {
+                        name: "completed".to_owned(),
+                        state: OutcomeState::Completed,
+                        message: "removed".to_owned(),
+                    },
+                ]),
+                preference_warning: None,
+            },
+            &tx,
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.selected,
+            HashSet::from(["failed".to_owned(), "skipped".to_owned()])
+        );
     }
 
     #[test]

@@ -168,6 +168,19 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
 }
 
 pub fn switch_workspaces(names: &[String], policy: &CreationPolicy) -> Result<SwitchOutcome> {
+    switch_workspaces_with_creation(names, policy, true)
+}
+
+/// Switch a manager selection without ever planning workspace creation.
+pub fn switch_existing_workspace(name: &str, policy: &CreationPolicy) -> Result<SwitchOutcome> {
+    switch_workspaces_with_creation(&[name.to_owned()], policy, false)
+}
+
+fn switch_workspaces_with_creation(
+    names: &[String],
+    policy: &CreationPolicy,
+    allow_create: bool,
+) -> Result<SwitchOutcome> {
     let (final_name, intermediate_names) = names
         .split_last()
         .ok_or_else(|| anyhow!("at least one workspace name is required"))?;
@@ -184,6 +197,16 @@ pub fn switch_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Sw
         .iter()
         .map(|entry| entry.name.clone())
         .collect::<HashSet<_>>();
+    if !allow_create {
+        for name in resolved_intermediate
+            .iter()
+            .chain(std::iter::once(&resolved_final))
+        {
+            if !existing.contains(name) || !inventory.root(name)?.is_dir() {
+                bail!("selected workspace `{name}` no longer exists; reopen the manager")
+            }
+        }
+    }
     let mut available = existing;
     let mut intermediate_plans = Vec::new();
     for name in &resolved_intermediate {
@@ -690,6 +713,61 @@ mod tests {
         run_jj(&root, &["describe", "-m", "base"]);
         run_jj(&root, &["new"]);
         (tempdir, root)
+    }
+
+    #[test]
+    fn manager_switch_does_not_recreate_removed_selection() {
+        const CHILD: &str = "JW_TEST_EXISTING_SWITCH";
+        if std::env::var_os(CHILD).is_some() {
+            let policy = CreationPolicy::load(None, None, true, true, 1).unwrap();
+            let stale_selection = workspace::WorkspaceInventory::load().unwrap();
+            assert!(stale_selection.contains("selected"));
+            let path = stale_selection.root("selected").unwrap();
+            let root = std::env::current_dir().unwrap();
+            run_jj(&root, &["workspace", "forget", "selected"]);
+            fs::remove_dir_all(&path).unwrap();
+            let error = switch_existing_workspace("selected", &policy).unwrap_err();
+            assert!(error.to_string().contains("no longer exists"));
+            assert!(!path.exists());
+            assert!(
+                !workspace::WorkspaceInventory::load()
+                    .unwrap()
+                    .contains("selected")
+            );
+            return;
+        }
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (temp, root) = test_repo();
+        let path = temp.path().join("selected");
+        run_jj(
+            &root,
+            &[
+                "workspace",
+                "add",
+                path.to_str().unwrap(),
+                "--name",
+                "selected",
+            ],
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lifecycle::tests::manager_switch_does_not_recreate_removed_selection",
+                "--nocapture",
+            ])
+            .current_dir(&root)
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn repair_metadata(workspace_name: &str) -> ManagedWorkspaceMetadata {

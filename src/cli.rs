@@ -423,21 +423,9 @@ fn run_ui(shell_path: bool) -> Result<()> {
     let Some(name) = crate::manager::run(&config.trunk.revset)? else {
         return Ok(());
     };
-    // A selected row must still exist. Do not let switch's create-if-missing policy recreate it.
-    let inventory = workspace::WorkspaceInventory::load()?;
-    if !inventory.entries().iter().any(|entry| entry.name == name) {
-        bail!("selected workspace `{name}` no longer exists; reopen the manager")
-    }
-    run_switch(SwitchCommand {
-        names: vec![name],
-        at: None,
-        bookmark: None,
-        no_bookmark: false,
-        execute: None,
-        print_path: true,
-        no_links: false,
-        execute_args: Vec::new(),
-    })?;
+    let policy = CreationPolicy::load(None, None, false, false, 1)?;
+    let outcome = lifecycle::switch_existing_workspace(&name, &policy)?;
+    print_switch_path(&outcome.result)?;
     if !shell_path {
         eprintln!(
             "The destination is printed above. Enable `jw shell init <shell>` to change your shell directory automatically."
@@ -613,18 +601,7 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
     let result = outcome.result;
 
     if cmd.print_path {
-        let path = match result.relative_subdir {
-            Some(relative) => {
-                let candidate = result.path.join(relative);
-                if candidate.is_dir() {
-                    candidate
-                } else {
-                    result.path.clone()
-                }
-            }
-            None => result.path.clone(),
-        };
-        return print_line(path.display());
+        return print_switch_path(&result);
     }
 
     if let Some(command) = cmd.execute {
@@ -641,6 +618,18 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         println!("  bookmark: {bookmark}");
     }
     Ok(())
+}
+
+fn print_switch_path(result: &workspace::SwitchResult) -> Result<()> {
+    let path = result
+        .relative_subdir
+        .as_ref()
+        .map(|relative| result.path.join(relative));
+    let path = path
+        .as_ref()
+        .filter(|path| path.is_dir())
+        .unwrap_or(&result.path);
+    print_line(path.display())
 }
 
 fn print_created_workspace(created: &CreatedWorkspace, quiet: bool) {
