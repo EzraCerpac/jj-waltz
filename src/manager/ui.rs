@@ -53,8 +53,9 @@ mod palette {
     pub fn danger() -> Style {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     }
-    pub fn muted() -> Style {
-        Style::default().fg(Color::DarkGray)
+    pub fn secondary() -> Style {
+        // ANSI bright black can be nearly invisible in user palettes.
+        Style::default()
     }
     pub fn heading() -> Style {
         Style::default()
@@ -1311,7 +1312,7 @@ impl App {
                     "{} workspaces",
                     self.snapshot.as_ref().map_or(0, |s| s.rows.len())
                 ),
-                palette::muted(),
+                palette::secondary(),
             ),
             Span::raw("  "),
             Span::styled(format!("filter:{}", self.filter.label()), palette::focus()),
@@ -1352,12 +1353,12 @@ impl App {
         );
         let block = Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(palette::muted());
+            .border_style(palette::secondary());
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(spans),
                 Line::from(vec![
-                    Span::styled(" ", palette::muted()),
+                    Span::styled(" ", palette::secondary()),
                     Span::styled(trunk, palette::focus()),
                 ]),
             ])
@@ -1371,11 +1372,11 @@ impl App {
             frame.render_widget(
                 Paragraph::new("Checking the current repository…")
                     .alignment(Alignment::Center)
-                    .style(palette::muted())
+                    .style(palette::secondary())
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .border_style(palette::muted())
+                            .border_style(palette::secondary())
                             .title(" Workspaces ")
                             .title_style(palette::heading()),
                     ),
@@ -1471,7 +1472,7 @@ impl App {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(palette::muted())
+                .border_style(palette::secondary())
                 .title(" Workspaces ")
                 .title_style(palette::heading()),
         )
@@ -1491,7 +1492,7 @@ impl App {
             Paragraph::new(text).wrap(Wrap { trim: false }).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(palette::muted())
+                    .border_style(palette::secondary())
                     .title(" Details ")
                     .title_style(palette::heading()),
             ),
@@ -1517,7 +1518,7 @@ impl App {
                     self.visible_indices().len(),
                     self.selected.len()
                 ),
-                palette::muted(),
+                palette::secondary(),
             )
         };
         let mouse_mode = if self.mouse_capture {
@@ -1575,7 +1576,7 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::TOP)
-                    .border_style(palette::muted()),
+                    .border_style(palette::secondary()),
             ),
             area,
         );
@@ -1654,7 +1655,7 @@ fn integration_style(integration: &Integration) -> Style {
         Integration::InTrunk => palette::good(),
         Integration::OutsideTrunk | Integration::Missing => palette::caution(),
         Integration::Conflicted => palette::danger(),
-        Integration::Unassociated | Integration::Unknown => palette::muted(),
+        Integration::Unassociated | Integration::Unknown => palette::secondary(),
     }
 }
 
@@ -1663,7 +1664,7 @@ fn working_copy_style(status: WorkingCopyStatus) -> Style {
         WorkingCopyStatus::Empty => palette::good(),
         WorkingCopyStatus::Modified { .. } | WorkingCopyStatus::Stale => palette::caution(),
         WorkingCopyStatus::Conflicted { .. } => palette::danger(),
-        WorkingCopyStatus::Unknown => palette::muted(),
+        WorkingCopyStatus::Unknown => palette::secondary(),
     }
 }
 
@@ -1672,7 +1673,7 @@ fn detail_text(row: &ManagerRow) -> Text<'static> {
     let mut lines = vec![
         Line::from(Span::styled(workspace.name.clone(), palette::heading())),
         Line::from(vec![
-            Span::styled("path: ", palette::muted()),
+            Span::styled("path: ", palette::secondary()),
             Span::raw(
                 workspace
                     .path
@@ -1681,7 +1682,7 @@ fn detail_text(row: &ManagerRow) -> Text<'static> {
             ),
         ]),
         Line::from(vec![
-            Span::styled("bookmark: ", palette::muted()),
+            Span::styled("bookmark: ", palette::secondary()),
             Span::styled(
                 workspace
                     .associated_bookmark
@@ -1697,25 +1698,25 @@ fn detail_text(row: &ManagerRow) -> Text<'static> {
             Span::raw(")"),
         ]),
         Line::from(vec![
-            Span::styled("work: ", palette::muted()),
+            Span::styled("work: ", palette::secondary()),
             Span::styled(
                 integration_detail(&row.work_integration),
                 integration_style(&row.work_integration),
             ),
         ]),
         Line::from(vec![
-            Span::styled("checkout: ", palette::muted()),
+            Span::styled("checkout: ", palette::secondary()),
             Span::styled(
                 working_copy_label(workspace.working_copy),
                 working_copy_style(workspace.working_copy),
             ),
         ]),
         Line::from(vec![
-            Span::styled("change: ", palette::muted()),
+            Span::styled("change: ", palette::secondary()),
             Span::raw(workspace.change_id.clone()),
         ]),
         Line::from(vec![
-            Span::styled("commit: ", palette::muted()),
+            Span::styled("commit: ", palette::secondary()),
             Span::raw(short_id(&workspace.commit_id).to_owned()),
         ]),
         Line::from(""),
@@ -1783,7 +1784,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "@ current   - previous   ^ default   ! warning",
-        palette::muted(),
+        palette::secondary(),
     )));
     lines.push(Line::from(Span::styled(
         "Removing a directory is permanent. Review every row before Enter.",
@@ -1793,7 +1794,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(palette::muted())
+                .border_style(palette::secondary())
                 .title(" Help — any key closes ")
                 .title_style(palette::heading()),
         ),
@@ -1832,16 +1833,16 @@ fn render_create(frame: &mut Frame<'_>, area: Rect, form: &CreateForm, trunk: &s
     );
     let lines = vec![
         Line::from(vec![
-            Span::styled("workspace  ", palette::muted()),
+            Span::styled("workspace  ", palette::secondary()),
             Span::styled(&form.name, name_style),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("start at   ", palette::muted()),
+            Span::styled("start at   ", palette::secondary()),
             Span::styled(choices, base_style),
         ]),
         Line::from(vec![
-            Span::styled("revset    ", palette::muted()),
+            Span::styled("revset    ", palette::secondary()),
             Span::styled(base, base_style),
         ]),
         Line::from(""),
@@ -1854,7 +1855,7 @@ fn render_create(frame: &mut Frame<'_>, area: Rect, form: &CreateForm, trunk: &s
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(palette::muted())
+                .border_style(palette::secondary())
                 .title(" New workspace ")
                 .title_style(palette::heading()),
         ),
@@ -1953,13 +1954,13 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
         )));
         if let Some(path) = &row.path {
             lines.push(Line::from(vec![
-                Span::styled("  path: ", palette::muted()),
+                Span::styled("  path: ", palette::secondary()),
                 Span::raw(path.display().to_string()),
             ]));
         }
         if let Some(bookmark) = &row.bookmark {
             lines.push(Line::from(vec![
-                Span::styled("  local bookmark: ", palette::muted()),
+                Span::styled("  local bookmark: ", palette::secondary()),
                 Span::styled(bookmark.clone(), palette::bookmark()),
             ]));
         }
@@ -2025,7 +2026,7 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
                     if preview.options.include_risky {
                         palette::danger()
                     } else {
-                        palette::muted()
+                        palette::secondary()
                     },
                 ),
             ]),
@@ -2040,7 +2041,7 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
                 Span::raw(" skip those workspaces"),
             ]),
             Line::from(vec![
-                Span::styled("choice: ", palette::muted()),
+                Span::styled("choice: ", palette::secondary()),
                 Span::styled(
                     choice,
                     if preview.options.unrecorded_files == UnrecordedChoice::Delete {
@@ -2065,7 +2066,7 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, preview: &Preview) {
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(palette::muted())
+            .border_style(palette::secondary())
             .title(format!(
                 " {} — {} target{} ",
                 if preview.plan.prune {
@@ -2101,7 +2102,7 @@ fn render_report(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str, scr
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(palette::muted())
+                .border_style(palette::secondary())
                 .title(format!(" {title} — ↑↓ scroll, any other key closes "))
                 .title_style(palette::heading()),
         ),
