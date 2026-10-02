@@ -123,7 +123,7 @@ jj-waltz/
     workspace-<stable 128-bit id>.json
 ```
 
-`manifest.json` records schema version 1 and a deterministic `repo-<id>` initially
+`manifest.json` records schema version 2 (version 1 remains readable) and a deterministic `repo-<id>` initially
 derived from the normalized canonical repository-config path. Once created, the
 manifest is authoritative. JJ's secure per-repository config path is stable when
 the repository moves, and a moved config directory plus its adjacent `jj-waltz`
@@ -299,3 +299,24 @@ requires a documented public JJ capability that cannot reasonably be adapted.
 Newer JJ versions may work, but are not part of the declared window until the pin
 is advanced. Herdr is checked separately because it is a separate Cargo
 workspace.
+
+
+### External checkout lifecycle
+
+Workspace metadata schema 2 adds an optional `external_owner` with the actual linked
+Git checkout root, Git admin directory, and common directory. Schema 1 manifests and
+records remain readable. Adoption and registration inspect actual topology; repair
+preserves ownership. Older or absent records still receive live topology checks.
+
+CLI removal, manager preview and execution, pruning, and rollback revalidate ownership
+before `workspace forget`. A linked Git checkout or remaining Git registration is
+ineligible for destructive cleanup; uncertainty fails closed. A native app owns its
+checkout even after JJ adoption. Ordinary `jw add` opts out of Git colocation when
+supported, so its explicit JJ checkout remains eligible for its own lifecycle.
+
+`reconcile-external` is separate from automatic pruning. It verifies that the recorded
+checkout and Git admin directory are absent and the live registration is gone,
+rechecks immediately before forgetting any remaining JJ workspace, and removes only
+the matching metadata. It neither deletes files or Git registration nor rewrites
+commits or removes bookmarks. Doctor reports external ownership and routes cleanup
+through the owning app before explicit reconciliation.

@@ -554,6 +554,7 @@ mod tests {
                 creation_base_commit_id: "base".to_owned(),
                 associated_bookmark: bookmark.map(ToOwned::to_owned),
                 intended_remote: None,
+                external_owner: None,
             })
             .unwrap();
     }

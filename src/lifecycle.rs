@@ -395,6 +395,7 @@ fn adopt_workspace_with_store(
         creation_base_commit_id: base.commit_id,
         associated_bookmark: bookmark,
         intended_remote: None,
+        external_owner: crate::ownership::detect(&request.workspace_root)?,
     };
     store.insert(&metadata)?;
     Ok(AdoptionResult {
@@ -469,6 +470,7 @@ fn repair_workspace_with_store(
         creation_base_commit_id: base.commit_id,
         associated_bookmark,
         intended_remote: previous.intended_remote.clone(),
+        external_owner: previous.external_owner.clone(),
     };
     if !store.replace_if_matches(&previous, &replacement)? {
         bail!(
@@ -562,6 +564,7 @@ fn create_workspace(
         creation_base_commit_id: result.creation_base_commit_id.clone(),
         associated_bookmark: result.bookmark.clone(),
         intended_remote: None,
+        external_owner: crate::ownership::detect(&result.path)?,
     };
 
     if let Err(error) = store.insert(&metadata) {
@@ -778,6 +781,7 @@ mod tests {
             creation_base_commit_id: "stale-base".to_owned(),
             associated_bookmark: Some("stale-bookmark".to_owned()),
             intended_remote: Some("origin".to_owned()),
+            external_owner: None,
         }
     }
 

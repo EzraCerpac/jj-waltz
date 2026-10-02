@@ -127,6 +127,14 @@ pub fn prepare(trunk: &str, names: &[String], prune: bool) -> Result<BatchPlan> 
         let bookmark_targets = bookmark_targets(&client, &operation_id, metadata.as_ref())?;
         let mut warnings = status_row.warnings.clone();
         let mut blocked = structural_block(&status_row, prune);
+        if let Err(error) = crate::ownership::ensure_removal_allowed(
+            &client,
+            &workspace.name,
+            workspace.path.as_deref(),
+            metadata.as_ref(),
+        ) {
+            set_blocked(&mut blocked, error.to_string());
+        }
         let mut ignored = Vec::new();
         let mut ignored_inventory = Vec::new();
         let mut path_identity = None;
@@ -280,6 +288,12 @@ fn execute_one(
         let client = JjClient::current()?;
         let store = metadata_store(&client)?;
         let current_metadata = store.get(&name)?;
+        crate::ownership::ensure_removal_allowed(
+            &client,
+            &name,
+            current.workspace.path.as_deref(),
+            current_metadata.as_ref(),
+        )?;
         if current_metadata != expected.metadata {
             bail!("workspace metadata changed since the removal preview; review it again")
         }
@@ -398,6 +412,7 @@ fn execute_prune(
     if store.get(name)?.as_ref() != metadata {
         bail!("workspace metadata changed during final prune planning; review it again")
     }
+    crate::ownership::ensure_removal_allowed(client, name, None, metadata)?;
     client.run(["workspace", "forget", name])?;
     let mut progress = format!("partial removal: workspace {name} was forgotten");
 
@@ -1127,6 +1142,7 @@ mod tests {
                 creation_base_commit_id: commit_id,
                 associated_bookmark: bookmark.map(ToOwned::to_owned),
                 intended_remote: None,
+                external_owner: None,
             })
             .unwrap();
     }
@@ -1295,11 +1311,60 @@ mod tests {
     }
 
     #[test]
+    fn external_owner_blocks_ui_and_revalidates_a_frozen_removal_plan() {
+        let repo = Repo::new();
+        repo.add_workspace("owned");
+        run_scenario(&repo, "ownership-drift");
+        assert!(repo.workspace_names().iter().any(|name| name == "owned"));
+    }
+
+    #[test]
     fn removal_subprocess() {
         let Ok(scenario) = std::env::var(SCENARIO_ENV) else {
             return;
         };
         match scenario.as_str() {
+            "ownership-drift" => {
+                manage_here("owned", None);
+                let inventory = workspace::WorkspaceInventory::load().unwrap();
+                let low_level =
+                    workspace::plan_remove_workspace(&inventory, Some("owned"), true).unwrap();
+                let preview = prepare("default@", &["owned".to_owned()], false).unwrap();
+                let client = JjClient::current().unwrap();
+                let store = metadata_store(&client).unwrap();
+                let original = store.get("owned").unwrap().unwrap();
+                let mut owned = original.clone();
+                owned.external_owner = Some(crate::ownership::ExternalOwner {
+                    checkout_root: inventory.root("owned").unwrap(),
+                    git_dir: inventory.current_root().join(".git/worktrees/owned"),
+                    common_dir: inventory.current_root().join(".git"),
+                });
+                assert!(store.replace_if_matches(&original, &owned).unwrap());
+                let error = workspace::execute_remove_workspace(low_level, true).unwrap_err();
+                assert!(error.to_string().contains("externally owned"));
+                let outcomes = execute(preview, true, true, true);
+                assert!(!outcomes[0].success());
+                assert!(outcomes[0].message.contains("externally owned"));
+                let blocked = prepare("default@", &["owned".to_owned()], false).unwrap();
+                assert!(
+                    blocked.rows[0]
+                        .blocked
+                        .as_ref()
+                        .unwrap()
+                        .contains("externally owned")
+                );
+                assert!(inventory.root("owned").unwrap().exists());
+                fs::remove_dir_all(inventory.root("owned").unwrap()).unwrap();
+                let prune = prepare("default@", &["owned".to_owned()], true).unwrap();
+                assert!(
+                    prune.rows[0]
+                        .blocked
+                        .as_ref()
+                        .unwrap()
+                        .contains("externally owned")
+                );
+                assert!(store.get("owned").unwrap().is_some());
+            }
             "scan-symlink" => {
                 let scan = scan_ignored(Path::new(".")).unwrap();
                 assert!(scan.display.iter().any(|path| path == "ignored/"));

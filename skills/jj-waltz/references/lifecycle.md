@@ -52,7 +52,11 @@ operation diff matches the intended repair.
 
 ## Adopt
 
-`jw adopt <name> --base <revset>` records an existing JJ workspace as managed. It records lifecycle metadata; it does not move revisions, move or create bookmarks, or refresh the working copy.
+`jw adopt <name> --base <revset>` optionally records an existing JJ workspace's
+lifecycle metadata; it does not move revisions or bookmarks or refresh the working
+copy. It records external ownership when actual Git topology is a linked worktree.
+This protects lifecycle ownership without claiming that JJ adoption transfers it to
+`jw`. Live linked topology is protected even without this record.
 
 Inspect the workspace and resolve the base before adoption. Use `--bookmark` only to record an existing association. Use `--no-bookmark` when no association should be recorded, including when ignoring a stale legacy marker.
 
@@ -81,7 +85,11 @@ output contract and does not add link health to `jw status`.
 
 ## Remove
 
-Run removal only for an explicitly requested cleanup. Before acting, inspect `jw list`, `jw current`, `jw status <name> --refresh none`, `jw path <name>`, JJ status from the target path, and associated bookmarks.
+Run removal only for requested cleanup. Inspect enough state to establish the
+workspace identity, owner, checkout contents, and bookmark policy. Native app linked
+Git checkouts remain externally owned even after JJ adoption. `jw` refuses removal,
+forgetting (including `--keep-dir`), UI removal, and pruning of those checkouts.
+Do not bypass this with native JJ/Git cleanup or a gardener; use the owning app.
 
 - `jw remove <name>` forgets the workspace and deletes its directory by default.
 - `--keep-dir` forgets it while preserving the directory; prefer this when file preservation is uncertain.
@@ -96,3 +104,18 @@ Complete removal when `jw list` no longer contains the workspace and the directo
 `jw prune` forgets workspaces whose paths are already missing. It does not share `remove`'s explicit default-workspace guard. Inspect `jw list` and `jj workspace list` first, and run it only when every missing entry is intended for forgetting.
 
 Complete pruning when only the expected missing entries disappeared and the default/current workspaces remain intact.
+
+
+## Reconcile external state
+
+After the owning app removes both the checkout and Git worktree registration,
+`jw reconcile-external NAME` explicitly forgets any stale JJ registration and
+removes the matching external metadata. It requires a literal name and readable
+external owner record, checks both paths and live Git registrations, and revalidates
+before forgetting. An existing checkout, remaining registration, changed JJ path,
+or unverifiable state causes refusal. Commits and bookmarks are retained.
+
+Automatic prune and gardener cleanup must leave externally owned records alone,
+even after checkout removal. Missing external metadata needs restoration before
+explicit reconciliation. Schema 1 records remain readable; new records use schema 2
+with an optional external owner, and live topology checks protect older records.

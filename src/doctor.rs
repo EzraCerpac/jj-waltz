@@ -278,6 +278,24 @@ impl DoctorEngine {
         }
     }
 
+    fn cleanup_remedy(&self, name: &str, path: Option<&Path>) -> String {
+        let result = (|| -> Result<()> {
+            let config_path = match &self.repository_config_path {
+                Some(path) => path.clone(),
+                None => self.client.repo_config_path()?,
+            };
+            let store = WorkspaceMetadataStore::from_repo_config_path(config_path)?;
+            let metadata = store.get(name)?;
+            crate::ownership::ensure_removal_allowed(&self.client, name, path, metadata.as_ref())
+        })();
+        match result {
+            Ok(()) => "restore the checkout or run `jw prune` if it was removed".to_owned(),
+            Err(error) => format!(
+                "{error}; restore the checkout or use its owning app for cleanup; reconcile external metadata only after checkout and Git registration are gone"
+            ),
+        }
+    }
+
     fn check_workspace_paths(
         &self,
         report: &mut DoctorReport,
@@ -331,9 +349,7 @@ impl DoctorEngine {
                                 DoctorDiagnostic::error(
                                     DoctorCode::WorkspacePath,
                                     format!("workspace path is unusable: {error:#}"),
-                                    Some(
-                                        "restore the checkout or run `jw prune` if it was removed",
-                                    ),
+                                    Some(self.cleanup_remedy(&workspace.name, Some(&path))),
                                 )
                                 .with_subject(&workspace.name),
                             );
@@ -346,7 +362,7 @@ impl DoctorEngine {
                         DoctorDiagnostic::error(
                             DoctorCode::WorkspacePath,
                             format!("workspace path is missing or unreadable: {error:#}"),
-                            Some("restore the checkout or run `jw prune` if it was removed"),
+                            Some(self.cleanup_remedy(&workspace.name, None)),
                         )
                         .with_subject(&workspace.name),
                     );
@@ -380,6 +396,25 @@ impl DoctorEngine {
             return;
         };
 
+        for workspace in workspaces {
+            let record = metadata
+                .iter()
+                .find(|record| record.workspace_name == workspace.name);
+            if record
+                .and_then(|record| record.external_owner.as_ref())
+                .is_some()
+                || workspace.path.as_deref().is_some_and(|path| {
+                    crate::ownership::detect(path).is_ok_and(|owner| owner.is_some())
+                })
+            {
+                report.push(DoctorDiagnostic::warning(
+                    DoctorCode::MetadataConsistency,
+                    "checkout lifecycle is externally owned; jw removal and pruning are refused",
+                    Some(format!("use the owning app for checkout and Git registration cleanup, then `jw reconcile-external {}`", workspace.name)),
+                ).with_subject(&workspace.name));
+            }
+        }
+
         let workspace_names = workspaces
             .iter()
             .map(|workspace| workspace.name.as_str())
@@ -403,7 +438,11 @@ impl DoctorEngine {
                     DoctorDiagnostic::error(
                         DoctorCode::MetadataConsistency,
                         "managed metadata has no matching JJ workspace",
-                        Some("remove stale metadata only after confirming the workspace is gone"),
+                        Some(if record.external_owner.is_some() {
+                            format!("use the owning app to remove checkout and Git registration, then `jw reconcile-external {}`", record.workspace_name)
+                        } else {
+                            "remove stale metadata only after confirming the workspace is gone".to_owned()
+                        }),
                     )
                     .with_subject(&record.workspace_name),
                 );
@@ -519,7 +558,7 @@ impl DoctorEngine {
                     DoctorDiagnostic::skipped(
                         DoctorCode::WorkspaceLink,
                         "managed workspace has no matching JJ workspace; links could not be inspected",
-                        Some("restore the workspace or run `jw prune` after confirming it is gone"),
+                        Some(self.cleanup_remedy(&record.workspace_name, None)),
                     )
                     .with_subject(&record.workspace_name),
                 );
@@ -530,7 +569,7 @@ impl DoctorEngine {
                     DoctorDiagnostic::skipped(
                         DoctorCode::WorkspaceLink,
                         "managed workspace has no usable checkout; links could not be inspected",
-                        Some("restore the checkout or run `jw prune` if it was removed"),
+                        Some(self.cleanup_remedy(&record.workspace_name, None)),
                     )
                     .with_subject(&record.workspace_name),
                 );
@@ -1237,6 +1276,7 @@ mod tests {
                 creation_base_commit_id: base.commit_id,
                 associated_bookmark: None,
                 intended_remote: None,
+                external_owner: None,
             })
             .expect("write metadata");
         let record = fs::read_dir(store.root().join("workspaces"))
@@ -1302,6 +1342,7 @@ mod tests {
                 creation_base_commit_id: base.commit_id,
                 associated_bookmark: None,
                 intended_remote: None,
+                external_owner: None,
             })
             .expect("write stale metadata");
         fs::remove_dir_all(&missing).expect("remove fixture checkout");
@@ -1345,6 +1386,7 @@ mod tests {
                 creation_base_commit_id: "missing-base".to_owned(),
                 associated_bookmark: Some("missing-bookmark".to_owned()),
                 intended_remote: None,
+                external_owner: None,
             })
             .expect("write stale metadata");
 
@@ -1430,6 +1472,7 @@ mod tests {
                     creation_base_commit_id: base.commit_id.clone(),
                     associated_bookmark: None,
                     intended_remote: None,
+                    external_owner: None,
                 })
                 .expect("write metadata");
         }
@@ -1498,6 +1541,7 @@ mod tests {
                     creation_base_commit_id: base.commit_id.clone(),
                     associated_bookmark: None,
                     intended_remote: None,
+                    external_owner: None,
                 })
                 .expect("write metadata");
         }
@@ -1579,6 +1623,7 @@ mod tests {
                 creation_base_commit_id: base.commit_id,
                 associated_bookmark: None,
                 intended_remote: None,
+                external_owner: None,
             })
             .expect("write metadata");
 
@@ -1635,6 +1680,7 @@ mod tests {
                 creation_base_commit_id: base.commit_id,
                 associated_bookmark: None,
                 intended_remote: None,
+                external_owner: None,
             })
             .expect("write metadata");
 

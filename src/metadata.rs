@@ -9,7 +9,7 @@ use std::process;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const WORKSPACE_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const WORKSPACE_METADATA_SCHEMA_VERSION: u32 = 2;
 
 const STORE_DIRECTORY: &str = "jj-waltz";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -33,6 +33,8 @@ pub struct ManagedWorkspaceMetadata {
     pub creation_base_commit_id: String,
     pub associated_bookmark: Option<String>,
     pub intended_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_owner: Option<crate::ownership::ExternalOwner>,
 }
 
 #[derive(Debug, Clone)]
@@ -401,7 +403,7 @@ impl WorkspaceMetadataStore {
     fn parse_record(&self, path: &Path, contents: &[u8]) -> Result<ManagedWorkspaceMetadata> {
         let record: WorkspaceRecord = serde_json::from_slice(contents)
             .with_context(|| format!("workspace metadata is corrupt: {}", path.display()))?;
-        if record.schema_version != WORKSPACE_METADATA_SCHEMA_VERSION {
+        if !(1..=WORKSPACE_METADATA_SCHEMA_VERSION).contains(&record.schema_version) {
             bail!(
                 "unsupported workspace metadata schema {} in {} (expected {})",
                 record.schema_version,
@@ -462,7 +464,20 @@ impl WorkspaceMetadataStore {
 }
 
 fn validate_metadata(metadata: &ManagedWorkspaceMetadata) -> Result<()> {
-    validate_workspace_name(&metadata.workspace_name)
+    validate_workspace_name(&metadata.workspace_name)?;
+    if let Some(owner) = &metadata.external_owner
+        && (!owner.checkout_root.is_absolute()
+            || !owner.git_dir.is_absolute()
+            || !owner.common_dir.is_absolute()
+            || owner.checkout_root.parent().is_none()
+            || !owner
+                .git_dir
+                .starts_with(owner.common_dir.join("worktrees")))
+    {
+        bail!("invalid external checkout ownership paths");
+    }
+
+    Ok(())
 }
 
 fn validate_workspace_name(workspace_name: &str) -> Result<()> {
@@ -528,7 +543,7 @@ fn read_manifest_if_present(root: &Path) -> Result<Option<RepositoryManifest>> {
 fn parse_manifest(path: &Path, contents: &[u8]) -> Result<RepositoryManifest> {
     let manifest: RepositoryManifest = serde_json::from_slice(contents)
         .with_context(|| format!("metadata manifest is corrupt: {}", path.display()))?;
-    if manifest.schema_version != WORKSPACE_METADATA_SCHEMA_VERSION {
+    if !(1..=WORKSPACE_METADATA_SCHEMA_VERSION).contains(&manifest.schema_version) {
         bail!(
             "unsupported workspace metadata schema {} in {} (expected {})",
             manifest.schema_version,
@@ -810,6 +825,7 @@ mod tests {
             creation_base_commit_id: "commit-1".to_owned(),
             associated_bookmark: Some(format!("wip/{workspace_name}")),
             intended_remote: Some("origin".to_owned()),
+            external_owner: None,
         }
     }
 
@@ -836,6 +852,34 @@ mod tests {
             reopened.get("solver").expect("reopen record"),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn schema_one_records_default_to_no_marker_and_upgrade_on_replace() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = test_store(&tempdir);
+        let original = metadata("legacy");
+        store.insert(&original).unwrap();
+        for path in [store.manifest_path(), store.workspace_path("legacy")] {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["schema_version"] = serde_json::json!(1);
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let loaded = store.get("legacy").unwrap().unwrap();
+        assert_eq!(loaded, original);
+        assert!(loaded.external_owner.is_none());
+        let mut replacement = loaded.clone();
+        replacement.external_owner = Some(crate::ownership::ExternalOwner {
+            checkout_root: PathBuf::from("/app/checkout"),
+            git_dir: PathBuf::from("/primary/.git/worktrees/checkout"),
+            common_dir: PathBuf::from("/primary/.git"),
+        });
+        assert!(store.replace_if_matches(&loaded, &replacement).unwrap());
+        assert_eq!(store.get("legacy").unwrap(), Some(replacement));
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.workspace_path("legacy")).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 2);
     }
 
     #[test]

@@ -918,6 +918,7 @@ mod tests {
             creation_base_commit_id: "missing-base".to_owned(),
             associated_bookmark: Some("wip/solver".to_owned()),
             intended_remote: Some("origin".to_owned()),
+            external_owner: None,
         };
         let snapshot = derive_workspace_snapshot(DerivationInput {
             facts: &facts(),

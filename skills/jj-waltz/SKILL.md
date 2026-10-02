@@ -5,7 +5,12 @@ description: Use when the user mentions jw, jj-waltz, or .jwlinks.toml; asks to 
 
 # jj-waltz
 
-Use `jw` for explicit JJ workspace lifecycle and navigation work. A generic parallel-agent task stays in its existing checkout unless the user requests separate workspaces.
+Use `jw` when the user requests JJ workspace lifecycle or navigation work. Its
+lifecycle management is optional. Keep native app tasks in the checkout the app
+created, use its actual Git or JJ capability, and give each checkout one writer.
+An orchestrator inspecting a worker checkout stays read-only. Do not create another
+JJ workspace merely to route an agent; no mandatory inspection ritual or adoption
+step is required for ordinary coding.
 
 ## Workflow
 
@@ -23,11 +28,11 @@ realpath "$resolved_jw"
 "$resolved_jw" --version
 ```
 
-When a task starts in Codex, a Git worktree, or a path whose repository identity is
-unclear, run `jw context [PATH]` before routing or mutating. Use `--format=json` when
-another tool will consume the result. The check is read-only: keep Git checkout
-topology and JJ workspace identity separate, and read [`references/codex.md`](references/codex.md)
-before selecting or creating a JJ workspace for a Codex task.
+When using `jw` and checkout identity is unclear, `jw context [PATH]` can inspect it
+read-only. Use `--format=json` when another tool consumes the result. Keep Git
+checkout topology and JJ workspace identity separate. For a requested lifecycle
+change to a native app checkout, [`references/codex.md`](references/codex.md)
+explains ownership and capability checks.
 
 Check `jw --help` before relying on `context`; an older installed jw may need an
 authorized build or upgrade even when the source skill is current.
@@ -46,14 +51,16 @@ Choose only the branch the request needs. Load only the reference linked by that
 - `--bookmark` applies to one workspace. For batch creation, use the configured `bookmark_template` or omit bookmarks.
 - Prefer `jw switch --execute <command> <name>` when a tool or agent should run inside the target. The command runs there without changing the parent shell's directory.
 
-Use `jw` rather than Git worktrees for JJ workspace lifecycle. Use ordinary `jj` commands for revision history, bookmarks outside `jw` lifecycle choices, and remotes.
+Use `jw` for requested JJ workspace lifecycle actions and ordinary `jj` commands
+for revision history, bookmarks, and remotes. The native app owns its created Git
+checkouts, including those already adopted into JJ.
 
 #### Codex checkout routing
 
 When the task starts from a Codex-owned Git checkout, or when Git and JJ point at
-different directories, read [`references/codex.md`](references/codex.md). It defines
-the clean-checkout, exact-starting-commit, explicit-working-directory, and external
-cleanup gates for routing into a JJ workspace.
+different directories, read [`references/codex.md`](references/codex.md). It describes
+actual checkout capabilities, one writer per checkout, and the external ownership
+boundary. Keep work in the app-created checkout.
 
 #### Shell navigation
 
@@ -85,7 +92,11 @@ For `status`, `doctor`, `adopt`, `remove`, or `prune`, read [`references/lifecyc
 
 #### Explicit parallel workspaces
 
-When the user requests parallel JJ workspaces, use one workspace per substantial independent task, reuse a clearly matching workspace, and keep tightly coupled or sequential work together. Prefer short task-shaped names and `jw switch --execute` when launching work. Follow the host's policy for agents and parallel execution; workspace creation does not grant permission to spawn agents.
+When the user explicitly requests separate JJ workspaces, use one writer per
+workspace, reuse a clearly matching workspace, and keep tightly coupled or sequential
+work together. For native app tasks, use its authorized checkouts and keep the
+orchestrator read-only in worker checkouts. Follow the host's policy for agents and
+parallel execution; workspace creation does not grant permission to spawn agents.
 
 Complete this stage when the requested branch either succeeds or stops with the exact unresolved state and no unintended workspace mutation.
 

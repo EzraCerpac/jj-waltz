@@ -42,6 +42,7 @@ to a warning rather than make local workspace management fail.
 - `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
 - `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
 - `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
+- `jw reconcile-external <name>` reconciles stale JJ state after external checkout cleanup
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
@@ -50,24 +51,22 @@ to a warning rather than make local workspace management fail.
 
 ## Checkout discovery and Codex
 
-Run `jw context` before choosing a workspace when an editor or agent starts in an
-unfamiliar checkout. `jw context PATH --format=json` returns schema version 1 with
-separate `git` and `jj` objects, nullable identity fields, and diagnostics. Git-only
-and non-repository paths are valid results. Inspect diagnostics even when the
-command succeeds; discovery never refreshes a working copy.
+`jw context` can inspect an unfamiliar checkout's identity. Its JSON uses schema
+version 1 with separate `git` and `jj` objects, nullable identity fields, and
+diagnostics. Git-only and non-repository paths are valid results. Discovery does
+not refresh a working copy.
 
-A Git worktree can report a verified related JJ primary checkout without being a JJ
-workspace itself. For isolated Codex work, resolve the exact Git starting commit in
-that primary checkout, then use `jw add NAME --at COMMIT` and run task commands in
-the resulting JJ workspace. Check the original checkout for edits before routing.
-Existing workspace names require inspection before reuse; `--at` only controls
-creation.
+Keep native app tasks in the checkout the app creates. Use Git when that checkout
+has Git only, and JJ when it already has a JJ workspace, including an adopted linked
+Git worktree. A related JJ primary checkout does not require routing into another
+workspace. Keep the requested starting commit and an explicit working directory.
 
-Codex's Git panel can continue showing its original checkout after an agent changes
-command directories. Report the selected JJ path and use JJ status and diff for
-that task. Keep Codex-owned worktrees out of jw cleanup. See the
-[Codex skill reference](skills/jj-waltz/references/codex.md) for the complete routing
-checks. This command does not enable JJ colocation inside linked Git worktrees.
+Give each checkout one writer; an orchestrator can inspect a worker's state and
+results read-only. Native apps own their created checkouts and Git registrations,
+so cleanup belongs to the app. `jw` workspace lifecycle is optional. The
+[native app skill reference](skills/jj-waltz/references/codex.md) describes capability
+and ownership checks. `jw context` and `jw adopt` do not initialize or adopt a Git
+worktree into JJ.
 
 ## Install
 
@@ -331,6 +330,19 @@ intent for an existing workspace. Adoption is insert-only: it requires no existi
 managed record and never replaces one. It does not move revisions or bookmarks and
 does not refresh the working copy.
 
+Native apps own the Git checkouts they create, including checkouts adopted into JJ.
+Keep agent work there, use the actual Git or JJ capability, and give each checkout
+one writer; an orchestrator stays read-only in a worker's checkout. `jw` lifecycle
+management is optional and does not require creating a second workspace.
+
+Linked Git topology makes removal, forgetting (even `--keep-dir`), UI removal, and
+pruning ineligible. `jw adopt` persists that owner for damaged or missing checkout
+metadata; live topology is protected without adoption. Let the owning app remove
+both checkout and Git registration. Then `jw reconcile-external NAME` can explicitly
+forget leftover JJ state and remove the external metadata, retaining commits and
+bookmarks. Native JJ forgetting can remove Git registration on some builds, and
+undo does not restore that side effect.
+
 `jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` repairs an
 existing readable managed record. `NAME` is literal; routing shortcuts such as `@`,
 `-`, and `^` are not accepted. The named workspace must be registered with JJ, and
@@ -339,7 +351,7 @@ already exist locally at one frozen JJ operation; `--no-bookmark` clears the rec
 association. The checkout path does not need to be usable.
 
 Repair replaces only the recorded creation base and associated bookmark. It preserves
-the record's historical timestamps, creation operation, and intended remote. The
+the record's historical timestamps, creation operation, intended remote, and external owner. The
 metadata write is atomic, so validation or write failure leaves the old record intact.
 The command does not create or move bookmarks, rewrite commits, refresh working
 copies, or create a JJ operation. Doctor points invalid bases and missing associated
@@ -363,7 +375,11 @@ versions retain the manual merge-or-abandon guidance.
 
 ## Development checks
 
-Run `cargo test --locked --all-targets` for the Rust tests. On Unix, build with
+Run `cargo test --locked --all-targets` for the Rust tests. To exercise the real
+PR 9943 adopted-worktree ownership fixtures, set `JW_TEST_PINNED_JJ` to the exact
+`ede10cda453017def68e672a5715220ddf10c09b` build when running
+`cargo test --locked --test external_owner`. Those fixtures also demonstrate native
+forget/undo registration loss and ordinary `jw` creation/removal. On Unix, build with
 `cargo build --locked`, then run `uv run --with pyte tests/terminal_ui.py` for
 real terminal interaction, shell switching, terminal restoration, and a
 50-workspace responsiveness check. The terminal checks use disposable repositories.
