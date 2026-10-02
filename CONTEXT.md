@@ -157,3 +157,20 @@ by itself a claim that a command exposing that concept already exists.
 - New workspace creation resolves an exact base before mutation. Implicit creation
   requires exactly one `parents(@)` revision. A merge working copy therefore needs
   an explicit exact base such as `--at @`.
+
+
+## Checkout lifecycle ownership
+
+Native apps own the checkouts and Git registrations they create. JJ adoption keeps
+that owner. `jw` lifecycle use is optional; a task uses the actual Git or JJ capability
+in its checkout without creating another workspace for agent routing. Each checkout
+has one writer, and an orchestrator inspects worker state read-only.
+
+Actual linked Git topology is ineligible for `jw` removal, forgetting (including
+`--keep-dir`), manager removal, pruning, and rollback. Schema 2 lifecycle metadata
+optionally persists the external checkout root, Git admin directory, and common
+directory; schema 1 remains readable and live topology checks cover absent records.
+Metadata repair preserves ownership. The owning app removes checkout and Git
+registration first; `jw reconcile-external NAME` then explicitly removes leftover
+JJ registration and its matching external metadata while retaining commits and
+bookmarks. Unverifiable or changed state fails closed.

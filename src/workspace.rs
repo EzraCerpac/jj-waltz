@@ -379,6 +379,12 @@ pub fn plan_remove_workspace(
 
     let store = metadata_store()?;
     let managed_metadata = store.get(&name)?;
+    crate::ownership::ensure_removal_allowed(
+        &JjClient::current()?,
+        &name,
+        Some(&path),
+        managed_metadata.as_ref(),
+    )?;
     let bookmarks = match &managed_metadata {
         Some(metadata) => bookmarks_for_managed_workspace(metadata)?,
         None => bookmarks_for_workspace(&name, &path)?,
@@ -398,7 +404,15 @@ pub fn execute_remove_workspace(
     plan: RemovalPlan,
     delete_bookmarks: bool,
 ) -> Result<RemovalResult> {
-    JjClient::current()?.run(["workspace", "forget", &plan.workspace])?;
+    let client = JjClient::current()?;
+    let current_metadata = metadata_store()?.get(&plan.workspace)?;
+    crate::ownership::ensure_removal_allowed(
+        &client,
+        &plan.workspace,
+        Some(&plan.path),
+        current_metadata.as_ref(),
+    )?;
+    client.run(["workspace", "forget", &plan.workspace])?;
 
     let mut deleted_bookmarks = Vec::new();
     if delete_bookmarks && !plan.bookmarks.is_empty() {
@@ -511,6 +525,15 @@ fn add_workspace_by_name_with_inventory(
 
     args.push(path.display().to_string());
     let client = JjClient::current()?;
+    // Newer JJ builds can create Git worktrees by default. jw owns only the JJ
+    // checkout it explicitly creates, so keep Git lifecycle with its native app.
+    if client
+        .run(["workspace", "add", "--help"])?
+        .stdout()?
+        .contains("--no-colocate")
+    {
+        args.push("--no-colocate".to_owned());
+    }
     client.run(&args)?;
 
     // Capture provenance before bookmark creation records another JJ operation.
@@ -570,6 +593,12 @@ pub fn rollback_added_workspace(result: &AddResult) -> Result<()> {
 }
 
 fn rollback_workspace_parts(name: &str, path: &Path, bookmark: Option<&str>) -> Result<()> {
+    crate::ownership::ensure_removal_allowed(
+        &JjClient::current()?,
+        name,
+        Some(path),
+        metadata_store()?.get(name)?.as_ref(),
+    )?;
     let mut errors = Vec::new();
     if let Err(error) = JjClient::current()?.run(["workspace", "forget", name]) {
         errors.push(format!("forget workspace: {error}"));
@@ -600,6 +629,12 @@ pub fn prune_missing_workspaces() -> Result<Vec<String>> {
             Some(path) if path.is_dir() => {}
             _ => {
                 let metadata = store.get(&entry.name)?;
+                crate::ownership::ensure_removal_allowed(
+                    &JjClient::current()?,
+                    &entry.name,
+                    entry.root.as_deref(),
+                    metadata.as_ref(),
+                )?;
                 JjClient::current()?.run(["workspace", "forget", &entry.name])?;
                 if let Some(metadata) = metadata
                     && !store.remove_if_matches(&metadata)?

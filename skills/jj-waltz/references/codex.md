@@ -1,68 +1,39 @@
-# Codex checkout routing
+# Native app checkout ownership
 
-Read this reference when a task starts in Codex, a Git worktree, or a directory where
-the Git checkout and JJ workspace may not be the same path.
+A native app owns the checkout it creates and its Git worktree registration. Keep
+agent work in that checkout. Do not create a second JJ workspace just to route an
+agent, and do not remove the app's checkout through `jw`, native JJ forget/remove,
+Git worktree cleanup, or a gardener.
 
-## Discover the identities
+Use `jw context [PATH]` when checkout identity or capability is unclear. It reports
+Git checkout topology and JJ workspace identity separately. Inspect the actual
+checkout: an ordinary Git checkout can use Git, while an adopted checkout can use
+JJ through its existing shared repository. A nearby JJ primary checkout does not
+make the current Git-only checkout a JJ workspace. Use the capability that is
+present; adoption or a particular command ritual is not required to start work.
 
-Run `jw context [PATH]` from the task's starting directory. Use the default human
-format for a report and `--format=json` when a launcher or other tool must consume
-the result. Resolve `PATH` to an existing directory first. If it is nested inside a
-checkout, report the nested input and the discovered checkout/workspace roots
-separately; do not treat the nested directory as the repository root.
+If JJ adoption is explicitly requested, check the installed binary's help and
+compatibility first. `jw adopt` records lifecycle intent for a workspace that already
+exists in JJ; it does not initialize or adopt a Git worktree into JJ. Some JJ builds
+provide native Git worktree adoption. Adoption keeps the original checkout and its
+external lifecycle owner; it does not authorize a second workspace or cleanup.
 
-- Git topology identifies the checkout root, worktree Git directory, common Git
-  directory, and the exact starting commit. In JSON, expose the full Git object ID
-  as nullable `git.head_commit`; an unavailable HEAD is a diagnostic, not a
-  substitute revision.
-- JJ identity identifies the JJ repository, current workspace, and a verified
-  related primary checkout when one can be found.
+Use the checkout's exact requested starting commit and an explicit command working
+directory. Inspect existing changes before edits and preserve work that belongs to
+someone else. Give each checkout one writer. An orchestrator may inspect history,
+status, results, and artifacts read-only while a worker writes; it must not refresh,
+commit, modify files, or move bookmarks in that worker's checkout. Put independent
+writers in separately authorized app checkouts, with independent mutable outputs.
 
-An ordinary Git-only checkout and a non-repository directory are valid discovery
-results. Missing tools, inaccessible paths, and broken metadata are diagnostics that
-must be resolved or reported before routing.
+`jw` lifecycle management is optional. Use it only for a requested JJ workspace
+lifecycle action. Live linked Git topology is protected even without `jw` metadata.
+Recording lifecycle metadata with `jw adopt` also persists the external owner so
+missing or damaged checkout metadata cannot silently transfer ownership to `jw`.
+`jw add` creates an ordinary JJ checkout, opting out of Git worktree colocation on
+builds that support that option.
 
-## Route a task
-
-Reuse the current JJ workspace only after checking that its registered path is
-usable, its current/base revision matches the requested starting commit, and its
-working state belongs to this task. When isolation is requested, create or select a
-task-shaped JJ workspace with an explicit `--at` revision.
-
-Use `jw path NAME` and `jw status NAME --format=json --refresh=none` to inspect
-an existing named workspace, including its recorded creation base.
-
-For a clean Codex Git checkout associated with a JJ project:
-
-1. From the discovered Git checkout root, confirm cleanliness with exactly:
-   `git --no-optional-locks status --porcelain=v1 --untracked-files=all`. An empty
-   result is required; JJ status does not replace this check. A nested task path
-   does not change which root receives this command.
-2. Confirm that the exact `git.head_commit` resolves in JJ from the verified primary
-   checkout. Use the primary root explicitly and avoid refreshing the working copy:
-   `jj --ignore-working-copy --at-op=@ --repository <primary-jj-root> log -r <head-commit>`.
-   Require exactly one resolved revision. A detached HEAD is still a starting
-   commit; preserve it explicitly.
-3. Create a missing task-shaped workspace from that primary checkout with the
-   requested name and `--at <head-commit>`. `--at` chooses the base only when
-   creating a missing workspace; it does not relocate or rebase an existing named
-   workspace. Before reusing an existing name, inspect its path and current/base
-   revision and verify that it is suitable. Do not claim that `--at` changed it.
-4. Set an explicit working directory to the selected JJ workspace for every task
-   command. Report that path before editing, testing, or inspecting task state.
-
-`jw adopt` records an existing JJ workspace as managed; it does not initialize JJ
-inside a Git worktree. Keep adoption separate from Codex routing.
-
-If the Codex checkout has edits, or the exact starting commit cannot be resolved in
-JJ, stop automatic routing. Explain the required transfer or repair and wait for the
-user's direction; do not copy files, reset the checkout, or silently choose another
-base.
-
-The Codex-created Git worktree is externally owned. Use JJ output from the selected
-workspace as authoritative when Codex's native Git panel points somewhere else, and
-never remove the Codex worktree through `jw` cleanup. Running a command in another
-directory does not retarget Codex's native Git panel.
-
-Complete routing when the chosen JJ workspace, exact base commit, explicit command
-directory, and ownership boundary have all been reported and verified.
+For cleanup, let the owning app remove both the checkout and Git registration.
+After verifying both are gone, explicitly run `jw reconcile-external NAME` to forget
+any leftover JJ registration and remove its external lifecycle record. This command
+retains commits and bookmarks. `--keep-dir` does not make native JJ forgetting safe:
+some builds remove Git registration as a side effect, and undo does not restore it.

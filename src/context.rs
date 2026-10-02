@@ -129,10 +129,10 @@ pub fn add_workspace_hint(error: Error) -> Error {
 
     let hint = match report.jj.primary_checkout.as_deref() {
         Some(primary) => format!(
-            "current directory is a Git checkout without a JJ workspace; a related JJ checkout was verified at {}. Run `jw context` there and use that workspace for JJ operations",
+            "current directory is a Git checkout without a JJ workspace; a related JJ checkout was verified at {}. Keep task work in this checkout using Git, or use an explicitly authorized JJ adoption workflow",
             primary.display()
         ),
-        None => "current directory is a Git checkout without a JJ workspace; run `jw context` from a JJ checkout before using workspace commands".to_owned(),
+        None => "current directory is a Git checkout without a JJ workspace; use Git in this checkout, or explicitly request JJ adoption before using workspace commands".to_owned(),
     };
     error.context(hint)
 }

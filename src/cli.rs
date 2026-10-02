@@ -65,6 +65,10 @@ enum Commands {
     Remove(RemoveCommand),
     #[command(about = "Forget missing workspaces")]
     Prune,
+    #[command(
+        about = "Reconcile an external workspace after its owner removed checkout and Git registration"
+    )]
+    ReconcileExternal { name: String },
     #[command(about = "Print the current workspace root")]
     Root,
     #[command(about = "Print the current workspace name")]
@@ -374,6 +378,11 @@ pub fn run() -> Result<()> {
         Commands::Path(cmd) => run_path(cmd),
         Commands::Remove(cmd) => run_remove(cmd),
         Commands::Prune => run_prune(),
+        Commands::ReconcileExternal { name } => {
+            crate::ownership::reconcile(&name)?;
+            println!("Reconciled external workspace: {name}; commits and bookmarks retained");
+            Ok(())
+        }
         Commands::Root => {
             workspace::workspace_root_current().and_then(|root| print_line(root.display()))
         }
