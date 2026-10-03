@@ -338,7 +338,7 @@ impl Worker {
                         name,
                         base,
                     } => {
-                        let result = CreationPolicy::load(Some(base), None, false, false, 1)
+                        let result = CreationPolicy::load(Some(base), None, false, false, None, 1)
                             .and_then(|policy| lifecycle::add_workspaces(&[name], &policy))
                             .map(|_| ())
                             .map_err(format_error);

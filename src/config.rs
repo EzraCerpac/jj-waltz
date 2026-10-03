@@ -29,6 +29,7 @@ pub enum DefaultCommand {
 pub struct WorkspaceConfig {
     pub create_bookmark: bool,
     pub bookmark_template: String,
+    pub copy_on_write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,8 @@ struct RawWorkspaceConfig {
     #[serde(default)]
     create_bookmark: bool,
     bookmark_template: Option<String>,
+    #[serde(default)]
+    copy_on_write: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -62,6 +65,7 @@ impl Default for Config {
             workspace: WorkspaceConfig {
                 create_bookmark: false,
                 bookmark_template: DEFAULT_BOOKMARK_TEMPLATE.to_owned(),
+                copy_on_write: false,
             },
             trunk: TrunkConfig {
                 revset: DEFAULT_TRUNK_REVSET.to_owned(),
@@ -101,6 +105,7 @@ impl From<RawConfig> for Config {
                 bookmark_template: workspace
                     .bookmark_template
                     .unwrap_or(defaults.workspace.bookmark_template),
+                copy_on_write: workspace.copy_on_write,
             },
             trunk: TrunkConfig {
                 revset: trunk.revset.unwrap_or(defaults.trunk.revset),
@@ -135,6 +140,7 @@ mod tests {
         assert_eq!(config.default_command, DefaultCommand::Ui);
         assert!(!config.workspace.create_bookmark);
         assert_eq!(config.workspace.bookmark_template, "{workspace}");
+        assert!(!config.workspace.copy_on_write);
         assert_eq!(config.trunk.revset, "trunk()");
     }
 
@@ -149,6 +155,21 @@ mod tests {
             assert_eq!(Config::from(raw).default_command, expected);
         }
         assert!(toml::from_str::<RawConfig>("default_command = 'remove'").is_err());
+    }
+
+    #[test]
+    fn parses_copy_on_write_opt_in() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+                [workspace]
+                copy_on_write = true
+            "#,
+        )
+        .unwrap();
+
+        let config = Config::from(raw);
+        assert!(config.workspace.copy_on_write);
+        assert!(!config.workspace.create_bookmark);
     }
 
     #[test]
