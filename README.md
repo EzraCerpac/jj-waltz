@@ -289,6 +289,18 @@ without deleting its directory.
 
 ### Colocated workspaces
 
+**Breaking change in v0.8.0:** new workspace creation can inherit colocation from
+its primary workspace; earlier jw versions defaulted to JJ-only. To retain that
+previous behavior, set the following in jw configuration:
+
+```toml
+[workspace]
+colocate = false
+```
+
+Or pass `--no-colocate` for one command. Existing workspaces are not converted.
+Automatic copy-on-write creation remains JJ-only.
+
 `jw add feature --colocate` and `jw switch feature --colocate` create a JJ workspace
 with a linked Git worktree on JJ 0.46 or another build advertising that capability.
 Git-aware tools can use the new workspace's `.git` link. Without a jw override,

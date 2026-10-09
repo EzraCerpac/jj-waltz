@@ -1,23 +1,30 @@
 # Changelog
 
-## Version 0.8.1 (2026-10-09)
+## Version 0.8.0 (2026-10-09)
 
-- Inherit new workspace colocation from the verified primary workspace and its
-  effective JJ `git.colocate` setting when supported. CLI overrides take priority
-  over explicit jw config; omitted config inherits, while explicit false opts out.
-  Automatic inheritance keeps CoW workspaces JJ-only and older JJ working;
-  existing workspaces are never converted.
-- Publish the v0.8 features after the v0.8.0 release build exposed a musl link
-  failure: opt-in copy-on-write (thanks to @gergesh, #48), opt-in Git colocation,
-  external checkout ownership protection (#49), Windows corrections, and safer
-  link-conflict guidance. CoW plus colocation remains explicitly rejected.
+**Breaking change: new workspace colocation defaults.**
+
+### Breaking change and migration
+
+- When no explicit CLI or jw configuration override is present, new workspaces
+  inherit colocation from a verified colocated primary workspace when its effective
+  JJ `git.colocate` setting is true and JJ supports workspace colocation. Previously,
+  new workspaces defaulted to JJ-only. Creation from registered JJ-only or colocated
+  siblings now uses the same primary policy.
+- To retain the previous JJ-only creation behavior, set `workspace.colocate = false`
+  in jw configuration or pass `--no-colocate` for one command. Explicit CLI
+  true/false overrides explicit jw configuration; omitted configuration inherits.
+  Existing workspaces are not converted. Automatic CoW creation remains JJ-only;
+  explicitly combining CoW and colocation remains an actionable error.
+- Older supported JJ versions and unverified or non-Git primary topology continue
+  to create JJ-only workspaces. No repositories are migrated or adopted automatically.
+
+### Features and fixes
+
 - Call Linux's exclusive rename syscall directly instead of requiring the
   `renameat2` libc wrapper, preserving atomic refusal to overwrite occupied
   destinations on both GNU and static musl builds.
 - Build and exercise the static musl binary in PR CI before publication.
-
-## Version 0.8.0 (2026-10-09)
-
 - Add opt-in copy-on-write workspace creation with `jw add --cow`,
   `jw switch --cow`, or `workspace.copy_on_write = true`. New workspaces clone
   the current workspace's tracked files on APFS, Btrfs, or XFS and match a full
