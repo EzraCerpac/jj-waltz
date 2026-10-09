@@ -1,16 +1,5 @@
 # Changelog
 
-## Version 0.8.1 (2026-10-09)
-
-- Publish the v0.8 features after the v0.8.0 release build exposed a musl link
-  failure: opt-in copy-on-write (thanks to @gergesh, #48), opt-in Git colocation,
-  external checkout ownership protection (#49), Windows corrections, and safer
-  link-conflict guidance. CoW plus colocation remains explicitly rejected.
-- Call Linux's exclusive rename syscall directly instead of requiring the
-  `renameat2` libc wrapper, preserving atomic refusal to overwrite occupied
-  destinations on both GNU and static musl builds.
-- Build and exercise the static musl binary in PR CI before publication.
-
 ## Version 0.8.0 (2026-10-09)
 
 - Add opt-in copy-on-write workspace creation with `jw add --cow`,
