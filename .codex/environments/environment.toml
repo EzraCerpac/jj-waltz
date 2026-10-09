@@ -1,0 +1,21 @@
+# Project-local environment; fields match the installed app's generated format.
+version = 1
+name = "jj-waltz"
+
+[setup]
+script = "cargo fetch --locked"
+
+[[actions]]
+name = "Tests"
+icon = "tool"
+command = "cargo test --locked --all-targets"
+
+[[actions]]
+name = "Check"
+icon = "tool"
+command = "cargo fmt --all -- --check && cargo clippy --locked --all-targets -- -D warnings"
+
+[[actions]]
+name = "Pinned ownership tests"
+icon = "tool"
+command = 'JW_TEST_PINNED_JJ="$(command -v jj)" cargo test --locked --test external_owner'

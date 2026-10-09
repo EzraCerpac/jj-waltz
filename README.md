@@ -10,10 +10,24 @@ Fish is the recommended shell for the best `jw` experience, including the riches
 Jujutsu workspaces are powerful, but the raw workflow is still more manual than it needs to be.
 `jj-waltz` makes switching feel intentional: create or jump in one command, preserve your current subdirectory, and integrate cleanly with your shell.
 
-This project is directly inspired by [Worktrunk](https://github.com/max-sixty/worktrunk), which set a high bar for ergonomic worktree tooling in Git-centric workflows. `jj-waltz` brings a similar design philosophy to JJ-native workspace management.
+This project is directly inspired by [Worktrunk](https://github.com/max-sixty/worktrunk),
+which set a high bar for ergonomic worktree tooling. Worktrunk is a quality
+benchmark, not this project's command specification: `jj-waltz` stays focused on
+JJ-native workspace lifecycle and cross-workspace coordination.
+
+The responsibility split is deliberate:
+
+- `jj` owns revision-graph work, bookmarks, fetch/push, and operation-log recovery.
+- `jw` owns workspace creation, navigation, links, lifecycle metadata, and safe
+  cross-workspace coordination.
+- Forge tools such as `gh` and `glab` own pull requests, merge requests, and CI.
+
+Core workspace operations remain offline. Optional forge information must degrade
+to a warning rather than make local workspace management fail.
 
 ## Features
 
+- `jw context [PATH]` reports Git topology and JJ identity without changing either
 - `jw add <name>...` creates one or more JJ workspaces without switching
 - `jw switch <name>` creates or switches to a JJ workspace
 - `jw switch <name>...` creates any missing workspaces and switches to the last one
@@ -21,12 +35,38 @@ This project is directly inspired by [Worktrunk](https://github.com/max-sixty/wo
 - `jw ^` and `jw -` switch to the default and previous workspaces
 - preserve the current subdirectory when switching between sibling workspaces
 - shortcuts for current, previous, and default workspaces: `@`, `-`, `^`
-- `jw list` (`jw l`, `jw ls`), `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, `jw current`
+- `jw list` (`jw l`, `jw ls`) keeps its compact legacy output; `--format=json` emits a frozen repository snapshot
+- `jw status [workspace]` explains one workspace from the same snapshot contract
+- `jw doctor` reports repository, trunk, metadata, and workspace consistency checks
+- `jw` opens the interactive workspace manager in a terminal; `jw ui` selects it explicitly
+- `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
+- `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
+- `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
+- `jw reconcile-external <name>` reconciles stale JJ state after external checkout cleanup
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
+
+## Checkout discovery and Codex
+
+`jw context` can inspect an unfamiliar checkout's identity. Its JSON uses schema
+version 1 with separate `git` and `jj` objects, nullable identity fields, and
+diagnostics. Git-only and non-repository paths are valid results. Discovery does
+not refresh a working copy.
+
+Keep native app tasks in the checkout the app creates. Use Git when that checkout
+has Git only, and JJ when it already has a JJ workspace, including an adopted linked
+Git worktree. A related JJ primary checkout does not require routing into another
+workspace. Keep the requested starting commit and an explicit working directory.
+
+Give each checkout one writer; an orchestrator can inspect a worker's state and
+results read-only. Native apps own their created checkouts and Git registrations,
+so cleanup belongs to the app. `jw` workspace lifecycle is optional. The
+[native app skill reference](skills/jj-waltz/references/codex.md) describes capability
+and ownership checks. `jw context` and `jw adopt` do not initialize or adopt a Git
+worktree into JJ.
 
 ## Install
 
@@ -44,10 +84,22 @@ brew install EzraCerpac/tap/jj-waltz
 cargo install --git https://github.com/EzraCerpac/jj-waltz --locked
 ```
 
+### Herdr plugin
+
+Install the bundled Herdr UI to create and remove `jw` workspaces from Herdr:
+
+```bash
+herdr plugin install EzraCerpac/jj-waltz/plugins/herdr
+```
+
+The plugin builds the `jw` binary from the same repository revision and delegates all
+workspace paths, links, bookmarks, and removal checks to it. See
+[`plugins/herdr`](plugins/herdr) for keybindings and local development.
+
 ## Workspace links
 
 If you keep large ignored data in one workspace and want it accessible from others,
-define links in `.jwlinks.toml`:
+define link relationships in the default workspace's `.jwlinks.toml`:
 
 ```toml
 [[link]]
@@ -56,10 +108,26 @@ target = "../ezra-cerpac/data"
 required = true
 ```
 
-When you run `jw switch`, `jw` creates symlinks in the target workspace unless you pass
-`--no-links`. You can also run `jw links apply` manually.
+When you run `jw switch`, `jw` creates symlinks in the receiving workspace unless you
+pass `--no-links`. You can also run `jw links apply` manually from any workspace; it
+still uses the default workspace's configuration. `.jwlinks.local.toml` overrides the
+shared file for an entry with the same `source`. Relative targets resolve from the
+workspace receiving the links, so the same rule can work across sibling and nested
+workspaces.
+
+Sources must stay inside the receiving workspace. Absolute sources and parent traversal
+such as `../outside` are rejected. All rules are checked before `jw` changes the filesystem,
+so a later conflict does not leave earlier links behind.
 
 For machine-specific overrides, add `.jwlinks.local.toml` (recommended to keep ignored).
+
+`jw doctor` checks these relationships in every managed workspace. A configured source
+is `PASS` when it resolves canonically to its target, including an ordinary path. A
+missing source when its target exists, a missing required target, or a source occupied
+by a private path or wrong link is `FAIL`. An optional missing target is `WARN`/`SKIP`
+only when the source is absent or is the correct dangling link. A managed workspace
+whose path is stale or missing gets a separate workspace diagnostic and link inspection
+is `SKIP`.
 
 ## Shell setup
 
@@ -75,6 +143,12 @@ eval "$(jw shell init zsh)"
 
 # fish
 jw shell init fish | source
+
+# elvish
+eval (jw shell init elvish | slurp)
+
+# PowerShell
+jw shell init powershell | Out-String | Invoke-Expression
 ```
 
 Without shell initialization, the raw `jw` binary can only print the target path
@@ -86,6 +160,8 @@ To generate completions manually:
 jw shell completions fish
 jw shell completions zsh
 jw shell completions bash
+jw shell completions elvish
+jw shell completions powershell
 ```
 
 ## Quick start
@@ -98,8 +174,128 @@ jw switch -x opencode feature-ui
 jw ^
 jw -
 jw ls
+jw list --format=json
+jw status @ --format=json --refresh=none
+jw doctor
 jw remove frontend tests
 ```
+
+## Interactive workspace manager
+
+In a terminal, bare `jw` opens the Ratatui workspace manager by default. The
+bare command can instead run the legacy list or help view through the top-level
+config setting:
+
+```toml
+default_command = "ui" # "ui", "list", or "help"
+```
+
+A bare invocation outside a terminal prints help; explicit `jw ui` requires a
+terminal. Build from source with Rust 1.88 or newer.
+
+Use arrows or `j/k` to move, `Space` to mark a row, `a` to select visible rows,
+`c` to clear selection, `/` to search, and `?` for help. Click a checkbox to select
+with the mouse. Selections survive searches and filters; the header counts hidden
+selections too. `Enter` switches to the highlighted workspace and exits.
+Re-source `jw shell init ...` after updating to enable this shell behavior.
+
+Press `m` outside text-entry fields to toggle mouse controls. In text-selection
+mode, drag normally to select text using your terminal; keyboard controls still
+work. Press `m` again to restore row clicks and mouse scrolling. The footer shows
+the active mode. Colors follow your terminal palette: cyan identifies focus and
+shortcuts, magenta bookmarks, green integrated work and success, yellow unfinished
+work and warnings, and red conflicts, errors, and destructive actions. Text labels
+remain visible alongside the colors.
+
+`f` cycles filters; `1`–`4` select all, integrated bookmarks, unfinished work, or
+problems. Bookmark integration and workspace work are separate columns: a merged
+bookmark can still have newer workspace work. “In trunk” means local graph
+ancestry, not squash-merge equivalence or GitHub merge status. The resolved trunk
+is shown above the table. File state starts as unchecked; `i` refreshes the
+highlighted workspace, and removal refreshes its selected targets.
+
+`n` creates a workspace from an editable trunk, highlighted-workspace, or custom
+revision. `h` opens the read-only health report, `y` requests copying the path via
+the terminal clipboard protocol, and `Tab` opens details on narrow terminals.
+Clipboard support depends on the terminal; the path is also shown in the notice.
+
+`d` previews removal of the marked rows, or the highlighted row when none are
+marked. `p` opens **Prune missing workspaces**: it forgets registrations whose
+directories are already gone. Remove also permanently deletes existing directories.
+Current and default workspaces cannot be removed by the manager.
+Risky rows are excluded initially;
+`r` explicitly includes them. The preview shows how many rows will be removed,
+skipped, or blocked and explains why. If eligible workspaces contain files not
+recorded by JJ, choose `i` to delete the listed files or `s` to skip those
+workspaces. These files can include ignored caches, build output, and private
+files; JJ cannot restore them after deletion. Enter waits for this choice and
+does nothing if no workspace is eligible. Directory deletion is permanent.
+JJ's operation log is not a full undo for directory removal.
+
+In the preview, `b` toggles keeping or deleting eligible associated **local**
+bookmarks. The last confirmed choice is remembered across repositories in
+`$XDG_STATE_HOME/jj-waltz/ui.json`, falling back to
+`~/.local/state/jj-waltz/ui.json`. The initial choice is keep. Bookmarks associated
+with surviving managed workspaces are preserved; remote bookmarks are untouched.
+Unmanaged workspaces never have inferred bookmarks deleted. If saving the choice
+fails, removal still runs and reports a separate preference warning.
+
+Each target is revalidated before mutation. Changed targets require another
+review. Independent rows continue after a failure; results identify partial
+progress, and failed rows remain selected for an explicit retry. No batch rollback
+or automatic repair is performed.
+
+## Removing workspaces
+
+When a workspace has a bookmark created by `jw`, `jw remove` asks before deleting
+that bookmark. The safe default is to keep it. Scripts can choose explicitly:
+
+```bash
+jw remove --delete-bookmark feature-api
+jw remove --keep-bookmark feature-api
+```
+
+Removal is planned before mutation, so default/current-workspace checks and bookmark
+choices happen before the workspace is forgotten. `--keep-dir` forgets the workspace
+without deleting its directory.
+
+### Colocated workspaces
+
+`jw add feature --colocate` and `jw switch feature --colocate` create a JJ workspace
+with a linked Git worktree on JJ 0.46 or another build advertising that capability.
+Git-aware tools can use the new workspace's `.git` link. The default remains a
+JJ-only workspace, regardless of JJ's `git.colocate` setting. To opt in globally:
+
+```toml
+[workspace]
+colocate = true
+```
+
+`--colocate` and `--no-colocate` override this setting for one command. They affect
+only newly created workspaces; switching to an existing workspace never converts
+it. Unsupported JJ versions and non-Git backends fail before creation.
+
+`jw` records provenance only for Git worktrees it creates. `jw remove` cleans that
+workspace's Git registration, and `--keep-dir` retains its files while removing the
+Git link. Missing checkout paths can be pruned if the recorded registration still
+matches. Cleanup validates both live topology and the ownership marker, and never
+runs a global Git worktree prune. Changed topology or missing/damaged provenance
+requires inspection instead of automatic deletion. Native app checkouts remain
+externally owned, including after adoption.
+
+`jw doctor` validates recorded ownership against live topology and the marker,
+and reports invalid provenance as a metadata-consistency error.
+
+Lifecycle metadata writes use schema 3; schemas 1 and 2 remain readable without
+inferring ownership. Older jw versions refuse schema 3 records. Preserve the metadata
+and Git administrative ownership marker for cleanup, and use a current jw version.
+If a process is interrupted after detaching `.git`, inspect `.jj/jw-detached-git`
+and the retained metadata before recovering the link or finishing cleanup.
+
+Copy-on-write creation is an independent, unreleased feature (PR #48). Colocation
+currently rejects `workspace.copy_on_write = true`; support for their combination
+must be implemented and tested separately.
+
 
 ## Config
 
@@ -121,6 +317,111 @@ For one command, `jw switch --bookmark custom-name feature-a` overrides the conf
 and `jw switch --no-bookmark feature-a` suppresses configured bookmark creation.
 Explicit `--bookmark` is single-workspace only; for batch `add` or `switch`, use
 `bookmark_template`.
+
+Status compares against one configured trunk revision. It defaults to JJ's
+`trunk()` revset:
+
+```toml
+[trunk]
+revset = "trunk()"
+```
+
+The revset must resolve to exactly one revision. Workspace creation also resolves
+one exact base before changing anything. With no `--at`, `jw` uses the sole
+`parents(@)` revision, preserving sibling-workspace behavior. An empty merge
+working copy has multiple parents, so implicit creation stops before mutation;
+use `--at @` when creating directly from that merge is intentional.
+
+## Semantic status and JSON
+
+```bash
+# Historical human list; does not load trunk or managed metadata.
+jw list
+
+# Versioned snapshot. List JSON refreshes current workspace by default.
+jw list --format=json --refresh=current
+jw list --format=json --refresh=none
+jw list --format=json --refresh=all
+
+# One workspace. Tokens @, -, ^, and default are supported.
+jw status @
+jw status feature-api --format=json --refresh=none
+
+# Complete diagnostics. An unhealthy report is still written before exit 1.
+jw doctor --format=json
+```
+
+`list` and `status` JSON use schema version 1 and include frozen JJ operation and
+resolved trunk IDs. Known missing values stay explicit `null`; JSON contains no
+ANSI escapes. `doctor` uses its own schema-versioned report because it must remain
+valid even when trunk or metadata is broken.
+
+Doctor keeps schema version 1 while adding the `workspace-link` diagnostic code.
+Consumers should ignore unknown additive diagnostic codes and fields. Human link
+results map to `PASS`, `WARN`, `FAIL`, or `SKIP`; machine output keeps the existing
+`passed`, `failed`, and `skipped` states, with severity distinguishing optional
+warnings from informational skips and errors. `jw status` does not inspect or expose
+link health in this change.
+
+`jw adopt NAME --base REVSET [--bookmark BOOKMARK | --no-bookmark]` records lifecycle
+intent for an existing workspace. Adoption is insert-only: it requires no existing
+managed record and never replaces one. It does not move revisions or bookmarks and
+does not refresh the working copy.
+
+Native apps own the Git checkouts they create, including checkouts adopted into JJ.
+Keep agent work there, use the actual Git or JJ capability, and give each checkout
+one writer; an orchestrator stays read-only in a worker's checkout. `jw` lifecycle
+management is optional and does not require creating a second workspace.
+
+Linked Git topology without valid jw creation provenance makes removal, forgetting
+(even `--keep-dir`), UI removal, and
+pruning ineligible. `jw adopt` persists that owner for damaged or missing checkout
+metadata; live topology is protected without adoption. Let the owning app remove
+both checkout and Git registration. Then `jw reconcile-external NAME` can explicitly
+forget leftover JJ state and remove the external metadata, retaining commits and
+bookmarks. Native JJ forgetting can remove Git registration on some builds, and
+undo does not restore that side effect.
+
+`jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` repairs an
+existing readable managed record. `NAME` is literal; routing shortcuts such as `@`,
+`-`, and `^` are not accepted. The named workspace must be registered with JJ, and
+the base must resolve to exactly one revision. With `--bookmark`, the bookmark must
+already exist locally at one frozen JJ operation; `--no-bookmark` clears the recorded
+association. The checkout path does not need to be usable.
+
+Repair replaces only the recorded creation base and associated bookmark. It preserves
+the record's historical timestamps, creation operation, intended remote, and external owner. The
+metadata write is atomic, so validation or write failure leaves the old record intact.
+The command does not create or move bookmarks, rewrite commits, refresh working
+copies, or create a JJ operation. Doctor points invalid bases and missing associated
+bookmarks to `jw repair`; corrupt records still require manual restore, while missing
+records still use `jw adopt`.
+
+## Semantic contracts
+
+[`CONTEXT.md`](CONTEXT.md) defines workspace, snapshot, trunk, metadata, stack,
+publication, integration, cleanup, and refresh vocabulary. The
+[architecture notes](docs/architecture.md) define dependency direction, metadata
+storage, and JSON compatibility. Defined roadmap concepts do not imply an
+unlisted command is available; the feature list and `jw --help` are the current
+command surface.
+
+`jw` supports JJ 0.39 and newer within its tested compatibility window. CI pins
+the oldest supported release, 0.39.0, and newer compatibility targets, 0.44.0
+and 0.45.1, instead of following a moving `latest` label. On JJ 0.45 and newer,
+doctor's divergence remedy can use `jj converge --no-interactive`; older supported
+versions retain the manual merge-or-abandon guidance.
+
+## Development checks
+
+Run `cargo test --locked --all-targets` for the Rust tests. To exercise the real
+PR 9943 adopted-worktree ownership fixtures, set `JW_TEST_PINNED_JJ` to the exact
+`ede10cda453017def68e672a5715220ddf10c09b` build when running
+`cargo test --locked --test external_owner`. Those fixtures also demonstrate native
+forget/undo registration loss and ordinary `jw` creation/removal. On Unix, build with
+`cargo build --locked`, then run `uv run --with pyte tests/terminal_ui.py` for
+real terminal interaction, shell switching, terminal restoration, and a
+50-workspace responsiveness check. The terminal checks use disposable repositories.
 
 ## AI usage note
 
