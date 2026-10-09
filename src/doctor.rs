@@ -403,9 +403,12 @@ impl DoctorEngine {
             if record
                 .and_then(|record| record.external_owner.as_ref())
                 .is_some()
-                || workspace.path.as_deref().is_some_and(|path| {
-                    crate::ownership::detect(path).is_ok_and(|owner| owner.is_some())
-                })
+                || (record
+                    .and_then(|record| record.owned_git_worktree.as_ref())
+                    .is_none()
+                    && workspace.path.as_deref().is_some_and(|path| {
+                        crate::ownership::detect(path).is_ok_and(|owner| owner.is_some())
+                    }))
             {
                 report.push(DoctorDiagnostic::warning(
                     DoctorCode::MetadataConsistency,
@@ -1277,6 +1280,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write metadata");
         let record = fs::read_dir(store.root().join("workspaces"))
@@ -1320,7 +1324,14 @@ mod tests {
         let missing = fixture.root.join("missing-workspace");
         let output = Command::new("jj")
             .current_dir(&fixture.repo)
-            .args(["workspace", "add", "--name", "gone"])
+            .args([
+                "workspace",
+                "add",
+                "--config",
+                "git.colocate=false",
+                "--name",
+                "gone",
+            ])
             .arg(&missing)
             .output()
             .expect("add fixture workspace");
@@ -1343,6 +1354,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write stale metadata");
         fs::remove_dir_all(&missing).expect("remove fixture checkout");
@@ -1387,6 +1399,7 @@ mod tests {
                 associated_bookmark: Some("missing-bookmark".to_owned()),
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write stale metadata");
 
@@ -1415,7 +1428,14 @@ mod tests {
         let child = fixture.root.join("child");
         let output = Command::new("jj")
             .current_dir(&fixture.repo)
-            .args(["workspace", "add", "--name", "child"])
+            .args([
+                "workspace",
+                "add",
+                "--config",
+                "git.colocate=false",
+                "--name",
+                "child",
+            ])
             .arg(&child)
             .output()
             .expect("add child workspace");
@@ -1473,6 +1493,7 @@ mod tests {
                     associated_bookmark: None,
                     intended_remote: None,
                     external_owner: None,
+                    owned_git_worktree: None,
                 })
                 .expect("write metadata");
         }
@@ -1505,7 +1526,14 @@ mod tests {
         let child = fixture.root.join("child");
         let output = Command::new("jj")
             .current_dir(&fixture.repo)
-            .args(["workspace", "add", "--name", "child"])
+            .args([
+                "workspace",
+                "add",
+                "--config",
+                "git.colocate=false",
+                "--name",
+                "child",
+            ])
             .arg(&child)
             .output()
             .expect("add child workspace");
@@ -1542,6 +1570,7 @@ mod tests {
                     associated_bookmark: None,
                     intended_remote: None,
                     external_owner: None,
+                    owned_git_worktree: None,
                 })
                 .expect("write metadata");
         }
@@ -1624,6 +1653,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write metadata");
 
@@ -1681,6 +1711,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write metadata");
 

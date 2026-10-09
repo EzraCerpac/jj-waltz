@@ -111,6 +111,14 @@ struct AddCommand {
     no_bookmark: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
     no_links: bool,
+    #[arg(
+        long,
+        conflicts_with = "no_colocate",
+        help = "Create new workspaces with a Git worktree (JJ 0.46+)"
+    )]
+    colocate: bool,
+    #[arg(long, help = "Override workspace.colocate for new workspaces")]
+    no_colocate: bool,
 }
 
 #[derive(Debug, Args)]
@@ -152,6 +160,14 @@ struct SwitchCommand {
     print_path: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
     no_links: bool,
+    #[arg(
+        long,
+        conflicts_with = "no_colocate",
+        help = "Create new workspaces with a Git worktree (JJ 0.46+)"
+    )]
+    colocate: bool,
+    #[arg(long, help = "Override workspace.colocate for new workspaces")]
+    no_colocate: bool,
     #[arg(last = true)]
     execute_args: Vec<String>,
 }
@@ -581,7 +597,14 @@ fn run_add(cmd: AddCommand) -> Result<()> {
         cmd.no_bookmark,
         cmd.no_links,
         cmd.names.len(),
-    )?;
+    )?
+    .with_colocation_override(if cmd.colocate {
+        Some(true)
+    } else if cmd.no_colocate {
+        Some(false)
+    } else {
+        None
+    });
     for created in lifecycle::add_workspaces(&cmd.names, &policy)? {
         print_created_workspace(&created, false);
     }
@@ -599,7 +622,14 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         cmd.no_bookmark,
         cmd.no_links,
         cmd.names.len(),
-    )?;
+    )?
+    .with_colocation_override(if cmd.colocate {
+        Some(true)
+    } else if cmd.no_colocate {
+        Some(false)
+    } else {
+        None
+    });
     let outcome = lifecycle::switch_workspaces(&cmd.names, &policy)?;
     for created in &outcome.intermediate {
         if !cmd.print_path {
@@ -694,11 +724,17 @@ fn render_list_plain() -> Result<String> {
     for entry in inventory.entries() {
         let marker = inventory.marker(&entry.name);
 
-        let path = entry
-            .root
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "(missing)".to_owned());
+        // JJ 0.46 reports recorded paths even when the checkout has disappeared.
+        let path = match entry.root.as_deref() {
+            Some(path) => match std::fs::metadata(path) {
+                Ok(_) => path.display().to_string(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    "(missing)".to_owned()
+                }
+                Err(error) => return Err(error).context("cannot inspect listed workspace path"),
+            },
+            None => "(missing)".to_owned(),
+        };
         writeln!(output, "{marker} {}\t{path}", entry.name).expect("write string");
     }
 

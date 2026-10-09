@@ -818,6 +818,8 @@ fn remove_infers_only_conventional_local_bookmark_for_unmanaged_workspace() {
             "jj",
             "workspace",
             "add",
+            "--config",
+            "git.colocate=false",
             "--name",
             "legacy",
             workspace_root.to_str().expect("UTF-8 workspace path"),

@@ -9,7 +9,7 @@ use std::process;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const WORKSPACE_METADATA_SCHEMA_VERSION: u32 = 2;
+pub const WORKSPACE_METADATA_SCHEMA_VERSION: u32 = 3;
 
 const STORE_DIRECTORY: &str = "jj-waltz";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -35,6 +35,9 @@ pub struct ManagedWorkspaceMetadata {
     pub intended_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_owner: Option<crate::ownership::ExternalOwner>,
+    /// Exact linked Git topology created by jw, never inferred during adoption or repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_git_worktree: Option<crate::ownership::OwnedGitWorktree>,
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +414,9 @@ impl WorkspaceMetadataStore {
                 WORKSPACE_METADATA_SCHEMA_VERSION
             );
         }
+        if record.schema_version < 3 && record.metadata.owned_git_worktree.is_some() {
+            bail!("owned Git worktree provenance requires metadata schema 3")
+        }
         validate_metadata(&record.metadata)
             .with_context(|| format!("invalid workspace metadata in {}", path.display()))?;
         let expected_path = self.workspace_path(&record.metadata.workspace_name);
@@ -465,18 +471,36 @@ impl WorkspaceMetadataStore {
 
 fn validate_metadata(metadata: &ManagedWorkspaceMetadata) -> Result<()> {
     validate_workspace_name(&metadata.workspace_name)?;
-    if let Some(owner) = &metadata.external_owner
-        && (!owner.checkout_root.is_absolute()
+    if metadata.external_owner.is_some() && metadata.owned_git_worktree.is_some() {
+        bail!("workspace cannot have both external and jw ownership")
+    }
+    if metadata.owned_git_worktree.as_ref().is_some_and(|owner| {
+        owner.ownership_token.is_empty()
+            || owner.ownership_token.len() > 256
+            || !owner
+                .ownership_token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) {
+        bail!("invalid owned Git worktree token")
+    }
+    for owner in metadata.external_owner.iter().chain(
+        metadata
+            .owned_git_worktree
+            .iter()
+            .map(|owner| &owner.topology),
+    ) {
+        if !owner.checkout_root.is_absolute()
             || !owner.git_dir.is_absolute()
             || !owner.common_dir.is_absolute()
             || owner.checkout_root.parent().is_none()
             || !owner
                 .git_dir
-                .starts_with(owner.common_dir.join("worktrees")))
-    {
-        bail!("invalid external checkout ownership paths");
+                .starts_with(owner.common_dir.join("worktrees"))
+        {
+            bail!("invalid external checkout ownership paths");
+        }
     }
-
     Ok(())
 }
 
@@ -826,6 +850,7 @@ mod tests {
             associated_bookmark: Some(format!("wip/{workspace_name}")),
             intended_remote: Some("origin".to_owned()),
             external_owner: None,
+            owned_git_worktree: None,
         }
     }
 
@@ -855,31 +880,34 @@ mod tests {
     }
 
     #[test]
-    fn schema_one_records_default_to_no_marker_and_upgrade_on_replace() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let store = test_store(&tempdir);
-        let original = metadata("legacy");
-        store.insert(&original).unwrap();
-        for path in [store.manifest_path(), store.workspace_path("legacy")] {
-            let mut value: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-            value["schema_version"] = serde_json::json!(1);
-            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    fn legacy_records_default_to_no_marker_and_upgrade_on_replace() {
+        for schema in [1, 2] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let store = test_store(&tempdir);
+            let original = metadata("legacy");
+            store.insert(&original).unwrap();
+            for path in [store.manifest_path(), store.workspace_path("legacy")] {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["schema_version"] = serde_json::json!(schema);
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            let loaded = store.get("legacy").unwrap().unwrap();
+            assert_eq!(loaded, original);
+            assert!(loaded.external_owner.is_none());
+            assert!(loaded.owned_git_worktree.is_none());
+            let mut replacement = loaded.clone();
+            replacement.external_owner = Some(crate::ownership::ExternalOwner {
+                checkout_root: PathBuf::from("/app/checkout"),
+                git_dir: PathBuf::from("/primary/.git/worktrees/checkout"),
+                common_dir: PathBuf::from("/primary/.git"),
+            });
+            assert!(store.replace_if_matches(&loaded, &replacement).unwrap());
+            assert_eq!(store.get("legacy").unwrap(), Some(replacement));
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(store.workspace_path("legacy")).unwrap()).unwrap();
+            assert_eq!(value["schema_version"], 3);
         }
-        let loaded = store.get("legacy").unwrap().unwrap();
-        assert_eq!(loaded, original);
-        assert!(loaded.external_owner.is_none());
-        let mut replacement = loaded.clone();
-        replacement.external_owner = Some(crate::ownership::ExternalOwner {
-            checkout_root: PathBuf::from("/app/checkout"),
-            git_dir: PathBuf::from("/primary/.git/worktrees/checkout"),
-            common_dir: PathBuf::from("/primary/.git"),
-        });
-        assert!(store.replace_if_matches(&loaded, &replacement).unwrap());
-        assert_eq!(store.get("legacy").unwrap(), Some(replacement));
-        let value: serde_json::Value =
-            serde_json::from_slice(&fs::read(store.workspace_path("legacy")).unwrap()).unwrap();
-        assert_eq!(value["schema_version"], 2);
     }
 
     #[test]

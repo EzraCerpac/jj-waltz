@@ -413,7 +413,7 @@ fn execute_prune(
         bail!("workspace metadata changed during final prune planning; review it again")
     }
     crate::ownership::ensure_removal_allowed(client, name, None, metadata)?;
-    client.run(["workspace", "forget", name])?;
+    crate::ownership::forget_workspace(client, name, None, metadata)?;
     let mut progress = format!("partial removal: workspace {name} was forgotten");
 
     if delete_bookmark
@@ -1052,6 +1052,8 @@ mod tests {
                 &[
                     "workspace",
                     "add",
+                    "--config",
+                    "git.colocate=false",
                     path.to_str().unwrap(),
                     "--name",
                     name,
@@ -1143,6 +1145,7 @@ mod tests {
                 associated_bookmark: bookmark.map(ToOwned::to_owned),
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .unwrap();
     }
@@ -1271,6 +1274,8 @@ mod tests {
             &[
                 "workspace",
                 "add",
+                "--config",
+                "git.colocate=false",
                 locked.join("a-partial").to_str().unwrap(),
                 "--name",
                 "a-partial",

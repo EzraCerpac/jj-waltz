@@ -919,6 +919,7 @@ mod tests {
             associated_bookmark: Some("wip/solver".to_owned()),
             intended_remote: Some("origin".to_owned()),
             external_owner: None,
+            owned_git_worktree: None,
         };
         let snapshot = derive_workspace_snapshot(DerivationInput {
             facts: &facts(),

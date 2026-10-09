@@ -15,6 +15,7 @@ pub struct CreationPolicy {
     no_bookmark: bool,
     apply_links: bool,
     config: Config,
+    colocate_override: Option<bool>,
 }
 
 impl CreationPolicy {
@@ -38,7 +39,30 @@ impl CreationPolicy {
             no_bookmark,
             apply_links: !no_links,
             config: Config::load()?,
+            colocate_override: None,
         })
+    }
+
+    pub fn with_colocation_override(mut self, value: Option<bool>) -> Self {
+        self.colocate_override = value;
+        self
+    }
+
+    fn colocate(&self) -> bool {
+        self.colocate_override
+            .unwrap_or(self.config.workspace.colocate)
+    }
+
+    fn preflight_colocation(&self, client: &JjClient) -> Result<()> {
+        if self.colocate() {
+            if self.config.workspace.copy_on_write {
+                bail!(
+                    "colocation and copy-on-write cannot be combined; disable workspace.copy_on_write"
+                )
+            }
+            client.require_workspace_colocation()?;
+        }
+        Ok(())
     }
 
     fn bookmark_for(&self, workspace: &str, allow_explicit: bool) -> Option<String> {
@@ -146,6 +170,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
         return Ok(Vec::new());
     }
     let client = JjClient::current()?;
+    policy.preflight_colocation(&client)?;
     let base = resolve_creation_base(&client, policy.at_revset.as_deref())?;
     let store = metadata_store(&client)?;
     preflight_creations(&inventory, &store, &plans)?;
@@ -156,7 +181,14 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
 
     let mut pending = Vec::new();
     for plan in plans {
-        match create_workspace(&plan, &base, &inventory, &store, config_root.as_deref()) {
+        match create_workspace(
+            &plan,
+            &base,
+            &inventory,
+            &store,
+            config_root.as_deref(),
+            policy.colocate(),
+        ) {
             Ok(created) => {
                 inventory.record_created(&created.result);
                 pending.push(created);
@@ -236,6 +268,7 @@ fn switch_workspaces_with_creation(
     let base = if all_plans.is_empty() {
         None
     } else {
+        policy.preflight_colocation(&client)?;
         Some(resolve_creation_base(&client, policy.at_revset.as_deref())?)
     };
     let store = if all_plans.is_empty() {
@@ -254,7 +287,14 @@ fn switch_workspaces_with_creation(
     for plan in intermediate_plans {
         let base = base.as_ref().expect("creation plan has resolved base");
         let store = store.as_ref().expect("creation plan has metadata store");
-        match create_workspace(&plan, base, &inventory, store, config_root.as_deref()) {
+        match create_workspace(
+            &plan,
+            base,
+            &inventory,
+            store,
+            config_root.as_deref(),
+            policy.colocate(),
+        ) {
             Ok(created) => {
                 inventory.record_created(&created.result);
                 intermediate.push(created);
@@ -266,7 +306,14 @@ fn switch_workspaces_with_creation(
     let mut final_created = if let Some(plan) = final_plan {
         let base = base.as_ref().expect("creation plan has resolved base");
         let store = store.as_ref().expect("creation plan has metadata store");
-        match create_workspace(&plan, base, &inventory, store, config_root.as_deref()) {
+        match create_workspace(
+            &plan,
+            base,
+            &inventory,
+            store,
+            config_root.as_deref(),
+            policy.colocate(),
+        ) {
             Ok(created) => Some(created),
             Err(error) => return Err(rollback_after(error, Some(store), &mut intermediate)),
         }
@@ -396,6 +443,7 @@ fn adopt_workspace_with_store(
         associated_bookmark: bookmark,
         intended_remote: None,
         external_owner: crate::ownership::detect(&request.workspace_root)?,
+        owned_git_worktree: None,
     };
     store.insert(&metadata)?;
     Ok(AdoptionResult {
@@ -471,6 +519,7 @@ fn repair_workspace_with_store(
         associated_bookmark,
         intended_remote: previous.intended_remote.clone(),
         external_owner: previous.external_owner.clone(),
+        owned_git_worktree: previous.owned_git_worktree.clone(),
     };
     if !store.replace_if_matches(&previous, &replacement)? {
         bail!(
@@ -547,6 +596,7 @@ fn create_workspace(
     inventory: &workspace::WorkspaceInventory,
     store: &WorkspaceMetadataStore,
     config_root: Option<&Path>,
+    colocate: bool,
 ) -> Result<PendingWorkspace> {
     let result = workspace::add_workspace(
         inventory,
@@ -554,6 +604,7 @@ fn create_workspace(
         &AddOptions {
             base_commit_id: base.commit_id.clone(),
             bookmark: plan.bookmark.clone(),
+            colocate,
         },
     )
     .with_context(|| format!("failed to add workspace {}", plan.name))?;
@@ -564,7 +615,8 @@ fn create_workspace(
         creation_base_commit_id: result.creation_base_commit_id.clone(),
         associated_bookmark: result.bookmark.clone(),
         intended_remote: None,
-        external_owner: crate::ownership::detect(&result.path)?,
+        external_owner: None,
+        owned_git_worktree: result.owned_git_worktree.clone(),
     };
 
     if let Err(error) = store.insert(&metadata) {
@@ -624,6 +676,9 @@ fn rollback_links_after(error: Error, application: Option<LinkApplication>) -> E
 }
 
 fn rollback_pending(store: &WorkspaceMetadataStore, pending: PendingWorkspace) -> Result<()> {
+    if store.get(&pending.metadata.workspace_name)?.as_ref() != Some(&pending.metadata) {
+        bail!("workspace metadata changed during rollback; checkout retained")
+    }
     let mut errors = Vec::new();
     if let Some(links) = pending.links
         && let Err(error) = links.rollback()
@@ -782,6 +837,7 @@ mod tests {
             associated_bookmark: Some("stale-bookmark".to_owned()),
             intended_remote: Some("origin".to_owned()),
             external_owner: None,
+            owned_git_worktree: None,
         }
     }
 
