@@ -636,7 +636,7 @@ where
     command
         .arg("--no-optional-locks")
         .arg("-C")
-        .arg(path)
+        .arg(crate::paths::external_command_path(path).as_ref())
         .args(args);
     command.output().map_err(|error| ProbeError {
         program: "git",
@@ -663,7 +663,7 @@ where
     command
         .arg("--no-optional-locks")
         .arg("--git-dir")
-        .arg(git_dir)
+        .arg(crate::paths::external_command_path(git_dir).as_ref())
         .args(args);
     command.output().map_err(|error| ProbeError {
         program: "git",

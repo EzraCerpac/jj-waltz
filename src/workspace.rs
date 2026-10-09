@@ -540,7 +540,12 @@ fn add_workspace_by_name_with_inventory(
         args.push("empty".to_owned());
     }
 
-    args.push(path.display().to_string());
+    let command_path = if options.colocate {
+        crate::paths::external_command_path(&path)
+    } else {
+        std::borrow::Cow::Borrowed(path.as_path())
+    };
+    args.push(command_path.display().to_string());
     let client = JjClient::current()?;
     if options.colocate {
         client.require_workspace_colocation()?;
