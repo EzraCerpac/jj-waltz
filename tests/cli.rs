@@ -1593,7 +1593,7 @@ fn directory_link_conflict_explains_safe_resolution_and_rolls_back_only_new_work
             ".jwlinks.local.toml with target equal to source",
         ))
         .stderr(predicate::str::contains(
-            "Generated files must then be supplied separately",
+            "Any untracked generated files you need must then be supplied separately",
         ));
 
     assert!(!repo.default_root.with_extension("ezra").exists());

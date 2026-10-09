@@ -264,7 +264,7 @@ impl LinkPlan {
                                     "link conflict at {}: existing directory cannot be replaced by a whole-directory link to {}. \
                                      It may contain files tracked by JJ; keep those files in place. \
                                      To keep this directory private, override this source in .jwlinks.local.toml with target equal to source. \
-                                     Generated files must then be supplied separately. \
+                                     Any untracked generated files you need must then be supplied separately. \
                                      Alternatively, share only untracked paths that are absent in the receiving workspace.",
                                     display_in_workspace(workspace_root, &check.source),
                                     check.target.display()
