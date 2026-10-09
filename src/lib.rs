@@ -10,6 +10,7 @@ pub(crate) mod manager;
 pub(crate) mod metadata;
 pub mod observe;
 pub(crate) mod ownership;
+pub(crate) mod paths;
 pub(crate) mod shell;
 pub mod snapshot;
 pub(crate) mod workspace;
