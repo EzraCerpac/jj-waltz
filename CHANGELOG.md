@@ -18,6 +18,9 @@
   config; use `--no-cow` or `--no-colocate` to override one option.
 - Protect externally owned Git checkouts and registrations during workspace
   removal, pruning, and rollback (#49).
+- Explain whole-directory link conflicts with existing directories, including
+  tracked files, and suggest a local self-target override or sharing only absent
+  untracked paths while preserving refusal and workspace rollback.
 - Correct Windows exclusive ownership operations, metadata initialization, path
   alias handling, and PowerShell switching and command execution.
 - Test JJ 0.39.0, 0.44.0, 0.45.1, and 0.46.0 on Linux, macOS, and Windows,
