@@ -223,7 +223,7 @@ fn powershell_init() -> String {
     let passthrough_args = quoted_passthrough_args(", ");
 
     format!(
-        r#"$script:__jwExecutable = (Get-Command jw -CommandType Application).Path
+        r#"$script:__jwExecutable = (Get-Command jw -CommandType Application | Select-Object -First 1).Path
 
 function jw {{
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$JwArgs)

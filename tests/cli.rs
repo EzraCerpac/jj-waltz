@@ -21,11 +21,20 @@ const POWERSHELL_SWITCH_TEST_ARGS: &[&str] = &[
     "jw shell init powershell | Out-String | Invoke-Expression; jw '^' | Out-Null; (Get-Location).Path; jw '-' | Out-Null; (Get-Location).Path",
 ];
 
+#[cfg(not(windows))]
 const POWERSHELL_EXECUTE_TEST_ARGS: &[&str] = &[
     "-NoLogo",
     "-NoProfile",
     "-Command",
     "jw shell init powershell | Out-String | Invoke-Expression; jw switch feature-a '--execute=pwd'; jw switch feature-a '-xpwd'",
+];
+
+#[cfg(windows)]
+const POWERSHELL_EXECUTE_TEST_ARGS: &[&str] = &[
+    "-NoLogo",
+    "-NoProfile",
+    "-Command",
+    "jw shell init powershell | Out-String | Invoke-Expression; jw switch feature-a '--execute=cd'; jw switch feature-a '-xcd'",
 ];
 
 fn jj_available() -> bool {
@@ -537,8 +546,9 @@ fn installed_shell_init_adapters_switch_default_and_previous_shorthands() {
         assert_eq!(
             lines,
             vec![path_string(&repo.default_root), path_string(&feature_root)],
-            "{} shell integration returned wrong directories",
-            case.name
+            "{} shell integration returned wrong directories; stderr: {}",
+            case.name,
+            String::from_utf8_lossy(&output.stderr)
         );
 
         let execute = Command::new(case.program)
