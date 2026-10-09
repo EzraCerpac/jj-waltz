@@ -1,0 +1,1145 @@
+use crate::config::{self, Config};
+use crate::jj::{JjClient, ResolvedRevision};
+use crate::links::{self, LinkApplication, LinkApplyReport};
+use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
+use crate::workspace::{self, AddOptions, AddResult, SwitchOptions, SwitchResult};
+use anyhow::{Context, Error, Result, anyhow, bail};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone)]
+pub struct CreationPolicy {
+    at_revset: Option<String>,
+    explicit_bookmark: Option<String>,
+    no_bookmark: bool,
+    apply_links: bool,
+    config: Config,
+    colocate_override: Option<bool>,
+}
+
+impl CreationPolicy {
+    pub fn load(
+        at_revset: Option<String>,
+        explicit_bookmark: Option<String>,
+        no_bookmark: bool,
+        no_links: bool,
+        workspace_count: usize,
+    ) -> Result<Self> {
+        if explicit_bookmark.is_some() && no_bookmark {
+            bail!("--bookmark and --no-bookmark cannot be used together")
+        }
+        if explicit_bookmark.is_some() && workspace_count > 1 {
+            bail!("--bookmark can only be used with a single workspace")
+        }
+
+        Ok(Self {
+            at_revset,
+            explicit_bookmark,
+            no_bookmark,
+            apply_links: !no_links,
+            config: Config::load()?,
+            colocate_override: None,
+        })
+    }
+
+    pub fn with_colocation_override(mut self, value: Option<bool>) -> Self {
+        self.colocate_override = value;
+        self
+    }
+
+    fn colocate(&self) -> bool {
+        self.colocate_override
+            .unwrap_or(self.config.workspace.colocate)
+    }
+
+    fn preflight_colocation(&self, client: &JjClient) -> Result<()> {
+        if self.colocate() {
+            if self.config.workspace.copy_on_write {
+                bail!(
+                    "colocation and copy-on-write cannot be combined; disable workspace.copy_on_write"
+                )
+            }
+            client.require_workspace_colocation()?;
+        }
+        Ok(())
+    }
+
+    fn bookmark_for(&self, workspace: &str, allow_explicit: bool) -> Option<String> {
+        if self.no_bookmark {
+            return None;
+        }
+        if allow_explicit && let Some(bookmark) = &self.explicit_bookmark {
+            return Some(bookmark.clone());
+        }
+        self.config.workspace.create_bookmark.then(|| {
+            config::bookmark_from_template(&self.config.workspace.bookmark_template, workspace)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedWorkspace {
+    pub result: AddResult,
+    pub links: Option<LinkApplyReport>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchOutcome {
+    pub intermediate: Vec<CreatedWorkspace>,
+    pub result: SwitchResult,
+    pub links: Option<LinkApplyReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptionRequest {
+    pub workspace_name: String,
+    pub workspace_root: PathBuf,
+    pub base_revset: String,
+    pub bookmark: Option<String>,
+    pub no_bookmark: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptionResult {
+    pub metadata: ManagedWorkspaceMetadata,
+    pub current_revision: ResolvedRevision,
+}
+
+/// The bookmark association to record when repairing managed workspace metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BookmarkIntent {
+    Associate(String),
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairRequest {
+    pub workspace_name: String,
+    pub base_revset: String,
+    pub bookmark: BookmarkIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairResult {
+    pub previous: ManagedWorkspaceMetadata,
+    pub replacement: ManagedWorkspaceMetadata,
+    pub validation_operation_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedWorkspace {
+    name: String,
+    bookmark: Option<String>,
+    created_at_unix_ms: u64,
+}
+
+#[derive(Debug)]
+struct PendingWorkspace {
+    result: AddResult,
+    metadata: ManagedWorkspaceMetadata,
+    links: Option<LinkApplication>,
+}
+
+impl PendingWorkspace {
+    fn finish(self) -> CreatedWorkspace {
+        CreatedWorkspace {
+            result: self.result,
+            links: self.links.map(LinkApplication::into_report),
+        }
+    }
+}
+
+pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<CreatedWorkspace>> {
+    let mut inventory = workspace::WorkspaceInventory::load()?;
+    let resolved_names = names
+        .iter()
+        .map(|name| inventory.resolve(name))
+        .collect::<Result<Vec<_>>>()?;
+    let plans = resolved_names
+        .into_iter()
+        .map(|name| {
+            Ok(PlannedWorkspace {
+                bookmark: policy.bookmark_for(&name, true),
+                name,
+                created_at_unix_ms: unix_timestamp_ms()?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = JjClient::current()?;
+    policy.preflight_colocation(&client)?;
+    let base = resolve_creation_base(&client, policy.at_revset.as_deref())?;
+    let store = metadata_store(&client)?;
+    preflight_creations(&inventory, &store, &plans)?;
+    let config_root = policy
+        .apply_links
+        .then(|| inventory.root(inventory.default_name()?))
+        .transpose()?;
+
+    let mut pending = Vec::new();
+    for plan in plans {
+        match create_workspace(
+            &plan,
+            &base,
+            &inventory,
+            &store,
+            config_root.as_deref(),
+            policy.colocate(),
+        ) {
+            Ok(created) => {
+                inventory.record_created(&created.result);
+                pending.push(created);
+            }
+            Err(error) => return Err(rollback_after(error, Some(&store), &mut pending)),
+        }
+    }
+    Ok(pending.into_iter().map(PendingWorkspace::finish).collect())
+}
+
+pub fn switch_workspaces(names: &[String], policy: &CreationPolicy) -> Result<SwitchOutcome> {
+    switch_workspaces_with_creation(names, policy, true)
+}
+
+/// Switch a manager selection without ever planning workspace creation.
+pub fn switch_existing_workspace(name: &str, policy: &CreationPolicy) -> Result<SwitchOutcome> {
+    switch_workspaces_with_creation(&[name.to_owned()], policy, false)
+}
+
+fn switch_workspaces_with_creation(
+    names: &[String],
+    policy: &CreationPolicy,
+    allow_create: bool,
+) -> Result<SwitchOutcome> {
+    let (final_name, intermediate_names) = names
+        .split_last()
+        .ok_or_else(|| anyhow!("at least one workspace name is required"))?;
+    let mut inventory = workspace::WorkspaceInventory::load()?;
+
+    // Resolve every token and validate every creation before mutating repository state.
+    let resolved_intermediate = intermediate_names
+        .iter()
+        .map(|name| inventory.resolve(name))
+        .collect::<Result<Vec<_>>>()?;
+    let resolved_final = inventory.resolve(final_name)?;
+    let existing = inventory
+        .entries()
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<HashSet<_>>();
+    if !allow_create {
+        for name in resolved_intermediate
+            .iter()
+            .chain(std::iter::once(&resolved_final))
+        {
+            if !existing.contains(name) || !inventory.root(name)?.is_dir() {
+                bail!("selected workspace `{name}` no longer exists; reopen the manager")
+            }
+        }
+    }
+    let mut available = existing;
+    let mut intermediate_plans = Vec::new();
+    for name in &resolved_intermediate {
+        if available.insert(name.clone()) {
+            intermediate_plans.push(PlannedWorkspace {
+                bookmark: policy.bookmark_for(name, false),
+                name: name.clone(),
+                created_at_unix_ms: unix_timestamp_ms()?,
+            });
+        }
+    }
+    let final_plan = if available.insert(resolved_final.clone()) {
+        Some(PlannedWorkspace {
+            bookmark: policy.bookmark_for(&resolved_final, true),
+            name: resolved_final.clone(),
+            created_at_unix_ms: unix_timestamp_ms()?,
+        })
+    } else {
+        None
+    };
+    let all_plans = intermediate_plans
+        .iter()
+        .chain(final_plan.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let client = JjClient::current()?;
+    let base = if all_plans.is_empty() {
+        None
+    } else {
+        policy.preflight_colocation(&client)?;
+        Some(resolve_creation_base(&client, policy.at_revset.as_deref())?)
+    };
+    let store = if all_plans.is_empty() {
+        None
+    } else {
+        let store = metadata_store(&client)?;
+        preflight_creations(&inventory, &store, &all_plans)?;
+        Some(store)
+    };
+    let config_root = policy
+        .apply_links
+        .then(|| inventory.root(inventory.default_name()?))
+        .transpose()?;
+
+    let mut intermediate = Vec::new();
+    for plan in intermediate_plans {
+        let base = base.as_ref().expect("creation plan has resolved base");
+        let store = store.as_ref().expect("creation plan has metadata store");
+        match create_workspace(
+            &plan,
+            base,
+            &inventory,
+            store,
+            config_root.as_deref(),
+            policy.colocate(),
+        ) {
+            Ok(created) => {
+                inventory.record_created(&created.result);
+                intermediate.push(created);
+            }
+            Err(error) => return Err(rollback_after(error, Some(store), &mut intermediate)),
+        }
+    }
+
+    let mut final_created = if let Some(plan) = final_plan {
+        let base = base.as_ref().expect("creation plan has resolved base");
+        let store = store.as_ref().expect("creation plan has metadata store");
+        match create_workspace(
+            &plan,
+            base,
+            &inventory,
+            store,
+            config_root.as_deref(),
+            policy.colocate(),
+        ) {
+            Ok(created) => Some(created),
+            Err(error) => return Err(rollback_after(error, Some(store), &mut intermediate)),
+        }
+    } else {
+        None
+    };
+
+    let result = if let Some(created) = &final_created {
+        match workspace::switch_to_created_workspace(
+            &inventory,
+            &created.result,
+            &SwitchOptions {
+                preserve_subdir: true,
+            },
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let created = final_created.take().expect("created workspace exists");
+                intermediate.push(created);
+                return Err(rollback_after(error, store.as_ref(), &mut intermediate));
+            }
+        }
+    } else {
+        match workspace::switch_workspace(
+            &inventory,
+            &resolved_final,
+            &SwitchOptions {
+                preserve_subdir: true,
+            },
+        ) {
+            Ok(result) => result,
+            Err(error) => return Err(rollback_after(error, store.as_ref(), &mut intermediate)),
+        }
+    };
+
+    let mut existing_links = if final_created.is_none() {
+        match apply_links(config_root.as_deref(), &result.path) {
+            Ok(application) => application,
+            Err(error) => return Err(rollback_after(error, store.as_ref(), &mut intermediate)),
+        }
+    } else {
+        None
+    };
+
+    if let Err(error) = workspace::record_switch(&result) {
+        if let Some(created) = final_created.take() {
+            intermediate.push(created);
+        } else {
+            let error = rollback_links_after(error, existing_links.take());
+            return Err(rollback_after(error, store.as_ref(), &mut intermediate));
+        }
+        return Err(rollback_after(error, store.as_ref(), &mut intermediate));
+    }
+
+    let links = match final_created {
+        Some(created) => created.links.map(LinkApplication::into_report),
+        None => existing_links.map(LinkApplication::into_report),
+    };
+    Ok(SwitchOutcome {
+        intermediate: intermediate
+            .into_iter()
+            .map(PendingWorkspace::finish)
+            .collect(),
+        result,
+        links,
+    })
+}
+
+/// Record an existing workspace without changing JJ graph or bookmarks.
+#[allow(dead_code)] // CLI subcommand is wired by the integration lane.
+pub fn adopt_workspace(request: &AdoptionRequest) -> Result<AdoptionResult> {
+    if request.base_revset.trim().is_empty() {
+        bail!("adoption base revision cannot be empty")
+    }
+    let client = JjClient::new(&request.workspace_root);
+    let store = metadata_store(&client)?;
+    adopt_workspace_with_store(request, &client, &store)
+}
+
+fn adopt_workspace_with_store(
+    request: &AdoptionRequest,
+    client: &JjClient,
+    store: &WorkspaceMetadataStore,
+) -> Result<AdoptionResult> {
+    if request.bookmark.is_some() && request.no_bookmark {
+        bail!("--bookmark and --no-bookmark cannot be used together")
+    }
+    if store.get(&request.workspace_name)?.is_some() {
+        bail!("workspace is already managed: {}", request.workspace_name)
+    }
+
+    let operation_id = client.operation_id()?;
+    let current_revision = client
+        .resolve_one_at(&operation_id, "@")
+        .context("failed to resolve the workspace working-copy revision during adoption")?;
+    let base = client
+        .resolve_one_at(&operation_id, &request.base_revset)
+        .with_context(|| {
+            format!(
+                "adoption base {:?} must resolve to exactly one revision",
+                request.base_revset
+            )
+        })?;
+    let bookmark = if request.no_bookmark {
+        None
+    } else {
+        match &request.bookmark {
+            Some(bookmark) => Some(bookmark.clone()),
+            None => workspace::legacy_workspace_bookmark(&request.workspace_root)?,
+        }
+    };
+    if let Some(bookmark) = &bookmark {
+        let bookmarks = client
+            .local_bookmark_names_at(&operation_id)
+            .context("failed to verify the adoption bookmark at the captured operation")?;
+        if !bookmarks.contains(bookmark) {
+            bail!(
+                "associated bookmark `{bookmark}` does not exist locally; create it first or adopt without a bookmark association"
+            )
+        }
+    }
+    let metadata = ManagedWorkspaceMetadata {
+        workspace_name: request.workspace_name.clone(),
+        created_at_unix_ms: unix_timestamp_ms()?,
+        creation_operation_id: operation_id,
+        creation_base_commit_id: base.commit_id,
+        associated_bookmark: bookmark,
+        intended_remote: None,
+        external_owner: crate::ownership::detect(&request.workspace_root)?,
+        owned_git_worktree: None,
+    };
+    store.insert(&metadata)?;
+    Ok(AdoptionResult {
+        metadata,
+        current_revision,
+    })
+}
+
+/// Repair the mutable base and bookmark intent in one existing metadata record.
+///
+/// This only reads JJ state and writes the lifecycle record. It does not require a usable
+/// checkout path and does not create a JJ operation, move a bookmark, or alter any commit.
+pub fn repair_workspace(request: &RepairRequest) -> Result<RepairResult> {
+    validate_repair_request(request)?;
+    let client = JjClient::current()?;
+    let store = metadata_store(&client)?;
+    repair_workspace_with_store(request, &client, &store)
+}
+
+fn repair_workspace_with_store(
+    request: &RepairRequest,
+    client: &JjClient,
+    store: &WorkspaceMetadataStore,
+) -> Result<RepairResult> {
+    validate_repair_request(request)?;
+
+    // Capture one operation and use it for every JJ validation below. In particular, do not
+    // resolve the base or bookmarks against a later operation after the workspace query.
+    let validation_operation_id = client
+        .operation_id()
+        .context("failed to capture the JJ operation for metadata repair")?;
+    let workspace_facts = client
+        .workspace_target_facts_at(&validation_operation_id)
+        .context("failed to inspect JJ workspaces for metadata repair")?;
+    if !workspace_facts.contains_key(&request.workspace_name) {
+        bail!("workspace does not exist: {}", request.workspace_name)
+    }
+
+    let previous = store.get(&request.workspace_name)?.ok_or_else(|| {
+        anyhow!(
+            "workspace is not managed: {}; use `jw adopt` to create its metadata record",
+            request.workspace_name
+        )
+    })?;
+    let base = client
+        .resolve_one_at(&validation_operation_id, &request.base_revset)
+        .with_context(|| {
+            format!(
+                "repair base {:?} must resolve to exactly one revision",
+                request.base_revset
+            )
+        })?;
+    let associated_bookmark = match &request.bookmark {
+        BookmarkIntent::None => None,
+        BookmarkIntent::Associate(bookmark) => {
+            let bookmarks = client
+                .local_bookmark_names_at(&validation_operation_id)
+                .context("failed to verify the repair bookmark at the captured operation")?;
+            if !bookmarks.contains(bookmark) {
+                bail!(
+                    "associated bookmark `{bookmark}` does not exist locally; create it first or repair without a bookmark association"
+                )
+            }
+            Some(bookmark.clone())
+        }
+    };
+
+    let replacement = ManagedWorkspaceMetadata {
+        workspace_name: previous.workspace_name.clone(),
+        created_at_unix_ms: previous.created_at_unix_ms,
+        creation_operation_id: previous.creation_operation_id.clone(),
+        creation_base_commit_id: base.commit_id,
+        associated_bookmark,
+        intended_remote: previous.intended_remote.clone(),
+        external_owner: previous.external_owner.clone(),
+        owned_git_worktree: previous.owned_git_worktree.clone(),
+    };
+    if !store.replace_if_matches(&previous, &replacement)? {
+        bail!(
+            "workspace metadata changed during repair and was retained: {}",
+            request.workspace_name
+        )
+    }
+
+    Ok(RepairResult {
+        previous,
+        replacement,
+        validation_operation_id,
+    })
+}
+
+fn validate_repair_request(request: &RepairRequest) -> Result<()> {
+    if request.workspace_name.is_empty() {
+        bail!("repair workspace name cannot be empty")
+    }
+    if matches!(request.workspace_name.as_str(), "@" | "-" | "^") {
+        bail!(
+            "repair requires a literal workspace name; routing token `{}` is not allowed",
+            request.workspace_name
+        )
+    }
+    if request.base_revset.trim().is_empty() {
+        bail!("repair base revision cannot be empty")
+    }
+    if let BookmarkIntent::Associate(bookmark) = &request.bookmark
+        && bookmark.trim().is_empty()
+    {
+        bail!("repair bookmark cannot be empty")
+    }
+    Ok(())
+}
+
+fn preflight_creations(
+    inventory: &workspace::WorkspaceInventory,
+    store: &WorkspaceMetadataStore,
+    plans: &[PlannedWorkspace],
+) -> Result<()> {
+    let mut names = HashSet::new();
+    for plan in plans {
+        if !names.insert(plan.name.as_str()) {
+            bail!("workspace listed more than once: {}", plan.name)
+        }
+        workspace::preflight_add_workspace(inventory, &plan.name)?;
+        if store.get(&plan.name)?.is_some() {
+            bail!("workspace is already managed: {}", plan.name)
+        }
+    }
+    Ok(())
+}
+
+fn resolve_creation_base(client: &JjClient, at_revset: Option<&str>) -> Result<ResolvedRevision> {
+    let operation_id = client.operation_id()?;
+    match at_revset {
+        Some(revset) => client
+            .resolve_one_at(&operation_id, revset)
+            .with_context(|| format!("--at {revset:?} must resolve to exactly one revision")),
+        None => client
+            .resolve_one_at(&operation_id, "parents(@)")
+            .map_err(|error| {
+                anyhow!(
+                    "cannot choose implicit creation base from parents(@): {error}; use --at @ to create on the current working-copy commit"
+                )
+            }),
+    }
+}
+
+fn create_workspace(
+    plan: &PlannedWorkspace,
+    base: &ResolvedRevision,
+    inventory: &workspace::WorkspaceInventory,
+    store: &WorkspaceMetadataStore,
+    config_root: Option<&Path>,
+    colocate: bool,
+) -> Result<PendingWorkspace> {
+    let result = workspace::add_workspace(
+        inventory,
+        &plan.name,
+        &AddOptions {
+            base_commit_id: base.commit_id.clone(),
+            bookmark: plan.bookmark.clone(),
+            colocate,
+        },
+    )
+    .with_context(|| format!("failed to add workspace {}", plan.name))?;
+    let metadata = ManagedWorkspaceMetadata {
+        workspace_name: result.workspace.clone(),
+        created_at_unix_ms: plan.created_at_unix_ms,
+        creation_operation_id: result.creation_operation_id.clone(),
+        creation_base_commit_id: result.creation_base_commit_id.clone(),
+        associated_bookmark: result.bookmark.clone(),
+        intended_remote: None,
+        external_owner: None,
+        owned_git_worktree: result.owned_git_worktree.clone(),
+    };
+
+    if let Err(error) = store.insert(&metadata) {
+        let cleanup = workspace::rollback_added_workspace(&result).err();
+        return Err(with_cleanup_error(error, cleanup));
+    }
+
+    match apply_links(config_root, &result.path) {
+        Ok(links) => Ok(PendingWorkspace {
+            result,
+            metadata,
+            links,
+        }),
+        Err(error) => {
+            let pending = PendingWorkspace {
+                result,
+                metadata,
+                links: None,
+            };
+            Err(with_cleanup_error(
+                error,
+                rollback_pending(store, pending).err(),
+            ))
+        }
+    }
+}
+
+fn metadata_store(client: &JjClient) -> Result<WorkspaceMetadataStore> {
+    WorkspaceMetadataStore::from_repo_config_path(client.repo_config_path()?)
+}
+
+fn unix_timestamp_ms() -> Result<u64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis();
+    u64::try_from(millis).context("system clock timestamp does not fit metadata format")
+}
+
+fn apply_links(config_root: Option<&Path>, path: &Path) -> Result<Option<LinkApplication>> {
+    let Some(config_root) = config_root else {
+        return Ok(None);
+    };
+    links::apply_workspace_links_reversible(config_root, path).map(Some)
+}
+
+fn rollback_links_after(error: Error, application: Option<LinkApplication>) -> Error {
+    let Some(application) = application else {
+        return error;
+    };
+    match application.rollback() {
+        Ok(()) => error,
+        Err(rollback_error) => error.context(format!(
+            "workspace link cleanup also failed: {rollback_error:#}"
+        )),
+    }
+}
+
+fn rollback_pending(store: &WorkspaceMetadataStore, pending: PendingWorkspace) -> Result<()> {
+    if store.get(&pending.metadata.workspace_name)?.as_ref() != Some(&pending.metadata) {
+        bail!("workspace metadata changed during rollback; checkout retained")
+    }
+    let mut errors = Vec::new();
+    if let Some(links) = pending.links
+        && let Err(error) = links.rollback()
+    {
+        errors.push(format!("remove workspace links: {error:#}"));
+    }
+
+    match workspace::rollback_added_workspace(&pending.result) {
+        Ok(()) => match store.remove_if_matches(&pending.metadata) {
+            Ok(true) => {}
+            Ok(false) => errors.push(format!(
+                "workspace metadata changed during cleanup and was retained: {}",
+                pending.metadata.workspace_name
+            )),
+            Err(error) => errors.push(format!("remove workspace metadata: {error:#}")),
+        },
+        Err(error) => errors.push(format!(
+            "remove workspace: {error:#}; metadata retained for repair"
+        )),
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!(errors.join("; "))
+    }
+}
+
+fn rollback_after(
+    error: Error,
+    store: Option<&WorkspaceMetadataStore>,
+    pending: &mut Vec<PendingWorkspace>,
+) -> Error {
+    let Some(store) = store else {
+        debug_assert!(pending.is_empty());
+        return error;
+    };
+    let cleanup_errors = pending
+        .drain(..)
+        .rev()
+        .filter_map(|workspace| rollback_pending(store, workspace).err())
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if cleanup_errors.is_empty() {
+        error
+    } else {
+        error.context(format!(
+            "workspace cleanup also failed: {}",
+            cleanup_errors.join("; ")
+        ))
+    }
+}
+
+fn with_cleanup_error(error: Error, cleanup: Option<Error>) -> Error {
+    match cleanup {
+        Some(cleanup) => error.context(format!("workspace cleanup also failed: {cleanup:#}")),
+        None => error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn run_jj(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("jj")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("execute jj");
+        assert!(
+            output.status.success(),
+            "jj {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn test_repo() -> (TempDir, PathBuf) {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let root = tempdir.path().join("repo");
+        run_jj(
+            tempdir.path(),
+            &["git", "init", root.to_str().expect("UTF-8 test path")],
+        );
+        run_jj(&root, &["describe", "-m", "base"]);
+        run_jj(&root, &["new"]);
+        (tempdir, root)
+    }
+
+    #[test]
+    fn manager_switch_does_not_recreate_removed_selection() {
+        const CHILD: &str = "JW_TEST_EXISTING_SWITCH";
+        if std::env::var_os(CHILD).is_some() {
+            let policy = CreationPolicy::load(None, None, true, true, 1).unwrap();
+            let stale_selection = workspace::WorkspaceInventory::load().unwrap();
+            assert!(stale_selection.contains("selected"));
+            let path = stale_selection.root("selected").unwrap();
+            let root = std::env::current_dir().unwrap();
+            run_jj(&root, &["workspace", "forget", "selected"]);
+            fs::remove_dir_all(&path).unwrap();
+            let error = switch_existing_workspace("selected", &policy).unwrap_err();
+            assert!(error.to_string().contains("no longer exists"));
+            assert!(!path.exists());
+            assert!(
+                !workspace::WorkspaceInventory::load()
+                    .unwrap()
+                    .contains("selected")
+            );
+            return;
+        }
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (temp, root) = test_repo();
+        let path = temp.path().join("selected");
+        run_jj(
+            &root,
+            &[
+                "workspace",
+                "add",
+                path.to_str().unwrap(),
+                "--name",
+                "selected",
+            ],
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lifecycle::tests::manager_switch_does_not_recreate_removed_selection",
+                "--nocapture",
+            ])
+            .current_dir(&root)
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repair_metadata(workspace_name: &str) -> ManagedWorkspaceMetadata {
+        ManagedWorkspaceMetadata {
+            workspace_name: workspace_name.to_owned(),
+            created_at_unix_ms: 1_750_000_000_123,
+            creation_operation_id: "historical-operation".to_owned(),
+            creation_base_commit_id: "stale-base".to_owned(),
+            associated_bookmark: Some("stale-bookmark".to_owned()),
+            intended_remote: Some("origin".to_owned()),
+            external_owner: None,
+            owned_git_worktree: None,
+        }
+    }
+
+    fn repair_request(workspace_name: &str, base_revset: &str) -> RepairRequest {
+        RepairRequest {
+            workspace_name: workspace_name.to_owned(),
+            base_revset: base_revset.to_owned(),
+            bookmark: BookmarkIntent::None,
+        }
+    }
+
+    #[test]
+    fn implicit_base_rejects_multi_parent_working_copy() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        let mut parents = Vec::new();
+        for index in 0..6 {
+            run_jj(&root, &["new", "root()", "-m", &format!("parent {index}")]);
+            parents.push(run_jj(
+                &root,
+                &["log", "-r", "@", "--no-graph", "-T", "commit_id"],
+            ));
+        }
+        let mut args = vec!["new"];
+        args.extend(parents.iter().map(String::as_str));
+        run_jj(&root, &args);
+
+        let client = JjClient::new(&root);
+        let error = resolve_creation_base(&client, None).expect_err("ambiguous default base");
+        assert!(error.to_string().contains("use --at @"));
+        assert!(resolve_creation_base(&client, Some("@")).is_ok());
+    }
+
+    #[test]
+    fn repair_rejects_routing_tokens_and_unknown_workspace() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        let client = JjClient::new(&root);
+        let store =
+            WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
+                .expect("test metadata store");
+
+        for token in ["@", "-", "^"] {
+            let error = repair_workspace_with_store(&repair_request(token, "@"), &client, &store)
+                .expect_err("routing token must be rejected");
+            assert!(error.to_string().contains("literal workspace name"));
+        }
+
+        let error = repair_workspace_with_store(&repair_request("missing", "@"), &client, &store)
+            .expect_err("unknown workspace must be rejected");
+        assert!(error.to_string().contains("workspace does not exist"));
+    }
+
+    #[test]
+    fn repair_rejects_unmanaged_workspace_invalid_base_and_missing_bookmark() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        let client = JjClient::new(&root);
+        let store =
+            WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
+                .expect("test metadata store");
+
+        let error = repair_workspace_with_store(&repair_request("default", "@"), &client, &store)
+            .expect_err("unmanaged workspace must be rejected");
+        assert!(error.to_string().contains("workspace is not managed"));
+
+        let previous = repair_metadata("default");
+        store.upsert(&previous).expect("insert managed metadata");
+
+        let error =
+            repair_workspace_with_store(&repair_request("default", "all()"), &client, &store)
+                .expect_err("ambiguous base must be rejected");
+        assert!(error.to_string().contains("exactly one revision"));
+        assert_eq!(store.get("default").unwrap(), Some(previous.clone()));
+
+        let error = repair_workspace_with_store(
+            &RepairRequest {
+                workspace_name: "default".to_owned(),
+                base_revset: "@".to_owned(),
+                bookmark: BookmarkIntent::Associate("missing".to_owned()),
+            },
+            &client,
+            &store,
+        )
+        .expect_err("missing bookmark must be rejected");
+        assert!(error.to_string().contains("does not exist locally"));
+        assert_eq!(store.get("default").unwrap(), Some(previous));
+    }
+
+    #[test]
+    fn repair_preserves_history_and_does_not_mutate_jj_state() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        run_jj(&root, &["bookmark", "create", "stable", "-r", "@"]);
+        let client = JjClient::new(&root);
+        let store =
+            WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
+                .expect("test metadata store");
+        let previous = repair_metadata("default");
+        store.upsert(&previous).expect("insert managed metadata");
+
+        let operation_before = client.operation_id().expect("operation before repair");
+        let bookmarks_before = client
+            .local_bookmark_names_at(&operation_before)
+            .expect("bookmarks before repair");
+        let commits_before = run_jj(
+            &root,
+            &[
+                "log",
+                "-r",
+                "all()",
+                "--no-graph",
+                "-T",
+                "commit_id ++ \"\\n\"",
+            ],
+        );
+        let result = repair_workspace_with_store(
+            &RepairRequest {
+                workspace_name: "default".to_owned(),
+                base_revset: "@".to_owned(),
+                bookmark: BookmarkIntent::Associate("stable".to_owned()),
+            },
+            &client,
+            &store,
+        )
+        .expect("repair metadata");
+        let operation_after = client.operation_id().expect("operation after repair");
+        let bookmarks_after = client
+            .local_bookmark_names_at(&operation_after)
+            .expect("bookmarks after repair");
+        let commits_after = run_jj(
+            &root,
+            &[
+                "log",
+                "-r",
+                "all()",
+                "--no-graph",
+                "-T",
+                "commit_id ++ \"\\n\"",
+            ],
+        );
+
+        assert_eq!(result.previous, previous);
+        assert_eq!(result.validation_operation_id, operation_before);
+        assert_eq!(
+            result.replacement.created_at_unix_ms,
+            previous.created_at_unix_ms
+        );
+        assert_eq!(
+            result.replacement.creation_operation_id,
+            previous.creation_operation_id
+        );
+        assert_eq!(result.replacement.intended_remote, previous.intended_remote);
+        assert_eq!(
+            result.replacement.associated_bookmark.as_deref(),
+            Some("stable")
+        );
+        assert_eq!(
+            result.replacement.creation_base_commit_id,
+            client
+                .resolve_one_at(&operation_before, "@")
+                .unwrap()
+                .commit_id
+        );
+        assert_eq!(operation_after, operation_before);
+        assert_eq!(bookmarks_after, bookmarks_before);
+        assert_eq!(commits_after, commits_before);
+        assert_eq!(store.get("default").unwrap(), Some(result.replacement));
+    }
+
+    #[test]
+    fn repair_allows_registered_workspace_without_checkout_and_clears_bookmark() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        let path = root.parent().unwrap().join("repo.legacy");
+        run_jj(
+            &root,
+            &[
+                "workspace",
+                "add",
+                "--name",
+                "legacy",
+                "--revision",
+                "@",
+                path.to_str().unwrap(),
+            ],
+        );
+        fs::remove_dir_all(&path).expect("remove legacy checkout");
+
+        let client = JjClient::new(&root);
+        let store =
+            WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
+                .expect("test metadata store");
+        let previous = repair_metadata("legacy");
+        store.upsert(&previous).expect("insert managed metadata");
+        let operation_before = client.operation_id().expect("operation before repair");
+        let result = repair_workspace_with_store(&repair_request("legacy", "@"), &client, &store)
+            .expect("repair missing checkout metadata");
+
+        assert_eq!(result.validation_operation_id, operation_before);
+        assert_eq!(result.replacement.associated_bookmark, None);
+        assert_eq!(
+            result.replacement.creation_base_commit_id,
+            client
+                .resolve_one_at(&operation_before, "@")
+                .unwrap()
+                .commit_id
+        );
+    }
+
+    #[test]
+    fn adoption_imports_legacy_marker_without_mutating_jj_operation() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        fs::write(root.join(".jj/jw-bookmark"), "wip/legacy\n").expect("write legacy marker");
+        let client = JjClient::new(&root);
+        let store =
+            WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
+                .expect("test metadata store");
+        let request = AdoptionRequest {
+            workspace_name: "default".to_owned(),
+            workspace_root: root.clone(),
+            base_revset: "parents(@)".to_owned(),
+            bookmark: None,
+            no_bookmark: false,
+        };
+
+        let missing_before = client.operation_id().expect("operation before rejection");
+        let error = adopt_workspace_with_store(&request, &client, &store)
+            .expect_err("missing imported bookmark");
+        assert!(error.to_string().contains("does not exist locally"));
+        assert_eq!(client.operation_id().unwrap(), missing_before);
+        assert!(store.get("default").unwrap().is_none());
+
+        run_jj(&root, &["bookmark", "create", "wip/legacy", "-r", "@"]);
+        let before = client.operation_id().expect("operation before adoption");
+        let result =
+            adopt_workspace_with_store(&request, &client, &store).expect("adopt workspace");
+        let after = client.operation_id().expect("operation after adoption");
+
+        assert_eq!(before, after);
+        assert_eq!(
+            result.metadata.associated_bookmark.as_deref(),
+            Some("wip/legacy")
+        );
+        assert!(
+            adopt_workspace_with_store(
+                &AdoptionRequest {
+                    workspace_name: "default".to_owned(),
+                    workspace_root: root,
+                    base_revset: "parents(@)".to_owned(),
+                    bookmark: Some("explicit".to_owned()),
+                    no_bookmark: false,
+                },
+                &client,
+                &store,
+            )
+            .expect_err("already managed")
+            .to_string()
+            .contains("already managed")
+        );
+    }
+
+    #[test]
+    fn explicit_adoption_bookmark_wins_over_invalid_legacy_marker() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let (_tempdir, root) = test_repo();
+        run_jj(&root, &["bookmark", "create", "explicit", "-r", "@"]);
+        fs::write(root.join(".jj/jw-bookmark"), "one\ntwo\n").expect("write invalid marker");
+        let client = JjClient::new(&root);
+        let store =
+            WorkspaceMetadataStore::from_repo_config_path(root.join(".jj/repo/config.toml"))
+                .expect("test metadata store");
+        let result = adopt_workspace_with_store(
+            &AdoptionRequest {
+                workspace_name: "default".to_owned(),
+                workspace_root: root,
+                base_revset: "parents(@)".to_owned(),
+                bookmark: Some("explicit".to_owned()),
+                no_bookmark: false,
+            },
+            &client,
+            &store,
+        )
+        .expect("explicit bookmark bypasses legacy marker");
+        assert_eq!(
+            result.metadata.associated_bookmark.as_deref(),
+            Some("explicit")
+        );
+    }
+}

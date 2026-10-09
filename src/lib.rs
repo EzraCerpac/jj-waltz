@@ -1,5 +1,14 @@
 pub mod cli;
-pub mod config;
+pub(crate) mod config;
+pub mod context;
+pub mod doctor;
+pub mod jj;
+pub(crate) mod lifecycle;
 pub mod links;
-pub mod shell;
-pub mod workspace;
+pub(crate) mod manager;
+pub(crate) mod metadata;
+pub mod observe;
+pub(crate) mod ownership;
+pub(crate) mod shell;
+pub mod snapshot;
+pub(crate) mod workspace;
