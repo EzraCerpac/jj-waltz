@@ -110,7 +110,9 @@ jobs:
       - name: Exercise exclusive rename on musl
         run: cargo test --locked --target x86_64-unknown-linux-musl exclusive_rename
       - name: Check binary version
-        run: target/x86_64-unknown-linux-musl/dist/jw --version
+        run: |
+          expected_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "jj-waltz") | .version')"
+          test "$(target/x86_64-unknown-linux-musl/dist/jw --version)" = "jw $expected_version"
 
   build:
     strategy:

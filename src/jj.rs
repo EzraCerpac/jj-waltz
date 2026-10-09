@@ -339,18 +339,88 @@ impl JjClient {
     }
 
     /// Probe the actual executable, including builds whose version predates the feature.
-    pub fn require_workspace_colocation(&self) -> Result<()> {
-        if !self
-            .run(["workspace", "add", "--help"])?
+    pub fn supports_workspace_colocation(&self) -> Result<bool> {
+        Ok(self
+            .run(["--ignore-working-copy", "workspace", "add", "--help"])?
             .stdout()?
-            .contains("--colocate")
-        {
+            .contains("--colocate"))
+    }
+
+    pub fn require_workspace_colocation(&self) -> Result<()> {
+        if !self.supports_workspace_colocation()? {
             bail!("workspace colocation requires JJ with `workspace add --colocate` (JJ 0.46+)")
         }
         // A local backend cannot create Git worktrees. Check before any mutation.
         self.run(["--ignore-working-copy", "git", "root"])
             .context("workspace colocation requires a Git-backed JJ repository")?;
         Ok(())
+    }
+
+    /// Inherit only a verified primary checkout's topology and effective setting,
+    /// so creation from a JJ-only sibling has the same default as primary creation.
+    pub(crate) fn inherited_workspace_colocation(&self) -> Result<bool> {
+        if !self.supports_workspace_colocation()? {
+            return Ok(false);
+        }
+        let caller = crate::context::discover(Some(self.cwd()));
+        let Some(primary_root) = caller.jj.primary_checkout.as_ref() else {
+            return Ok(false);
+        };
+        let primary = crate::context::discover(Some(primary_root));
+        // A JJ-only sibling can legitimately have no readable Git checkout.
+        // Its JJ identity must be sound; Git topology is checked at the primary.
+        if caller.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                "jj_metadata_invalid" | "jj_git_backend_invalid" | "jj_primary_unverified"
+            )
+        }) || primary.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                "git_metadata_invalid"
+                    | "jj_metadata_invalid"
+                    | "jj_git_backend_invalid"
+                    | "jj_primary_unverified"
+            )
+        }) {
+            return Ok(false);
+        }
+        let same = |left: Option<&Path>, right: Option<&Path>| {
+            left.zip(right).is_some_and(|(left, right)| {
+                left.canonicalize()
+                    .ok()
+                    .zip(right.canonicalize().ok())
+                    .is_some_and(|(left, right)| left == right)
+            })
+        };
+        if !same(
+            caller.jj.repository_path.as_deref(),
+            primary.jj.repository_path.as_deref(),
+        ) || !same(Some(primary_root), primary.jj.workspace_root.as_deref())
+            || !same(
+                primary.git.checkout_root.as_deref(),
+                primary.jj.workspace_root.as_deref(),
+            )
+            || !same(
+                primary.git.git_dir.as_deref(),
+                primary.jj.git_backend_dir.as_deref(),
+            )
+            || !same(
+                primary.git.common_dir.as_deref(),
+                primary.jj.git_backend_common_dir.as_deref(),
+            )
+        {
+            return Ok(false);
+        }
+        let setting = Self::new(primary_root).run_unchecked([
+            "--ignore-working-copy",
+            "config",
+            "get",
+            "git.colocate",
+        ])?;
+        // A custom build can advertise colocation without this setting. Unclear
+        // topology or configuration never authorizes automatic Git worktree creation.
+        Ok(setting.success() && setting.trimmed_stdout().is_ok_and(|value| value == "true"))
     }
 
     pub fn capabilities(&self) -> Result<JjCapabilities> {

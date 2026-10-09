@@ -289,19 +289,38 @@ without deleting its directory.
 
 ### Colocated workspaces
 
+**Breaking change in v0.8.0:** new workspace creation can inherit colocation from
+its primary workspace; earlier jw versions defaulted to JJ-only. To retain that
+previous behavior, set the following in jw configuration:
+
+```toml
+[workspace]
+colocate = false
+```
+
+Or pass `--no-colocate` for one command. Existing workspaces are not converted.
+Automatic copy-on-write creation remains JJ-only.
+
 `jw add feature --colocate` and `jw switch feature --colocate` create a JJ workspace
 with a linked Git worktree on JJ 0.46 or another build advertising that capability.
-Git-aware tools can use the new workspace's `.git` link. The default remains a
-JJ-only workspace, regardless of JJ's `git.colocate` setting. To opt in globally:
+Git-aware tools can use the new workspace's `.git` link. Without a jw override,
+new workspaces inherit the primary workspace's actual colocation when its
+effective JJ `git.colocate` setting is true and JJ advertises workspace colocation.
+Creation from a registered JJ-only sibling uses the same primary policy. An unverified or
+non-colocated primary, a disabled JJ setting, or an older JJ keeps creation JJ-only.
+To explicitly enable colocation globally:
 
 ```toml
 [workspace]
 colocate = true
 ```
 
-`--colocate` and `--no-colocate` override this setting for one command. They affect
+Set `colocate = false` to explicitly keep new workspaces JJ-only; omit the setting
+to inherit automatically. `--colocate` and `--no-colocate` override the jw setting
+for one command. They affect
 only newly created workspaces; switching to an existing workspace never converts
-it. Unsupported JJ versions and non-Git backends fail before creation.
+it. Explicit colocation requests on unsupported JJ versions or non-Git backends
+fail before creation.
 
 `jw` records provenance only for Git worktrees it creates. `jw remove` cleans that
 workspace's Git registration, and `--keep-dir` retains its files while removing the
@@ -320,8 +339,9 @@ and Git administrative ownership marker for cleanup, and use a current jw versio
 If a process is interrupted after detaching `.git`, inspect `.jj/jw-detached-git`
 and the retained metadata before recovering the link or finishing cleanup.
 
-Colocation and copy-on-write cannot be combined. Use `--no-cow` or
-`--no-colocate` to override one configured option for a command.
+Automatic inheritance chooses JJ-only when copy-on-write is selected, including
+through global config. Explicit colocation and copy-on-write cannot be combined.
+Use `--no-cow` or `--no-colocate` to override one configured option for a command.
 
 
 ## Config
