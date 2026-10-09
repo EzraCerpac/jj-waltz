@@ -17,6 +17,7 @@ pub struct CreationPolicy {
     apply_links: bool,
     copy_on_write: bool,
     config: Config,
+    colocate_override: Option<bool>,
 }
 
 impl CreationPolicy {
@@ -43,7 +44,30 @@ impl CreationPolicy {
             apply_links: !no_links,
             copy_on_write: copy_on_write.unwrap_or(config.workspace.copy_on_write),
             config,
+            colocate_override: None,
         })
+    }
+
+    pub fn with_colocation_override(mut self, value: Option<bool>) -> Self {
+        self.colocate_override = value;
+        self
+    }
+
+    fn colocate(&self) -> bool {
+        self.colocate_override
+            .unwrap_or(self.config.workspace.colocate)
+    }
+
+    fn preflight_colocation(&self, client: &JjClient) -> Result<()> {
+        if self.colocate() {
+            if self.copy_on_write {
+                bail!(
+                    "colocation and copy-on-write cannot be combined; use --no-cow or --no-colocate"
+                )
+            }
+            client.require_workspace_colocation()?;
+        }
+        Ok(())
     }
 
     fn bookmark_for(&self, workspace: &str, allow_explicit: bool) -> Option<String> {
@@ -168,6 +192,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOu
         });
     }
     let client = JjClient::current()?;
+    policy.preflight_colocation(&client)?;
     let base = resolve_creation_base(&client, policy.at_revset.as_deref())?;
     let store = metadata_store(&client)?;
     preflight_creations(&inventory, &store, &plans)?;
@@ -186,6 +211,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOu
             &store,
             config_root.as_deref(),
             &checkout,
+            policy.colocate(),
         ) {
             Ok(created) => {
                 inventory.record_created(&created.result);
@@ -269,6 +295,7 @@ fn switch_workspaces_with_creation(
     let base = if all_plans.is_empty() {
         None
     } else {
+        policy.preflight_colocation(&client)?;
         Some(resolve_creation_base(&client, policy.at_revset.as_deref())?)
     };
     let store = if all_plans.is_empty() {
@@ -295,6 +322,7 @@ fn switch_workspaces_with_creation(
             store,
             config_root.as_deref(),
             &checkout,
+            policy.colocate(),
         ) {
             Ok(created) => {
                 inventory.record_created(&created.result);
@@ -314,6 +342,7 @@ fn switch_workspaces_with_creation(
             store,
             config_root.as_deref(),
             &checkout,
+            policy.colocate(),
         ) {
             Ok(created) => Some(created),
             Err(error) => return Err(rollback_after(error, Some(store), &mut intermediate)),
@@ -445,6 +474,7 @@ fn adopt_workspace_with_store(
         associated_bookmark: bookmark,
         intended_remote: None,
         external_owner: crate::ownership::detect(&request.workspace_root)?,
+        owned_git_worktree: None,
     };
     store.insert(&metadata)?;
     Ok(AdoptionResult {
@@ -520,6 +550,7 @@ fn repair_workspace_with_store(
         associated_bookmark,
         intended_remote: previous.intended_remote.clone(),
         external_owner: previous.external_owner.clone(),
+        owned_git_worktree: previous.owned_git_worktree.clone(),
     };
     if !store.replace_if_matches(&previous, &replacement)? {
         bail!(
@@ -630,6 +661,7 @@ fn create_workspace(
     store: &WorkspaceMetadataStore,
     config_root: Option<&Path>,
     checkout: &CheckoutPlan,
+    colocate: bool,
 ) -> Result<PendingWorkspace> {
     let result = workspace::add_workspace(
         inventory,
@@ -638,6 +670,7 @@ fn create_workspace(
             base_commit_id: base.commit_id.clone(),
             bookmark: plan.bookmark.clone(),
             clone_from: checkout.clone_from.clone(),
+            colocate,
         },
     )
     .with_context(|| format!("failed to add workspace {}", plan.name))?;
@@ -648,7 +681,8 @@ fn create_workspace(
         creation_base_commit_id: result.creation_base_commit_id.clone(),
         associated_bookmark: result.bookmark.clone(),
         intended_remote: None,
-        external_owner: crate::ownership::detect(&result.path)?,
+        external_owner: None,
+        owned_git_worktree: result.owned_git_worktree.clone(),
     };
 
     if let Err(error) = store.insert(&metadata) {
@@ -708,6 +742,9 @@ fn rollback_links_after(error: Error, application: Option<LinkApplication>) -> E
 }
 
 fn rollback_pending(store: &WorkspaceMetadataStore, pending: PendingWorkspace) -> Result<()> {
+    if store.get(&pending.metadata.workspace_name)?.as_ref() != Some(&pending.metadata) {
+        bail!("workspace metadata changed during rollback; checkout retained")
+    }
     let mut errors = Vec::new();
     if let Some(links) = pending.links
         && let Err(error) = links.rollback()
@@ -866,6 +903,7 @@ mod tests {
             associated_bookmark: Some("stale-bookmark".to_owned()),
             intended_remote: Some("origin".to_owned()),
             external_owner: None,
+            owned_git_worktree: None,
         }
     }
 

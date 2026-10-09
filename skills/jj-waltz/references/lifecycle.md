@@ -125,5 +125,14 @@ or unverifiable state causes refusal. Commits and bookmarks are retained.
 
 Automatic prune and gardener cleanup must leave externally owned records alone,
 even after checkout removal. Missing external metadata needs restoration before
-explicit reconciliation. Schema 1 records remain readable; new records use schema 2
-with an optional external owner, and live topology checks protect older records.
+explicit reconciliation. Schemas 1 and 2 remain readable; new records use schema 3 with optional external
+ownership or explicit jw-created Git provenance. Live topology checks protect old
+records without inferring ownership. `jw add --colocate`, `jw switch --colocate`,
+and `workspace.colocate = true` opt into creation on JJ 0.46+; `--no-colocate`
+overrides config, and existing workspaces are never converted. For a jw-created
+colocated workspace, removal validates its provenance token and reciprocal Git
+metadata and cleans only that Git registration. `--keep-dir` preserves files but
+disconnects the Git link. Changed topology, locks, and missing/damaged provenance
+require inspection; native app ownership remains protected. Interrupted cleanup
+can retain `.jj/jw-detached-git` or `.git/worktrees/.jw-cleanup-<token>`; inspect
+those paths and the retained lifecycle record before manual recovery.

@@ -177,7 +177,7 @@ fn adopted_external_checkout_is_protected_without_and_with_metadata() {
         .success();
     let record = f.record_path();
     let before: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
-    assert_eq!(before["schema_version"], 2);
+    assert_eq!(before["schema_version"], 3);
     assert_eq!(
         before["metadata"]["external_owner"]["git_dir"],
         git_dir.to_str().unwrap()

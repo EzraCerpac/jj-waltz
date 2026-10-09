@@ -7,6 +7,10 @@
   the current workspace's tracked files on APFS, Btrfs, or XFS and match a full
   checkout of the creation base. Unsupported filesystems fall back to a full
   checkout with a warning; `--no-cow` opts out for one command.
+- Add opt-in Git worktree creation with `jw add --colocate`, `jw switch --colocate`,
+  and `workspace.colocate = true` on JJ 0.46+. `--no-colocate` overrides config.
+  Track jw-created Git worktree ownership and clean only its registration; external
+  checkouts and unrelated stale registrations remain protected.
 
 ## Version 0.7.0 (2026-09-25)
 

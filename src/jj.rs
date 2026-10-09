@@ -338,6 +338,21 @@ impl JjClient {
             .context("failed to parse JJ version")
     }
 
+    /// Probe the actual executable, including builds whose version predates the feature.
+    pub fn require_workspace_colocation(&self) -> Result<()> {
+        if !self
+            .run(["workspace", "add", "--help"])?
+            .stdout()?
+            .contains("--colocate")
+        {
+            bail!("workspace colocation requires JJ with `workspace add --colocate` (JJ 0.46+)")
+        }
+        // A local backend cannot create Git worktrees. Check before any mutation.
+        self.run(["--ignore-working-copy", "git", "root"])
+            .context("workspace colocation requires a Git-backed JJ repository")?;
+        Ok(())
+    }
+
     pub fn capabilities(&self) -> Result<JjCapabilities> {
         Ok(JjCapabilities::for_version(self.version()?))
     }

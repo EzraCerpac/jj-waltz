@@ -44,6 +44,7 @@ pub struct AddOptions {
     pub bookmark: Option<String>,
     /// Clone tracked files from this checkout root instead of letting JJ write them.
     pub clone_from: Option<PathBuf>,
+    pub colocate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub struct AddResult {
     pub bookmark: Option<String>,
     pub creation_operation_id: String,
     pub creation_base_commit_id: String,
+    pub owned_git_worktree: Option<crate::ownership::OwnedGitWorktree>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,7 +417,15 @@ pub fn execute_remove_workspace(
         Some(&plan.path),
         current_metadata.as_ref(),
     )?;
-    client.run(["workspace", "forget", &plan.workspace])?;
+    if current_metadata != plan.managed_metadata {
+        bail!("workspace metadata changed during removal; review it again")
+    }
+    crate::ownership::forget_workspace(
+        &client,
+        &plan.workspace,
+        Some(&plan.path),
+        current_metadata.as_ref(),
+    )?;
 
     let mut deleted_bookmarks = Vec::new();
     if delete_bookmarks && !plan.bookmarks.is_empty() {
@@ -512,9 +522,7 @@ fn add_workspace_by_name_with_inventory(
 ) -> Result<AddResult> {
     validate_workspace_name(name)?;
     let path = workspace_dir_for_name(name, inventory)?;
-    if path.exists() {
-        bail!("directory already exists: {}", path.display());
-    }
+    require_absent_workspace_path(&path)?;
 
     let mut args = vec![
         "workspace".to_owned(),
@@ -534,16 +542,59 @@ fn add_workspace_by_name_with_inventory(
 
     args.push(path.display().to_string());
     let client = JjClient::current()?;
-    // Newer JJ builds can create Git worktrees by default. jw owns only the JJ
-    // checkout it explicitly creates, so keep Git lifecycle with its native app.
-    if client
+    if options.colocate {
+        client.require_workspace_colocation()?;
+        args.push("--colocate".to_owned());
+    } else if client
         .run(["workspace", "add", "--help"])?
         .stdout()?
         .contains("--no-colocate")
     {
         args.push("--no-colocate".to_owned());
     }
-    client.run(&args)?;
+    let previous_registrations = if options.colocate {
+        crate::ownership::registration_paths(&client)?
+    } else {
+        Vec::new()
+    };
+    let added = client.run(&args);
+    if added.is_err()
+        && !client
+            .workspace_names()
+            .with_context(|| {
+                format!(
+                    "cannot verify add outcome; checkout retained at {} for inspection",
+                    path.display()
+                )
+            })?
+            .iter()
+            .any(|candidate| candidate == name)
+    {
+        if fs::symlink_metadata(&path).is_ok() {
+            let error = added.expect_err("failed add checked above");
+            bail!(
+                "{error}; unregistered checkout retained at {} because creation ownership could not be verified",
+                path.display()
+            )
+        }
+        return added.map(|_| unreachable!());
+    }
+    let owned_git_worktree = if options.colocate {
+        Some(
+            crate::ownership::record_created(&client, name, &path, &previous_registrations)
+                .with_context(|| format!("cannot verify created Git topology at {}; checkout retained for inspection", path.display()))?,
+        )
+    } else {
+        None
+    };
+    if let Err(error) = added {
+        let cleanup =
+            rollback_workspace_parts(name, &path, None, owned_git_worktree.as_ref()).err();
+        if let Some(cleanup) = cleanup {
+            bail!("{error}; cleanup also failed: {cleanup}")
+        }
+        return Err(error);
+    }
 
     if let Some(source) = &options.clone_from
         && let Err(error) = materialize_clone(source, &path)
@@ -554,15 +605,29 @@ fn add_workspace_by_name_with_inventory(
     // Capture provenance before bookmark creation records another JJ operation.
     let creation_operation_id = match client.operation_id() {
         Ok(operation_id) => operation_id,
-        Err(error) => return Err(rollback_failed_add(error, name, &path, None)),
+        Err(error) => {
+            let cleanup =
+                rollback_workspace_parts(name, &path, None, owned_git_worktree.as_ref()).err();
+            if let Some(cleanup) = cleanup {
+                bail!("{error}; cleanup also failed: {cleanup}")
+            }
+            bail!(error)
+        }
     };
 
     if let Some(bookmark) = &options.bookmark {
         if let Err(error) = JjClient::new(&path).run(["bookmark", "create", bookmark, "-r", "@"]) {
-            return Err(rollback_failed_add(error, name, &path, None));
+            let cleanup =
+                rollback_workspace_parts(name, &path, None, owned_git_worktree.as_ref()).err();
+            if let Some(cleanup) = cleanup {
+                bail!("{error}; cleanup also failed: {cleanup}")
+            }
+            bail!(error)
         }
         if let Err(error) = fs::write(workspace_bookmark_file(&path), format!("{bookmark}\n")) {
-            let cleanup = rollback_workspace_parts(name, &path, Some(bookmark)).err();
+            let cleanup =
+                rollback_workspace_parts(name, &path, Some(bookmark), owned_git_worktree.as_ref())
+                    .err();
             if let Some(cleanup) = cleanup {
                 bail!(
                     "failed to record workspace bookmark: {error}; cleanup also failed: {cleanup}"
@@ -578,6 +643,7 @@ fn add_workspace_by_name_with_inventory(
         bookmark: options.bookmark.clone(),
         creation_operation_id,
         creation_base_commit_id: options.base_commit_id.clone(),
+        owned_git_worktree,
     })
 }
 
@@ -631,9 +697,17 @@ fn rollback_failed_add(
     bookmark: Option<&str>,
 ) -> anyhow::Error {
     let error = error.into();
-    match rollback_workspace_parts(name, path, bookmark) {
+    match rollback_workspace_parts(name, path, bookmark, None) {
         Ok(()) => error,
         Err(cleanup) => error.context(format!("cleanup also failed: {cleanup}")),
+    }
+}
+
+fn require_absent_workspace_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("cannot inspect creation destination"),
+        Ok(_) => bail!("directory already exists: {}", path.display()),
     }
 }
 
@@ -643,27 +717,29 @@ pub(crate) fn preflight_add_workspace(inventory: &WorkspaceInventory, name: &str
         bail!("workspace already exists: {name}")
     }
     let path = workspace_dir_for_name(name, inventory)?;
-    if path.exists() {
-        bail!("directory already exists: {}", path.display())
-    }
+    require_absent_workspace_path(&path)?;
     Ok(())
 }
 
 pub fn rollback_added_workspace(result: &AddResult) -> Result<()> {
-    rollback_workspace_parts(&result.workspace, &result.path, result.bookmark.as_deref())
+    rollback_workspace_parts(
+        &result.workspace,
+        &result.path,
+        result.bookmark.as_deref(),
+        result.owned_git_worktree.as_ref(),
+    )
 }
 
-fn rollback_workspace_parts(name: &str, path: &Path, bookmark: Option<&str>) -> Result<()> {
-    crate::ownership::ensure_removal_allowed(
-        &JjClient::current()?,
-        name,
-        Some(path),
-        metadata_store()?.get(name)?.as_ref(),
-    )?;
+fn rollback_workspace_parts(
+    name: &str,
+    path: &Path,
+    bookmark: Option<&str>,
+    owner: Option<&crate::ownership::OwnedGitWorktree>,
+) -> Result<()> {
+    let client = JjClient::current()?;
+    // Do not delete the directory or bookmark if forgetting/registration cleanup fails.
+    crate::ownership::forget_created(&client, name, path, owner)?;
     let mut errors = Vec::new();
-    if let Err(error) = JjClient::current()?.run(["workspace", "forget", name]) {
-        errors.push(format!("forget workspace: {error}"));
-    }
     if let Some(bookmark) = bookmark
         && let Err(error) = JjClient::current()?.run(["bookmark", "delete", bookmark])
     {
@@ -696,7 +772,12 @@ pub fn prune_missing_workspaces() -> Result<Vec<String>> {
                     entry.root.as_deref(),
                     metadata.as_ref(),
                 )?;
-                JjClient::current()?.run(["workspace", "forget", &entry.name])?;
+                crate::ownership::forget_workspace(
+                    &JjClient::current()?,
+                    &entry.name,
+                    entry.root.as_deref(),
+                    metadata.as_ref(),
+                )?;
                 if let Some(metadata) = metadata
                     && !store.remove_if_matches(&metadata)?
                 {
