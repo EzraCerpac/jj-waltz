@@ -97,6 +97,21 @@ jobs:
       - name: Build
         run: cargo build --locked --manifest-path plugins/herdr/Cargo.toml
 
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Build static musl binary
+        run: cargo build --locked --profile dist --target x86_64-unknown-linux-musl
+      - name: Exercise exclusive rename on musl
+        run: cargo test --locked --target x86_64-unknown-linux-musl exclusive_rename
+      - name: Check binary version
+        run: target/x86_64-unknown-linux-musl/dist/jw --version
+
   build:
     strategy:
       fail-fast: false

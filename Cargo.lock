@@ -735,6 +735,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "fs2",
+ "libc",
  "predicates",
  "ratatui",
  "reflink-copy",
