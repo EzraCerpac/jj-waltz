@@ -1379,6 +1379,7 @@ mod tests {
                         .iter()
                         .any(|path| path.contains("loop/ignored"))
                 );
+                #[cfg(unix)]
                 assert!(
                     scan.inventory
                         .iter()

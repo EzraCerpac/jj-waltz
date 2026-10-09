@@ -623,7 +623,7 @@ fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     // SAFETY: Both paths are NUL-terminated and remain alive for the call. Zero
     // flags disallow replacement of an existing file or directory.
     let result = unsafe { move_file_ex_w(source.as_ptr(), destination.as_ptr(), 0) };
-    if result == 0 {
+    if result != 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())

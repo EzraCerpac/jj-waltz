@@ -345,7 +345,33 @@ fn classify_rule(rule: &LinkRule) -> LinkCheck {
 
     let target_exists = match fs::metadata(&rule.target) {
         Ok(_) => true,
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            // Windows reports a missing child of a regular file as NotFound,
+            // whereas Unix reports NotADirectory. Diagnose both as unreadable.
+            let mut parent = rule.target.parent();
+            while let Some(path) = parent {
+                match fs::metadata(path) {
+                    Ok(metadata) if !metadata.is_dir() => {
+                        return unreadable_check(
+                            rule,
+                            format!("target parent is not a directory: {}", path.display()),
+                        );
+                    }
+                    Ok(_) => break,
+                    Err(error) if error.kind() == ErrorKind::NotFound => parent = path.parent(),
+                    Err(error) => {
+                        return unreadable_check(
+                            rule,
+                            format!(
+                                "failed to inspect target parent {}: {error}",
+                                path.display()
+                            ),
+                        );
+                    }
+                }
+            }
+            false
+        }
         Err(error) => {
             return unreadable_check(
                 rule,
@@ -705,7 +731,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
                     .is_some_and(|component| matches!(component, Component::Normal(_)));
                 if can_pop_normal {
                     normalized.pop();
-                } else if !path.is_absolute() {
+                } else if !path.has_root() {
                     normalized.push(component.as_os_str());
                 }
             }
