@@ -309,7 +309,8 @@ cargo test --locked
 ```
 
 JJ 0.39.0 is the oldest supported release. CI runs root integration tests against
-0.39.0 and the newer pinned compatibility targets, 0.44.0 and 0.45.1. The adapter
+0.39.0 and the newer pinned compatibility targets, 0.44.0, 0.45.1, and 0.46.0,
+on Linux, macOS, and Windows. macOS tests require real copy-on-write success. The adapter
 keeps version-specific behavior at the boundary: `jw doctor` recommends
 `jj converge --no-interactive` for divergence on JJ 0.45 and newer, while older
 supported versions receive manual recovery guidance. A minimum-version bump
