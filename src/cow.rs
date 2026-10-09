@@ -53,13 +53,19 @@ mod imp {
             _ => {}
         }
 
-        let probe = destination_parent.join(format!(".jw-cow-probe-{}", std::process::id()));
-        let probe_clone =
-            destination_parent.join(format!(".jw-cow-probe-{}.clone", std::process::id()));
+        // Exclusive creation and mode 0700 keep both files private. TempDir only
+        // cleans up the directory it created, never a caller's existing paths.
+        let directory = match tempfile::Builder::new()
+            .prefix(".jw-cow-probe-")
+            .tempdir_in(destination_parent)
+        {
+            Ok(directory) => directory,
+            Err(error) => return Some(format!("cannot create private clone probe: {error}")),
+        };
+        let probe = directory.path().join("source");
+        let probe_clone = directory.path().join("clone");
         let result =
             fs::write(&probe, b"probe").and_then(|()| reflink_copy::reflink(&probe, &probe_clone));
-        let _ = fs::remove_file(&probe_clone);
-        let _ = fs::remove_file(&probe);
         result.err().map(|error| {
             format!(
                 "the filesystem at {} cannot clone files: {error}",
@@ -153,6 +159,10 @@ mod tests {
         let source = temp.path().join("source");
         let destination = temp.path().join("destination");
         if let Some(reason) = unsupported_reason(temp.path(), temp.path()) {
+            assert!(
+                std::env::var_os("JW_TEST_REQUIRE_COW").is_none_or(|value| value.is_empty()),
+                "real cloning required: {reason}"
+            );
             eprintln!("skipping clone test: {reason}");
             return;
         }
@@ -189,5 +199,39 @@ mod tests {
         );
         assert!(!destination.join(".env").exists());
         assert!(!destination.join("deleted.txt").exists());
+        // Sharing storage must never couple later edits or share an inode.
+        fs::write(&tool, "destination edit\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join("nested/deeper/tool.sh")).unwrap(),
+            "#!/bin/sh\n"
+        );
+        fs::write(source.join("nested/deeper/tool.sh"), "source edit\n").unwrap();
+        assert_eq!(fs::read_to_string(&tool).unwrap(), "destination edit\n");
+    }
+
+    #[test]
+    fn probe_preserves_existing_files_symlinks_and_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let victim = temp.path().join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        let legacy = temp
+            .path()
+            .join(format!(".jw-cow-probe-{}", std::process::id()));
+        let legacy_clone = legacy.with_extension("clone");
+        symlink(&victim, &legacy).unwrap();
+        fs::write(&legacy_clone, "caller-owned").unwrap();
+        let other = temp.path().join(".jw-cow-probe-existing");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join("source"), "also caller-owned").unwrap();
+        let before = fs::read_dir(temp.path()).unwrap().count();
+        unsupported_reason(temp.path(), temp.path());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(fs::read_link(&legacy).unwrap(), victim);
+        assert_eq!(fs::read_to_string(&legacy_clone).unwrap(), "caller-owned");
+        assert_eq!(
+            fs::read_to_string(other.join("source")).unwrap(),
+            "also caller-owned"
+        );
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), before);
     }
 }

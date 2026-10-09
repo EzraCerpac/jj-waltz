@@ -596,10 +596,19 @@ fn add_workspace_by_name_with_inventory(
         return Err(error);
     }
 
-    if let Some(source) = &options.clone_from
-        && let Err(error) = materialize_clone(source, &path)
-    {
-        return Err(rollback_failed_add(error, name, &path, None));
+    if let Some(source) = &options.clone_from {
+        match materialize_clone(source, &path) {
+            Ok(true) => {}
+            Ok(false) => {
+                // Recreate through JJ's ordinary path. That inherits the source
+                // sparse patterns verbatim, including paths with whitespace.
+                rollback_workspace_parts(name, &path, None, None)?;
+                let mut fallback = options.clone();
+                fallback.clone_from = None;
+                return add_workspace_by_name_with_inventory(name, &fallback, inventory);
+            }
+            Err(error) => return Err(rollback_failed_add(error, name, &path, None)),
+        }
     }
 
     // Capture provenance before bookmark creation records another JJ operation.
@@ -651,10 +660,14 @@ fn add_workspace_by_name_with_inventory(
 ///
 /// Only the files JJ tracks in the source's working-copy commit are cloned, so
 /// ignored and untracked files never reach the new workspace. JJ adopts the clone
-/// through the source's working-copy state, or by expanding the sparse patterns
-/// when it rejects that state. Restoring `@` from its parent then rewrites every
+/// through the source's working-copy state. Return false when the caller must
+/// recreate through JJ's ordinary checkout path. Restoring `@` then rewrites every
 /// file that differs from the creation base, so the result matches a full checkout.
-fn materialize_clone(source_root: &Path, path: &Path) -> Result<()> {
+fn materialize_clone(source_root: &Path, path: &Path) -> Result<bool> {
+    let client = JjClient::new(path);
+    if client.uses_watchman()? {
+        return Ok(false);
+    }
     let files = JjClient::new(source_root).tracked_files()?;
     cow::clone_files(source_root, &files, path).with_context(|| {
         format!(
@@ -662,14 +675,11 @@ fn materialize_clone(source_root: &Path, path: &Path) -> Result<()> {
             source_root.display()
         )
     })?;
-    let client = JjClient::new(path);
     if !adopt_source_tree_state(&client, source_root, path)? {
-        // JJ skips files that already exist on disk while expanding the sparse
-        // patterns, then hashes every one of them in the next snapshot.
-        client.run(["sparse", "reset"])?;
+        return Ok(false);
     }
     client.run(["restore"])?;
-    Ok(())
+    Ok(true)
 }
 
 /// Let the new workspace reuse the source checkout's working-copy state.

@@ -1079,6 +1079,188 @@ fn add_with_cow_checks_out_exactly_the_base() {
     assert_eq!(repo.jj_stdout(&workspace_root, &["diff", "--summary"]), "");
 }
 
+// macOS CI sets JW_TEST_REQUIRE_COW so these tests cannot silently take
+// the unsupported-filesystem path when validating the clone and its fallbacks.
+#[test]
+fn cow_preserves_sparse_patterns() {
+    check_cow_sparse(None);
+}
+
+#[cfg(unix)]
+#[test]
+fn cow_watchman_fallback_preserves_sparse_patterns() {
+    check_cow_sparse(Some("watchman"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cow_rejected_state_fallback_preserves_sparse_patterns() {
+    check_cow_sparse(Some("rejected-state"));
+}
+
+fn check_cow_sparse(mode: Option<&str>) {
+    skip_without_jj!();
+    let cases = vec![vec!["keep dir", "README.md"], vec![]];
+    #[cfg(unix)]
+    let cases = {
+        let mut cases = cases;
+        cases.push(vec!["keep\nnewline"]);
+        cases
+    };
+    for patterns in cases {
+        let repo = TestRepo::new().unwrap();
+        let directories = vec!["keep dir", "excluded"];
+        #[cfg(unix)]
+        let directories = {
+            let mut directories = directories;
+            directories.push("keep\nnewline");
+            directories
+        };
+        for directory in &directories {
+            fs::create_dir(repo.default_root.join(directory)).unwrap();
+            fs::write(repo.default_root.join(directory).join("tracked"), "base\n").unwrap();
+        }
+        repo.run_jj(["commit", "-m", "sparse base"]);
+        let mut sparse_args = vec!["jj", "sparse", "set", "--clear"];
+        for pattern in &patterns {
+            sparse_args.extend(["--add", *pattern]);
+        }
+        repo.run_in(&repo.default_root, sparse_args).unwrap();
+        if patterns.contains(&"README.md") {
+            fs::write(repo.default_root.join("README.md"), "source edit\n").unwrap();
+        }
+        let workspace = repo.default_root.with_extension("feature-a");
+        let mut command = repo.cmd();
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            install_cow_jj_proxy(&repo, &mut command, mode, &workspace);
+        }
+        #[cfg(not(unix))]
+        assert!(mode.is_none());
+        let output = command
+            .args(["add", "--cow", "feature-a"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if env::var_os("JW_TEST_REQUIRE_COW").is_some_and(|value| !value.is_empty()) {
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("copy-on-write is unavailable")
+            );
+            if mode.is_some() {
+                assert!(
+                    repo._tempdir.path().join("fallback-seen").exists(),
+                    "fallback branch not exercised"
+                );
+            }
+        }
+        assert_eq!(
+            repo.jj_stdout(&workspace, &["sparse", "list"]),
+            repo.jj_stdout(&repo.default_root, &["sparse", "list"])
+        );
+        assert!(!workspace.join("excluded").exists());
+        for directory in directories
+            .iter()
+            .copied()
+            .filter(|directory| *directory != "excluded")
+        {
+            assert_eq!(
+                workspace.join(directory).join("tracked").exists(),
+                patterns.contains(&directory)
+            );
+        }
+        assert_eq!(
+            workspace.join("README.md").exists(),
+            patterns.contains(&"README.md")
+        );
+        if patterns.contains(&"README.md") {
+            assert_eq!(
+                fs::read_to_string(workspace.join("README.md")).unwrap(),
+                "hello\n"
+            );
+            assert_eq!(
+                fs::read_to_string(repo.default_root.join("README.md")).unwrap(),
+                "source edit\n"
+            );
+        }
+        assert_eq!(repo.jj_stdout(&workspace, &["diff", "--summary"]), "");
+        assert_eq!(
+            repo.workspace_names()
+                .iter()
+                .filter(|name| *name == "feature-a")
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(unix)]
+fn install_cow_jj_proxy(repo: &TestRepo, command: &mut Command, mode: &str, workspace: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let original_path = env::var_os("PATH").unwrap();
+    let real_jj = env::split_paths(&original_path)
+        .map(|directory| directory.join("jj"))
+        .find(|path| path.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let proxy = repo._tempdir.path().join("proxy");
+    fs::create_dir(&proxy).unwrap();
+    let script = proxy.join("jj");
+    fs::write(&script, r#"#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+mode = os.environ['JW_TEST_COW_MODE']
+marker = Path(os.environ['JW_TEST_COW_MARKER'])
+if mode == 'watchman' and args[-3:] == ['config', 'get', 'fsmonitor.backend']:
+    marker.write_text('watchman')
+    print('watchman')
+    sys.exit(0)
+if mode == 'rejected-state' and 'status' in args and os.getcwd() == os.environ['JW_TEST_COW_WORKSPACE'] and not marker.exists():
+    marker.write_text('rejected-state')
+    sys.exit(1)
+os.execv(os.environ['JW_TEST_REAL_JJ'], [os.environ['JW_TEST_REAL_JJ']] + args)
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let paths = std::iter::once(proxy).chain(env::split_paths(&original_path));
+    command
+        .env("PATH", env::join_paths(paths).unwrap())
+        .env("JW_TEST_REAL_JJ", real_jj)
+        .env("JW_TEST_COW_MODE", mode)
+        .env(
+            "JW_TEST_COW_MARKER",
+            repo._tempdir.path().join("fallback-seen"),
+        )
+        .env("JW_TEST_COW_WORKSPACE", workspace);
+}
+
+#[test]
+fn cow_and_colocation_are_rejected_before_creation() {
+    skip_without_jj!();
+    for args in [
+        vec!["add", "feature-a", "--cow", "--colocate"],
+        vec!["switch", "feature-a", "--cow", "--colocate"],
+        vec!["add", "feature-a"],
+        vec!["switch", "feature-a"],
+    ] {
+        let repo = TestRepo::new().unwrap();
+        repo.write_config("[workspace]\ncopy_on_write = true\ncolocate = true\n");
+        repo.cmd()
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "colocation and copy-on-write cannot be combined",
+            ));
+        assert!(!repo.default_root.with_extension("feature-a").exists());
+        assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    }
+}
+
 #[test]
 fn switch_with_cow_config_leaves_link_sources_to_links() {
     skip_without_jj!();

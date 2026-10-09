@@ -279,7 +279,8 @@ Otherwise it adds the workspace with empty sparse patterns, clones the files JJ
 tracks in the current workspace's working-copy commit, and copies the current
 workspace's working-copy state. Ignored and untracked files are never cloned.
 A JJ snapshot validates the copied state; if JJ rejects it, the previous state is
-restored and `jj sparse reset` adopts the files by hashing them instead. `jj
+restored, the attempted clone workspace is rolled back, and JJ recreates it
+through its ordinary workspace-add path, preserving the source sparse patterns. `jj
 restore` then makes `@` match the creation base exactly before provenance is
 captured, so the recorded creation operation describes a complete checkout.
 
