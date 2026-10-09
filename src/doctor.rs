@@ -396,19 +396,34 @@ impl DoctorEngine {
             return;
         };
 
+        let mut problems = 0;
         for workspace in workspaces {
             let record = metadata
                 .iter()
                 .find(|record| record.workspace_name == workspace.name);
+            if let Some(owner) = record.and_then(|record| record.owned_git_worktree.as_ref()) {
+                if let Err(error) = crate::ownership::validate_owned_at(
+                    &self.client,
+                    operation_id,
+                    &workspace.name,
+                    workspace.path.as_deref(),
+                    owner,
+                ) {
+                    problems += 1;
+                    report.push(DoctorDiagnostic::error(
+                        DoctorCode::MetadataConsistency,
+                        format!("owned Git worktree provenance is invalid: {error:#}"),
+                        Some("inspect the checkout, Git registration and jw-owner marker; restore the recorded topology before cleanup"),
+                    ).with_subject(&workspace.name));
+                }
+                continue;
+            }
             if record
                 .and_then(|record| record.external_owner.as_ref())
                 .is_some()
-                || (record
-                    .and_then(|record| record.owned_git_worktree.as_ref())
-                    .is_none()
-                    && workspace.path.as_deref().is_some_and(|path| {
-                        crate::ownership::detect(path).is_ok_and(|owner| owner.is_some())
-                    }))
+                || workspace.path.as_deref().is_some_and(|path| {
+                    crate::ownership::detect(path).is_ok_and(|owner| owner.is_some())
+                })
             {
                 report.push(DoctorDiagnostic::warning(
                     DoctorCode::MetadataConsistency,
@@ -423,7 +438,6 @@ impl DoctorEngine {
             .map(|workspace| workspace.name.as_str())
             .collect::<BTreeSet<_>>();
         let bookmarks = query_bookmark_names(&self.client, operation_id);
-        let mut problems = 0;
 
         for record in metadata {
             let workspace_registered = workspace_names.contains(record.workspace_name.as_str());

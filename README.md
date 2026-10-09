@@ -283,6 +283,9 @@ runs a global Git worktree prune. Changed topology or missing/damaged provenance
 requires inspection instead of automatic deletion. Native app checkouts remain
 externally owned, including after adoption.
 
+`jw doctor` validates recorded ownership against live topology and the marker,
+and reports invalid provenance as a metadata-consistency error.
+
 Lifecycle metadata writes use schema 3; schemas 1 and 2 remain readable without
 inferring ownership. Older jw versions refuse schema 3 records. Preserve the metadata
 and Git administrative ownership marker for cleanup, and use a current jw version.

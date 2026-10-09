@@ -311,6 +311,98 @@ fn owned_cleanup_removes_only_target_and_keep_dir_preserves_files() {
 }
 
 #[test]
+fn doctor_validates_live_owned_provenance_without_mutating_repository() {
+    for damage in ["gitlink", "marker", "registration"] {
+        let f = Fixture::new();
+        if !f.supports() {
+            return;
+        }
+        f.config("[trunk]\nrevset='root()'\n");
+        f.jw()
+            .args(["add", "owned", "--colocate"])
+            .assert()
+            .success();
+        let (record_path, record) = f.record("owned");
+        let record_bytes = fs::read(&record_path).unwrap();
+        let admin = PathBuf::from(
+            record["metadata"]["owned_git_worktree"]["topology"]["git_dir"]
+                .as_str()
+                .unwrap(),
+        );
+        let healthy = f
+            .jw()
+            .args(["doctor", "--format=json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let healthy: serde_json::Value = serde_json::from_slice(&healthy).unwrap();
+        assert!(
+            healthy["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == "metadata-consistency" && d["state"] == "passed")
+        );
+        match damage {
+            "gitlink" => fs::write(
+                f.path("owned").join(".git"),
+                format!("gitdir: {}\n", f.root.join(".git").display()),
+            )
+            .unwrap(),
+            "marker" => fs::write(admin.join("jw-owner"), "damaged").unwrap(),
+            "registration" => {
+                fs::rename(&admin, admin.with_extension("saved")).unwrap();
+                fs::create_dir(&admin).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let operation_args = [
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            "id ++ '\\n'",
+        ];
+        let operations = f.run("jj", &f.root, &operation_args).stdout;
+        let output = f
+            .jw()
+            .args(["doctor", "--format=json"])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let diagnostics = report["diagnostics"].as_array().unwrap();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d["code"] == "metadata-consistency"
+                    && d["subject"] == "owned"
+                    && d["state"] == "failed"
+                    && d["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("provenance is invalid")),
+            "{damage}: {report}"
+        );
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d["code"] == "metadata-consistency" && d["state"] == "passed"),
+            "{damage}: {report}"
+        );
+        assert_eq!(f.run("jj", &f.root, &operation_args).stdout, operations);
+        assert_eq!(fs::read(record_path).unwrap(), record_bytes);
+        assert!(f.path("owned").exists());
+        assert!(admin.exists());
+    }
+}
+
+#[test]
 fn replaced_topology_or_marker_and_missing_metadata_are_protected() {
     let f = Fixture::new();
     if !f.supports() {

@@ -139,8 +139,22 @@ pub fn detect(root: &Path) -> Result<Option<ExternalOwner>> {
 }
 
 fn target_path(client: &JjClient, name: &str) -> Result<Option<PathBuf>> {
-    let output =
-        client.run_unchecked(["--ignore-working-copy", "workspace", "root", "--name", name])?;
+    target_path_at(client, name, None)
+}
+
+fn target_path_at(
+    client: &JjClient,
+    name: &str,
+    operation: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let output = match operation {
+        Some(operation) => {
+            client.run_at_unchecked(operation, ["workspace", "root", "--name", name])?
+        }
+        None => {
+            client.run_unchecked(["--ignore-working-copy", "workspace", "root", "--name", name])?
+        }
+    };
     if output.success() {
         return Ok(Some(PathBuf::from(output.trimmed_stdout()?)));
     }
@@ -275,13 +289,39 @@ fn validate_topology(
     path: Option<&Path>,
     owner: &ExternalOwner,
 ) -> Result<()> {
-    let queried = target_path(client, name)?.context("owned workspace has no recorded path")?;
+    validate_topology_at(client, name, path, owner, None)
+}
+
+/// Validate live provenance while pinning all JJ queries to doctor's frozen operation.
+pub(crate) fn validate_owned_at(
+    client: &JjClient,
+    operation: &str,
+    name: &str,
+    path: Option<&Path>,
+    owner: &OwnedGitWorktree,
+) -> Result<()> {
+    validate_topology_at(client, name, path, &owner.topology, Some(operation))?;
+    validate_admin(owner)
+}
+
+fn validate_topology_at(
+    client: &JjClient,
+    name: &str,
+    path: Option<&Path>,
+    owner: &ExternalOwner,
+    operation: Option<&str>,
+) -> Result<()> {
+    let queried =
+        target_path_at(client, name, operation)?.context("owned workspace has no recorded path")?;
     if !same_path(&queried, &owner.checkout_root)?
         || path.is_some_and(|path| same_path(path, &owner.checkout_root).ok() != Some(true))
     {
         bail!("owned workspace path changed; refusing cleanup")
     }
-    let backend = client.run(["--ignore-working-copy", "git", "root"])?;
+    let backend = match operation {
+        Some(operation) => client.run_at(operation, ["git", "root"]),
+        None => client.run(["--ignore-working-copy", "git", "root"]),
+    }?;
     if PathBuf::from(backend.trimmed_stdout()?).canonicalize()? != owner.common_dir {
         bail!("owned Git repository changed; refusing cleanup")
     }
