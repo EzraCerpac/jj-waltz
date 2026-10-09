@@ -1578,9 +1578,13 @@ fn directory_link_conflict_explains_safe_resolution_and_rolls_back_only_new_work
         .args(["switch", "ezra", "--at", "@-"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "link conflict at manuscript/build/figures",
-        ))
+        .stderr(predicate::str::contains(format!(
+            "link conflict at {}",
+            Path::new("manuscript")
+                .join("build")
+                .join("figures")
+                .display()
+        )))
         .stderr(predicate::str::contains(
             "existing directory cannot be replaced by a whole-directory link",
         ))
