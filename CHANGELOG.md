@@ -1,16 +1,28 @@
 # Changelog
 
-## Unreleased
+## Version 0.8.0 (2026-10-09)
 
 - Add opt-in copy-on-write workspace creation with `jw add --cow`,
   `jw switch --cow`, or `workspace.copy_on_write = true`. New workspaces clone
   the current workspace's tracked files on APFS, Btrfs, or XFS and match a full
-  checkout of the creation base. Unsupported filesystems fall back to a full
-  checkout with a warning; `--no-cow` opts out for one command.
+  checkout of the creation base within the source workspace's sparse patterns.
+  Unsupported filesystems, Watchman, and rejected copied working-copy state fall
+  back to ordinary JJ workspace creation while preserving those patterns;
+  `--no-cow` opts out for one command. Use a private, exclusively created directory
+  for the reflink capability probe. Thanks to @gergesh for the contribution (#48).
 - Add opt-in Git worktree creation with `jw add --colocate`, `jw switch --colocate`,
   and `workspace.colocate = true` on JJ 0.46+. `--no-colocate` overrides config.
   Track jw-created Git worktree ownership and clean only its registration; external
   checkouts and unrelated stale registrations remain protected.
+- Reject combining copy-on-write and Git colocation, including when enabled in
+  config; use `--no-cow` or `--no-colocate` to override one option.
+- Protect externally owned Git checkouts and registrations during workspace
+  removal, pruning, and rollback (#49).
+- Correct Windows exclusive ownership operations, metadata initialization, path
+  alias handling, and PowerShell switching and command execution.
+- Test JJ 0.39.0, 0.44.0, 0.45.1, and 0.46.0 on Linux, macOS, and Windows,
+  requiring real copy-on-write success on macOS. Update root and Herdr dependencies
+  while retaining Rust 1.88 as the minimum supported version.
 
 ## Version 0.7.0 (2026-09-25)
 
