@@ -28,6 +28,9 @@ pub enum DefaultCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     pub create_bookmark: bool,
+    pub colocate: bool,
+    // Reserved for the independent copy-on-write feature; reject its combination with colocation.
+    pub(crate) copy_on_write: bool,
     pub bookmark_template: String,
 }
 
@@ -47,6 +50,10 @@ struct RawConfig {
 struct RawWorkspaceConfig {
     #[serde(default)]
     create_bookmark: bool,
+    #[serde(default)]
+    colocate: bool,
+    #[serde(default)]
+    copy_on_write: bool,
     bookmark_template: Option<String>,
 }
 
@@ -61,6 +68,8 @@ impl Default for Config {
             default_command: DefaultCommand::Ui,
             workspace: WorkspaceConfig {
                 create_bookmark: false,
+                colocate: false,
+                copy_on_write: false,
                 bookmark_template: DEFAULT_BOOKMARK_TEMPLATE.to_owned(),
             },
             trunk: TrunkConfig {
@@ -98,6 +107,8 @@ impl From<RawConfig> for Config {
             default_command: raw.default_command.unwrap_or_default(),
             workspace: WorkspaceConfig {
                 create_bookmark: workspace.create_bookmark,
+                colocate: workspace.colocate,
+                copy_on_write: workspace.copy_on_write,
                 bookmark_template: workspace
                     .bookmark_template
                     .unwrap_or(defaults.workspace.bookmark_template),

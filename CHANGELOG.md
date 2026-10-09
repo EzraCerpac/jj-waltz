@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in Git worktree creation with `jw add --colocate`, `jw switch --colocate`,
+  and `workspace.colocate = true` on JJ 0.46+. `--no-colocate` overrides config.
+  Track jw-created Git worktree ownership and clean only its registration; external
+  checkouts and unrelated stale registrations remain protected.
+
 ## Version 0.7.0 (2026-09-25)
 
 - Add a persistent workspace manager with `jw ui` and bare `jw` in a terminal,

@@ -259,6 +259,44 @@ Removal is planned before mutation, so default/current-workspace checks and book
 choices happen before the workspace is forgotten. `--keep-dir` forgets the workspace
 without deleting its directory.
 
+### Colocated workspaces
+
+`jw add feature --colocate` and `jw switch feature --colocate` create a JJ workspace
+with a linked Git worktree on JJ 0.46 or another build advertising that capability.
+Git-aware tools can use the new workspace's `.git` link. The default remains a
+JJ-only workspace, regardless of JJ's `git.colocate` setting. To opt in globally:
+
+```toml
+[workspace]
+colocate = true
+```
+
+`--colocate` and `--no-colocate` override this setting for one command. They affect
+only newly created workspaces; switching to an existing workspace never converts
+it. Unsupported JJ versions and non-Git backends fail before creation.
+
+`jw` records provenance only for Git worktrees it creates. `jw remove` cleans that
+workspace's Git registration, and `--keep-dir` retains its files while removing the
+Git link. Missing checkout paths can be pruned if the recorded registration still
+matches. Cleanup validates both live topology and the ownership marker, and never
+runs a global Git worktree prune. Changed topology or missing/damaged provenance
+requires inspection instead of automatic deletion. Native app checkouts remain
+externally owned, including after adoption.
+
+`jw doctor` validates recorded ownership against live topology and the marker,
+and reports invalid provenance as a metadata-consistency error.
+
+Lifecycle metadata writes use schema 3; schemas 1 and 2 remain readable without
+inferring ownership. Older jw versions refuse schema 3 records. Preserve the metadata
+and Git administrative ownership marker for cleanup, and use a current jw version.
+If a process is interrupted after detaching `.git`, inspect `.jj/jw-detached-git`
+and the retained metadata before recovering the link or finishing cleanup.
+
+Copy-on-write creation is an independent, unreleased feature (PR #48). Colocation
+currently rejects `workspace.copy_on_write = true`; support for their combination
+must be implemented and tested separately.
+
+
 ## Config
 
 `jw` reads user config from `$XDG_CONFIG_HOME/jj-waltz/config.toml`, or
@@ -335,7 +373,8 @@ Keep agent work there, use the actual Git or JJ capability, and give each checko
 one writer; an orchestrator stays read-only in a worker's checkout. `jw` lifecycle
 management is optional and does not require creating a second workspace.
 
-Linked Git topology makes removal, forgetting (even `--keep-dir`), UI removal, and
+Linked Git topology without valid jw creation provenance makes removal, forgetting
+(even `--keep-dir`), UI removal, and
 pruning ineligible. `jw adopt` persists that owner for damaged or missing checkout
 metadata; live topology is protected without adoption. Let the owning app remove
 both checkout and Git registration. Then `jw reconcile-external NAME` can explicitly

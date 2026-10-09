@@ -396,10 +396,28 @@ impl DoctorEngine {
             return;
         };
 
+        let mut problems = 0;
         for workspace in workspaces {
             let record = metadata
                 .iter()
                 .find(|record| record.workspace_name == workspace.name);
+            if let Some(owner) = record.and_then(|record| record.owned_git_worktree.as_ref()) {
+                if let Err(error) = crate::ownership::validate_owned_at(
+                    &self.client,
+                    operation_id,
+                    &workspace.name,
+                    workspace.path.as_deref(),
+                    owner,
+                ) {
+                    problems += 1;
+                    report.push(DoctorDiagnostic::error(
+                        DoctorCode::MetadataConsistency,
+                        format!("owned Git worktree provenance is invalid: {error:#}"),
+                        Some("inspect the checkout, Git registration and jw-owner marker; restore the recorded topology before cleanup"),
+                    ).with_subject(&workspace.name));
+                }
+                continue;
+            }
             if record
                 .and_then(|record| record.external_owner.as_ref())
                 .is_some()
@@ -420,7 +438,6 @@ impl DoctorEngine {
             .map(|workspace| workspace.name.as_str())
             .collect::<BTreeSet<_>>();
         let bookmarks = query_bookmark_names(&self.client, operation_id);
-        let mut problems = 0;
 
         for record in metadata {
             let workspace_registered = workspace_names.contains(record.workspace_name.as_str());
@@ -1277,6 +1294,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write metadata");
         let record = fs::read_dir(store.root().join("workspaces"))
@@ -1320,7 +1338,14 @@ mod tests {
         let missing = fixture.root.join("missing-workspace");
         let output = Command::new("jj")
             .current_dir(&fixture.repo)
-            .args(["workspace", "add", "--name", "gone"])
+            .args([
+                "workspace",
+                "add",
+                "--config",
+                "git.colocate=false",
+                "--name",
+                "gone",
+            ])
             .arg(&missing)
             .output()
             .expect("add fixture workspace");
@@ -1343,6 +1368,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write stale metadata");
         fs::remove_dir_all(&missing).expect("remove fixture checkout");
@@ -1387,6 +1413,7 @@ mod tests {
                 associated_bookmark: Some("missing-bookmark".to_owned()),
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write stale metadata");
 
@@ -1415,7 +1442,14 @@ mod tests {
         let child = fixture.root.join("child");
         let output = Command::new("jj")
             .current_dir(&fixture.repo)
-            .args(["workspace", "add", "--name", "child"])
+            .args([
+                "workspace",
+                "add",
+                "--config",
+                "git.colocate=false",
+                "--name",
+                "child",
+            ])
             .arg(&child)
             .output()
             .expect("add child workspace");
@@ -1473,6 +1507,7 @@ mod tests {
                     associated_bookmark: None,
                     intended_remote: None,
                     external_owner: None,
+                    owned_git_worktree: None,
                 })
                 .expect("write metadata");
         }
@@ -1505,7 +1540,14 @@ mod tests {
         let child = fixture.root.join("child");
         let output = Command::new("jj")
             .current_dir(&fixture.repo)
-            .args(["workspace", "add", "--name", "child"])
+            .args([
+                "workspace",
+                "add",
+                "--config",
+                "git.colocate=false",
+                "--name",
+                "child",
+            ])
             .arg(&child)
             .output()
             .expect("add child workspace");
@@ -1542,6 +1584,7 @@ mod tests {
                     associated_bookmark: None,
                     intended_remote: None,
                     external_owner: None,
+                    owned_git_worktree: None,
                 })
                 .expect("write metadata");
         }
@@ -1624,6 +1667,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write metadata");
 
@@ -1681,6 +1725,7 @@ mod tests {
                 associated_bookmark: None,
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .expect("write metadata");
 

@@ -555,6 +555,7 @@ mod tests {
                 associated_bookmark: bookmark.map(ToOwned::to_owned),
                 intended_remote: None,
                 external_owner: None,
+                owned_git_worktree: None,
             })
             .unwrap();
     }
