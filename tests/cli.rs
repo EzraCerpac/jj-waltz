@@ -609,13 +609,27 @@ fn list_infers_current_default_without_recorded_path() {
             .contains("Workspace has no recorded path: default")
     );
 
-    let expected = format!("@ default\t{}", path_string(&repo.default_root));
-    repo.cmd()
+    let output = repo
+        .cmd()
         .args(["list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(expected))
-        .stdout(predicate::str::contains("(missing)").not());
+        .stdout(predicate::str::contains("(missing)").not())
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).expect("UTF-8 workspace listing");
+    let (name, root) = output.trim_end().split_once('\t').expect("workspace row");
+    assert_eq!(name, "@ default");
+    // Inferred paths may use Windows' verbatim prefix; compare checkout identity.
+    assert_eq!(
+        Path::new(root)
+            .canonicalize()
+            .expect("listed checkout exists"),
+        repo.default_root
+            .canonicalize()
+            .expect("canonical checkout")
+    );
 }
 
 #[test]
