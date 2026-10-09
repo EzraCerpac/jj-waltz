@@ -1550,6 +1550,131 @@ fn switch_accepts_existing_directory_when_it_matches_target() {
 }
 
 #[test]
+fn directory_link_conflict_explains_safe_resolution_and_rolls_back_only_new_workspace() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.cmd().args(["add", "existing"]).assert().success();
+    let existing_root = repo.default_root.with_extension("existing");
+    fs::write(existing_root.join("private.txt"), "existing workspace\n").unwrap();
+    let figures = repo.default_root.join("manuscript/build/figures");
+    fs::create_dir_all(&figures).unwrap();
+    fs::write(figures.join("tracked.pdf"), "tracked PDF\n").unwrap();
+    repo.run_jj(["file", "track", "root:manuscript/build/figures"]);
+    repo.run_jj(["commit", "-m", "tracked figures"]);
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"manuscript/build/figures\"\ntarget = \"../repo/manuscript/build/figures\"\nrequired = true\n",
+    )
+    .unwrap();
+    let workspaces = repo.workspace_names();
+    let bookmarks = repo.bookmarks();
+    let metadata: Vec<_> = repo
+        .metadata_record_paths()
+        .into_iter()
+        .map(|path| (path.clone(), fs::read(path).unwrap()))
+        .collect();
+
+    repo.cmd()
+        .args(["switch", "ezra", "--at", "@-"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "link conflict at manuscript/build/figures",
+        ))
+        .stderr(predicate::str::contains(
+            "existing directory cannot be replaced by a whole-directory link",
+        ))
+        .stderr(predicate::str::contains("may contain files tracked by JJ"))
+        .stderr(predicate::str::contains(
+            ".jwlinks.local.toml with target equal to source",
+        ))
+        .stderr(predicate::str::contains(
+            "Generated files must then be supplied separately",
+        ));
+
+    assert!(!repo.default_root.with_extension("ezra").exists());
+    assert_eq!(repo.workspace_names(), workspaces);
+    assert_eq!(repo.bookmarks(), bookmarks);
+    assert_eq!(repo.metadata_record_paths().len(), metadata.len());
+    for (path, contents) in metadata {
+        assert_eq!(fs::read(path).unwrap(), contents);
+    }
+    assert_eq!(
+        fs::read_to_string(figures.join("tracked.pdf")).unwrap(),
+        "tracked PDF\n"
+    );
+    assert_eq!(
+        fs::read_to_string(existing_root.join("private.txt")).unwrap(),
+        "existing workspace\n"
+    );
+    assert!(!repo.default_root.join(".jj/jw-prev-workspace").exists());
+}
+
+#[test]
+fn directory_link_self_target_override_preserves_shared_alias_and_tracked_private_files() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    let figures = repo.default_root.join("manuscript/build/figures");
+    fs::create_dir_all(&figures).unwrap();
+    fs::write(
+        repo.default_root.join(".gitignore"),
+        "manuscript/build/figures/generated.pdf\n",
+    )
+    .unwrap();
+    fs::write(figures.join("generated.pdf"), "untracked generated PDF\n").unwrap();
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"manuscript/build/figures\"\ntarget = \"../repo/manuscript/build/figures\"\nrequired = true\n",
+    )
+    .unwrap();
+    repo.cmd()
+        .args(["add", "legacy", "--at", "@-"])
+        .assert()
+        .success();
+    let legacy_root = repo.default_root.with_extension("legacy");
+    let shared_alias = legacy_root.join("manuscript/build/figures");
+    let original_link = fs::read_link(&shared_alias).unwrap();
+    fs::write(figures.join("tracked.pdf"), "tracked PDF\n").unwrap();
+    repo.run_jj(["file", "track", "root:manuscript/build/figures"]);
+    repo.run_jj(["commit", "-m", "tracked figures"]);
+    fs::write(
+        repo.default_root.join(".jwlinks.local.toml"),
+        "[[link]]\nsource = \"manuscript/build/figures\"\ntarget = \"manuscript/build/figures\"\nrequired = true\n",
+    )
+    .unwrap();
+
+    repo.cmd_at(&legacy_root)
+        .args(["links", "apply"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_link(&shared_alias).unwrap(), original_link);
+    repo.cmd()
+        .args(["add", "ezra", "--at", "@-"])
+        .assert()
+        .success();
+    let private = repo
+        .default_root
+        .with_extension("ezra")
+        .join("manuscript/build/figures");
+    assert!(
+        !fs::symlink_metadata(&private)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(private.join("tracked.pdf")).unwrap(),
+        "tracked PDF\n"
+    );
+    assert!(!private.join("generated.pdf").exists());
+    assert_eq!(
+        fs::read_to_string(figures.join("generated.pdf")).unwrap(),
+        "untracked generated PDF\n"
+    );
+    assert_eq!(fs::read_link(&shared_alias).unwrap(), original_link);
+}
+
+#[test]
 fn switch_fails_on_conflicting_existing_path() {
     skip_without_jj!();
     let repo = TestRepo::new().expect("create test repo");
