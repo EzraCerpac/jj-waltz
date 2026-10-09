@@ -1,0 +1,89 @@
+# Changelog
+
+## Unreleased
+
+- Add opt-in Git worktree creation with `jw add --colocate`, `jw switch --colocate`,
+  and `workspace.colocate = true` on JJ 0.46+. `--no-colocate` overrides config.
+  Track jw-created Git worktree ownership and clean only its registration; external
+  checkouts and unrelated stale registrations remain protected.
+
+## Version 0.7.0 (2026-09-25)
+
+- Add a persistent workspace manager with `jw ui` and bare `jw` in a terminal,
+  with search, filters, multi-selection, workspace creation, and shell switching.
+- Show bookmark integration separately from workspace work using local trunk
+  ancestry, with explicit unknown, conflict, and unchecked states.
+- Preview bulk removal and missing-workspace pruning, protect current/default
+  workspaces, and require a choice before deleting files not recorded by JJ.
+- Keep unmanaged bookmarks and bookmarks shared with surviving workspaces;
+  report partial failures without blocking independent removals or retries.
+- Add semantic terminal colors and a mouse/text-selection toggle (`m`), with
+  readable default foreground text across terminal themes.
+- Support configurable bare-command behavior and retain existing CLI/JSON commands.
+- Raise the minimum Rust version to 1.88.
+
+## Version 0.6.1 (2026-09-07)
+
+- Preserve whitespace in checkout and workspace paths reported by `jw context`.
+- Ignore inherited Git discovery ceilings when inspecting checkout paths.
+- Skip the JJ routing-hint test when JJ is unavailable.
+
+## Version 0.6.0 (2026-09-07)
+
+- Add read-only `jw context [PATH] --format human|json` checkout discovery and
+  verified Git-worktree-to-JJ-primary association, with Codex routing guidance.
+- Exercise the compatibility matrix against JJ 0.45.1 and teach `jw doctor` to
+  recommend non-interactive `jj converge` for divergent changes on JJ 0.45 and
+  newer while retaining the manual recovery guidance for older supported JJ.
+
+## Version 0.5.0 (2026-08-21)
+
+- Make `jw doctor` inspect every configured workspace link for every managed
+  workspace, reporting satisfied, missing, skipped, conflicting, and unreadable
+  rules without hiding later diagnostics.
+- Add `jw repair NAME --base REVSET (--bookmark BOOKMARK | --no-bookmark)` for
+  safe, atomic repair of an existing workspace's managed base and bookmark
+  metadata without changing JJ commits, bookmarks, operations, or checkouts.
+
+## Version 0.4.1 (2026-08-15)
+
+- Keep `jw doctor` machine-readable when jj-waltz configuration cannot be read
+  or parsed, with a failed configuration diagnostic and skipped trunk check.
+- Let `jw adopt --no-bookmark` ignore stale legacy bookmark markers while
+  preserving the existing explicit bookmark association behavior.
+- Correct architecture documentation to name JJ 0.44.0 as the newer tested
+  compatibility target.
+
+## Version 0.4.0 (2026-08-15)
+
+- Add semantic `list --format=json`, `status`, `doctor`, and `adopt` commands
+  backed by frozen, schema-versioned snapshots and repository-scoped lifecycle
+  metadata.
+- Diagnose corrupt, stale, and missing workspace state without silently replacing
+  metadata or changing JJ history.
+- Make workspace removal report partial progress and clean managed metadata even
+  when directory deletion cannot finish immediately.
+- Support legacy JJ repositories whose default workspace has no recorded path,
+  restoring `jw list`, workspace creation, and the Herdr integration (#30).
+- Test the compatibility window against JJ 0.39.0 and JJ 0.44.0.
+
+## Version 0.3.1 (2026-07-12)
+
+- Add a static x86_64 Linux release for older-glibc systems such as CerpacNAS.
+
+## Version 0.3.0 (2026-07-12)
+
+- Make workspace creation and switching transactional, including rollback of
+  workspaces, bookmarks, links, directories, and switch state after failures.
+- Plan removals before mutation and safely prompt for associated bookmark deletion,
+  with explicit flags for scripts.
+- Read link rules from the default workspace, reject escaping sources, and preflight
+  every rule before changing the filesystem.
+- Share one switching and completion policy across Bash, Elvish, Fish, PowerShell,
+  and Zsh.
+- Harden Herdr removal ordering and validate root, Herdr, and multi-version JJ builds
+  independently in CI.
+
+## Version 0.2.1 (2026-06-22)
+
+- Automatically ignore machine-local workspace link configuration.
