@@ -2,6 +2,11 @@
 
 ## Version 0.8.1 (2026-10-09)
 
+- Inherit new workspace colocation from the verified primary workspace and its
+  effective JJ `git.colocate` setting when supported. CLI overrides take priority
+  over explicit jw config; omitted config inherits, while explicit false opts out.
+  Automatic inheritance keeps CoW workspaces JJ-only and older JJ working;
+  existing workspaces are never converted.
 - Publish the v0.8 features after the v0.8.0 release build exposed a musl link
   failure: opt-in copy-on-write (thanks to @gergesh, #48), opt-in Git colocation,
   external checkout ownership protection (#49), Windows corrections, and safer

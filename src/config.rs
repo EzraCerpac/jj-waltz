@@ -28,7 +28,8 @@ pub enum DefaultCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     pub create_bookmark: bool,
-    pub colocate: bool,
+    /// None inherits the verified primary workspace; Some(false) explicitly opts out.
+    pub colocate: Option<bool>,
     pub bookmark_template: String,
     pub copy_on_write: bool,
 }
@@ -49,8 +50,7 @@ struct RawConfig {
 struct RawWorkspaceConfig {
     #[serde(default)]
     create_bookmark: bool,
-    #[serde(default)]
-    colocate: bool,
+    colocate: Option<bool>,
     bookmark_template: Option<String>,
     #[serde(default)]
     copy_on_write: bool,
@@ -67,7 +67,7 @@ impl Default for Config {
             default_command: DefaultCommand::Ui,
             workspace: WorkspaceConfig {
                 create_bookmark: false,
-                colocate: false,
+                colocate: None,
                 bookmark_template: DEFAULT_BOOKMARK_TEMPLATE.to_owned(),
                 copy_on_write: false,
             },
@@ -175,6 +175,19 @@ mod tests {
         let config = Config::from(raw);
         assert!(config.workspace.copy_on_write);
         assert!(!config.workspace.create_bookmark);
+    }
+
+    #[test]
+    fn colocation_preserves_unset_and_explicit_false() {
+        for (text, expected) in [
+            ("", None),
+            ("[workspace]", None),
+            ("[workspace]\ncolocate = false", Some(false)),
+            ("[workspace]\ncolocate = true", Some(true)),
+        ] {
+            let raw: RawConfig = toml::from_str(text).unwrap();
+            assert_eq!(Config::from(raw).workspace.colocate, expected);
+        }
     }
 
     #[test]

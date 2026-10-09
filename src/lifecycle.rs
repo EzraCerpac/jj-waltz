@@ -53,21 +53,24 @@ impl CreationPolicy {
         self
     }
 
-    fn colocate(&self) -> bool {
-        self.colocate_override
-            .unwrap_or(self.config.workspace.colocate)
-    }
-
-    fn preflight_colocation(&self, client: &JjClient) -> Result<()> {
-        if self.colocate() {
+    fn preflight_colocation(&self, client: &JjClient) -> Result<bool> {
+        if let Some(colocate) = self.colocate_override.or(self.config.workspace.colocate) {
+            if !colocate {
+                return Ok(false);
+            }
             if self.copy_on_write {
                 bail!(
                     "colocation and copy-on-write cannot be combined; use --no-cow or --no-colocate"
                 )
             }
             client.require_workspace_colocation()?;
+            return Ok(true);
         }
-        Ok(())
+        // Inheritance must not turn an otherwise valid CoW request into a conflict.
+        if self.copy_on_write {
+            return Ok(false);
+        }
+        client.inherited_workspace_colocation()
     }
 
     fn bookmark_for(&self, workspace: &str, allow_explicit: bool) -> Option<String> {
@@ -192,7 +195,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOu
         });
     }
     let client = JjClient::current()?;
-    policy.preflight_colocation(&client)?;
+    let colocate = policy.preflight_colocation(&client)?;
     let base = resolve_creation_base(&client, policy.at_revset.as_deref())?;
     let store = metadata_store(&client)?;
     preflight_creations(&inventory, &store, &plans)?;
@@ -211,7 +214,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOu
             &store,
             config_root.as_deref(),
             &checkout,
-            policy.colocate(),
+            colocate,
         ) {
             Ok(created) => {
                 inventory.record_created(&created.result);
@@ -292,10 +295,14 @@ fn switch_workspaces_with_creation(
         .cloned()
         .collect::<Vec<_>>();
     let client = JjClient::current()?;
+    let colocate = if all_plans.is_empty() {
+        false
+    } else {
+        policy.preflight_colocation(&client)?
+    };
     let base = if all_plans.is_empty() {
         None
     } else {
-        policy.preflight_colocation(&client)?;
         Some(resolve_creation_base(&client, policy.at_revset.as_deref())?)
     };
     let store = if all_plans.is_empty() {
@@ -322,7 +329,7 @@ fn switch_workspaces_with_creation(
             store,
             config_root.as_deref(),
             &checkout,
-            policy.colocate(),
+            colocate,
         ) {
             Ok(created) => {
                 inventory.record_created(&created.result);
@@ -342,7 +349,7 @@ fn switch_workspaces_with_creation(
             store,
             config_root.as_deref(),
             &checkout,
-            policy.colocate(),
+            colocate,
         ) {
             Ok(created) => Some(created),
             Err(error) => return Err(rollback_after(error, Some(store), &mut intermediate)),

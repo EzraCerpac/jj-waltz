@@ -12,6 +12,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_primary_colocation(true)
+    }
+    fn with_primary_colocation(colocated: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("repo");
         fs::create_dir(&root).unwrap();
@@ -26,11 +29,18 @@ impl Fixture {
         )
         .unwrap();
         let f = Self { temp, root };
-        f.run("git", &f.root, &["init"]);
-        fs::write(f.root.join("tracked"), "base\n").unwrap();
-        f.run("git", &f.root, &["add", "."]);
-        f.run("git", &f.root, &["commit", "-m", "base"]);
-        f.run("jj", &f.root, &["git", "init", "--colocate"]);
+        if colocated {
+            f.run("git", &f.root, &["init"]);
+            fs::write(f.root.join("tracked"), "base\n").unwrap();
+            f.run("git", &f.root, &["add", "."]);
+            f.run("git", &f.root, &["commit", "-m", "base"]);
+            f.run("jj", &f.root, &["git", "init", "--colocate"]);
+        } else {
+            f.run("jj", &f.root, &["git", "init", "--no-colocate"]);
+            fs::write(f.root.join("tracked"), "base\n").unwrap();
+            f.run("jj", &f.root, &["file", "track", "tracked"]);
+            f.run("jj", &f.root, &["commit", "-m", "base"]);
+        }
         f
     }
     fn command(&self, program: &str, cwd: &Path) -> Command {
@@ -172,7 +182,10 @@ impl Fixture {
 #[test]
 fn default_and_cli_config_precedence_and_existing_switch() {
     let f = Fixture::new();
-    f.jw().args(["add", "plain"]).assert().success();
+    f.jw()
+        .args(["add", "plain", "--no-colocate"])
+        .assert()
+        .success();
     assert!(!f.path("plain").join(".git").exists());
     if !f.supports() {
         return;
@@ -229,6 +242,211 @@ fn default_and_cli_config_precedence_and_existing_switch() {
         .failure()
         .stderr(predicate::str::contains("cannot be combined"));
     assert!(!f.path("cow").exists());
+}
+
+#[test]
+fn auto_colocation_inherits_primary_from_both_kinds_of_sibling() {
+    for primary_colocated in [false, true] {
+        let f = Fixture::with_primary_colocation(primary_colocated);
+        let expected = primary_colocated && f.supports();
+        f.jw().args(["add", "from-primary"]).assert().success();
+        assert_eq!(f.path("from-primary").join(".git").is_file(), expected);
+        f.jw()
+            .args(["add", "jj-only", "--no-colocate"])
+            .assert()
+            .success();
+        f.jw()
+            .current_dir(f.path("jj-only"))
+            .args(["switch", "from-jj-only", "--print-path"])
+            .assert()
+            .success();
+        assert_eq!(f.path("from-jj-only").join(".git").is_file(), expected);
+        if f.supports() {
+            f.jw()
+                .args(["add", "git-sibling", "--colocate"])
+                .assert()
+                .success();
+            f.jw()
+                .current_dir(f.path("git-sibling"))
+                .args(["add", "from-git-sibling"])
+                .assert()
+                .success();
+            assert_eq!(f.path("from-git-sibling").join(".git").is_file(), expected);
+        }
+        assert_eq!(f.root.join(".git").exists(), primary_colocated);
+        assert!(!f.path("jj-only").join(".git").exists());
+    }
+}
+
+#[test]
+fn auto_colocation_respects_effective_jj_setting_and_explicit_jw_false() {
+    let f = Fixture::new();
+    f.run(
+        "jj",
+        &f.root,
+        &["config", "set", "--repo", "git.colocate", "false"],
+    );
+    f.jw().args(["add", "jj-disabled"]).assert().success();
+    assert!(!f.path("jj-disabled").join(".git").exists());
+    f.jw()
+        .current_dir(f.path("jj-disabled"))
+        .args(["add", "sibling-disabled"])
+        .assert()
+        .success();
+    assert!(!f.path("sibling-disabled").join(".git").exists());
+    f.config("[workspace]\ncolocate=true\n");
+    if f.supports() {
+        f.jw().args(["add", "jw-enabled"]).assert().success();
+        assert!(f.path("jw-enabled").join(".git").is_file());
+    } else {
+        f.jw().args(["add", "jw-enabled"]).assert().failure();
+        assert!(!f.path("jw-enabled").exists());
+    }
+    f.run(
+        "jj",
+        &f.root,
+        &["config", "set", "--repo", "git.colocate", "true"],
+    );
+    f.config("[workspace]\ncolocate=false\n");
+    f.jw().args(["add", "jw-disabled"]).assert().success();
+    assert!(!f.path("jw-disabled").join(".git").exists());
+}
+
+#[test]
+fn explicit_jw_colocation_can_override_a_jj_only_primary() {
+    let f = Fixture::with_primary_colocation(false);
+    f.config("[workspace]\ncolocate=true\n");
+    if f.supports() {
+        f.jw().args(["add", "explicit"]).assert().success();
+        assert!(f.path("explicit").join(".git").is_file());
+        assert!(!f.root.join(".git").exists());
+    } else {
+        f.jw().args(["add", "explicit"]).assert().failure();
+        assert!(!f.path("explicit").exists());
+    }
+}
+
+#[test]
+fn auto_colocation_does_not_trust_unrelated_primary_git_metadata() {
+    let f = Fixture::with_primary_colocation(false);
+    // A separate Git repository in the primary directory is not JJ's backend.
+    f.run("git", &f.root, &["init"]);
+    f.jw().args(["add", "separate-backend"]).assert().success();
+    assert!(!f.path("separate-backend").join(".git").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_colocation_keeps_jj_only_when_primary_setting_is_unreadable() {
+    let f = Fixture::new();
+    if !f.supports() {
+        return;
+    }
+    for (name, response) in [
+        ("missing-setting", "exit 1"),
+        ("invalid-setting", "echo invalid; exit 0"),
+    ] {
+        let mut command = f.jw();
+        f.with_shim(&mut command, &format!(
+            "#!/bin/sh\ncase \"$*\" in *\"config get git.colocate\"*) {response};; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n"
+        ));
+        command.args(["add", name]).assert().success();
+        assert!(!f.path(name).join(".git").exists());
+    }
+}
+
+#[test]
+fn auto_colocation_keeps_jj_only_without_a_registered_primary() {
+    let f = Fixture::new();
+    f.jw()
+        .args(["add", "sibling", "--no-colocate"])
+        .assert()
+        .success();
+    f.run(
+        "jj",
+        &f.path("sibling"),
+        &["workspace", "forget", "default"],
+    );
+    f.jw()
+        .current_dir(f.path("sibling"))
+        .args(["add", "unverified-primary", "--no-links"])
+        .assert()
+        .success();
+    assert!(!f.path("unverified-primary").join(".git").exists());
+    assert!(f.root.join(".git").exists());
+}
+
+#[test]
+fn git_only_sibling_stays_outside_workspace_lifecycle() {
+    let f = Fixture::new();
+    let external = f.temp.path().join("git-only");
+    f.run(
+        "git",
+        &f.root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            external.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let registrations = f.registrations();
+    let names = f.names();
+    f.jw()
+        .current_dir(&external)
+        .args(["add", "unregistered"])
+        .assert()
+        .failure();
+    assert_eq!(f.registrations(), registrations);
+    assert_eq!(f.names(), names);
+    assert!(!f.path("unregistered").exists());
+    assert!(!external.join(".jj").exists());
+}
+
+#[test]
+fn auto_colocation_keeps_cow_usable_and_explicit_conflicts_actionable() {
+    let f = Fixture::new();
+    f.config("[workspace]\ncopy_on_write=true\n");
+    f.jw().args(["add", "global-cow"]).assert().success();
+    assert!(!f.path("global-cow").join(".git").exists());
+    f.jw()
+        .current_dir(f.path("global-cow"))
+        .args(["add", "sibling-cow"])
+        .assert()
+        .success();
+    assert!(!f.path("sibling-cow").join(".git").exists());
+    f.jw()
+        .args(["add", "no-cow", "--no-cow"])
+        .assert()
+        .success();
+    assert_eq!(f.path("no-cow").join(".git").is_file(), f.supports());
+    let names = f.names();
+    let registrations = f.registrations();
+    for config in [
+        "[workspace]\ncopy_on_write=true\n",
+        "[workspace]\ncopy_on_write=true\ncolocate=true\n",
+    ] {
+        f.config(config);
+        f.jw()
+            .args(["add", "conflict", "--colocate"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "cannot be combined; use --no-cow or --no-colocate",
+            ));
+        assert!(!f.path("conflict").exists());
+        assert_eq!(f.names(), names);
+        assert_eq!(f.registrations(), registrations);
+    }
+    f.jw()
+        .args(["add", "overridden", "--no-colocate"])
+        .assert()
+        .success();
+    assert!(!f.path("overridden").join(".git").exists());
+    f.config("[workspace]\n");
+    f.jw().args(["add", "cli-cow", "--cow"]).assert().success();
+    assert!(!f.path("cli-cow").join(".git").exists());
 }
 
 #[test]
@@ -818,6 +1036,11 @@ fn non_git_backend_rejects_colocation_before_creation() {
         .failure()
         .stderr(predicate::str::contains("Git-backed"));
     assert!(!local.with_extension("unsupported").exists());
+    f.command(env!("CARGO_BIN_EXE_jw"), &local)
+        .args(["add", "automatic"])
+        .assert()
+        .success();
+    assert!(!local.with_extension("automatic").join(".git").exists());
 }
 
 #[test]

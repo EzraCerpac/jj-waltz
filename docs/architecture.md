@@ -330,8 +330,11 @@ preserves ownership. Older or absent records still receive live topology checks.
 CLI removal, manager preview and execution, pruning, and rollback revalidate ownership
 before `workspace forget`. A linked Git checkout or remaining Git registration is
 ineligible for destructive cleanup; uncertainty fails closed. A native app owns its
-checkout even after JJ adoption. Ordinary `jw add` opts out of Git colocation when
-supported, so its explicit JJ checkout remains eligible for its own lifecycle.
+checkout even after JJ adoption. Creation resolves CLI overrides, explicit jw config,
+then automatic inheritance from verified primary topology and its effective JJ
+`git.colocate` setting. Automatic CoW creation and unsupported JJ remain JJ-only.
+New colocated workspaces have jw ownership recorded through the same explicit
+creation path; existing workspaces are never converted by a default change.
 
 `reconcile-external` is separate from automatic pruning. It verifies that the recorded
 checkout and Git admin directory are absent and the live registration is gone,

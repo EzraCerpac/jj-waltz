@@ -244,7 +244,7 @@ fn secondary_workspace_has_its_own_jj_identity() {
     fixture.run(
         "jw",
         &fixture.root,
-        &["add", "secondary", "--at", &fixture.start],
+        &["add", "secondary", "--at", &fixture.start, "--no-colocate"],
     );
     let workspace = PathBuf::from(fixture.run("jw", &fixture.root, &["path", "secondary"]));
     let report = fixture.context(&workspace);
