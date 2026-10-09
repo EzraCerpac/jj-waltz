@@ -623,7 +623,7 @@ fn resolve_creation_base(client: &JjClient, at_revset: Option<&str>) -> Result<R
 
 /// Decide whether new workspaces clone files from the current checkout.
 ///
-/// Cloning falls back to a full JJ checkout with a warning when the filesystem
+/// Cloning falls back to ordinary JJ workspace creation with a warning when the filesystem
 /// cannot clone.
 fn plan_checkout(
     policy: &CreationPolicy,
@@ -643,7 +643,7 @@ fn plan_checkout(
             Some(reason) => CheckoutPlan {
                 clone_from: None,
                 warning: Some(format!(
-                    "copy-on-write is unavailable, using a full checkout: {reason}"
+                    "copy-on-write is unavailable, using ordinary JJ workspace creation: {reason}"
                 )),
             },
             None => CheckoutPlan {

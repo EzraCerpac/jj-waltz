@@ -274,14 +274,14 @@ health field to `jw status`.
 ## Copy-on-write creation
 
 When copy-on-write is requested, creation probes the destination filesystem before
-any mutation and falls back to a full checkout with a warning if it cannot clone.
+any mutation and falls back to ordinary JJ workspace creation with a warning if it cannot clone.
 Otherwise it adds the workspace with empty sparse patterns, clones the files JJ
 tracks in the current workspace's working-copy commit, and copies the current
 workspace's working-copy state. Ignored and untracked files are never cloned.
 A JJ snapshot validates the copied state; if JJ rejects it, the previous state is
 restored, the attempted clone workspace is rolled back, and JJ recreates it
-through its ordinary workspace-add path, preserving the source sparse patterns. `jj
-restore` then makes `@` match the creation base exactly before provenance is
+through its ordinary workspace-add path, preserving the source sparse patterns.
+On successful state adoption, `jj restore` then makes `@` match the creation base exactly before provenance is
 captured, so the recorded creation operation describes a complete checkout.
 
 ## Failure order

@@ -144,16 +144,18 @@ new workspace in config, and use `--no-cow` to opt out for one command:
 copy_on_write = true
 ```
 
-The result is the same as a full checkout. Only files JJ tracks are cloned, so
+The result matches an ordinary JJ checkout of the creation base, including the
+current workspace’s sparse patterns. Only files JJ tracks are cloned, so
 ignored and untracked files such as `.env` or `node_modules` never reach the new
 workspace; use [workspace links](#workspace-links) to share those. JJ adopts the
 clone with the current workspace's working-copy state, then `jw` restores `@` from
 its parent, so uncommitted edits in the current workspace never leak into the new
 one.
 
-When the filesystem cannot clone, `jw` warns and falls back to a full checkout.
-With watchman configured as JJ's filesystem monitor, JJ hashes the cloned files
-instead of reusing the working-copy state.
+When the filesystem cannot clone, `jw` warns and uses ordinary JJ workspace
+creation. With Watchman configured, or if JJ rejects the copied working-copy
+state, `jw` also recreates through the ordinary path. Every fallback preserves
+the current workspace’s sparse patterns.
 
 ## Shell setup
 
@@ -318,9 +320,8 @@ and Git administrative ownership marker for cleanup, and use a current jw versio
 If a process is interrupted after detaching `.git`, inspect `.jj/jw-detached-git`
 and the retained metadata before recovering the link or finishing cleanup.
 
-Copy-on-write creation is an independent, unreleased feature (PR #48). Colocation
-currently rejects `workspace.copy_on_write = true`; support for their combination
-must be implemented and tested separately.
+Colocation and copy-on-write cannot be combined. Use `--no-cow` or
+`--no-colocate` to override one configured option for a command.
 
 
 ## Config
