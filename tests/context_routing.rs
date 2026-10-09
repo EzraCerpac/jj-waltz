@@ -48,6 +48,9 @@ impl Fixture {
             &fixture.root,
             &["log", "--no-graph", "-r", "@-", "-T", "commit_id"],
         );
+        // Keep the canonical paths for identity assertions, but Git for Windows
+        // needs an ordinary destination spelling when constructing the fixture.
+        let external_argument = fixture._temp.path().join(".codex/worktrees/task/repo");
         fixture.run(
             "git",
             &fixture.root,
@@ -55,7 +58,7 @@ impl Fixture {
                 "worktree",
                 "add",
                 "--detach",
-                fixture.external.to_str().unwrap(),
+                external_argument.to_str().unwrap(),
                 &fixture.start,
             ],
         );
@@ -192,7 +195,11 @@ fn explicit_route_preserves_start_and_external_worktree() {
         &fixture.root,
         &["switch", "agent-task", "--execute", "jj root"],
     );
-    assert!(executed.lines().any(|line| Path::new(line) == workspace));
+    assert!(
+        executed
+            .lines()
+            .any(|line| { Path::new(line).canonicalize().ok() == workspace.canonicalize().ok() })
+    );
     fixture.run(
         "jw",
         &fixture.root,
@@ -239,7 +246,10 @@ fn secondary_workspace_has_its_own_jj_identity() {
     let workspace = PathBuf::from(fixture.run("jw", &fixture.root, &["path", "secondary"]));
     let report = fixture.context(&workspace);
     assert_eq!(report["jj"]["workspace_name"], "secondary");
-    assert_eq!(report["jj"]["workspace_root"], workspace.to_str().unwrap());
+    assert_eq!(
+        report["jj"]["workspace_root"],
+        workspace.canonicalize().unwrap().to_str().unwrap()
+    );
     assert_eq!(
         report["jj"]["primary_checkout"],
         fixture.root.to_str().unwrap()
