@@ -332,7 +332,8 @@ before `workspace forget`. A linked Git checkout or remaining Git registration i
 ineligible for destructive cleanup; uncertainty fails closed. A native app owns its
 checkout even after JJ adoption. Creation resolves CLI overrides, explicit jw config,
 then automatic inheritance from verified primary topology and its effective JJ
-`git.colocate` setting. Automatic CoW creation and unsupported JJ remain JJ-only.
+`git.colocate` setting. Automatic CoW creation and automatic inheritance on
+unsupported JJ remain JJ-only.
 New colocated workspaces have jw ownership recorded through the same explicit
 creation path; existing workspaces are never converted by a default change.
 This is a breaking creation-default change in v0.8.0. Set

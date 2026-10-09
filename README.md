@@ -319,7 +319,8 @@ Set `colocate = false` to explicitly keep new workspaces JJ-only; omit the setti
 to inherit automatically. `--colocate` and `--no-colocate` override the jw setting
 for one command. They affect
 only newly created workspaces; switching to an existing workspace never converts
-it. Unsupported JJ versions and non-Git backends fail before creation.
+it. Explicit colocation requests on unsupported JJ versions or non-Git backends
+fail before creation.
 
 `jw` records provenance only for Git worktrees it creates. `jw remove` cleans that
 workspace's Git registration, and `--keep-dir` retains its files while removing the
