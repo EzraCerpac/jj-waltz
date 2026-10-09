@@ -1,4 +1,5 @@
-use crate::jj::JjClient;
+use crate::cow;
+use crate::jj::{self, JjClient};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
 use anyhow::{Context, Result, anyhow, bail};
 use std::env;
@@ -41,6 +42,8 @@ pub struct AddOptions {
     /// Full commit ID resolved before any workspace mutation.
     pub base_commit_id: String,
     pub bookmark: Option<String>,
+    /// Clone tracked files from this checkout root instead of letting JJ write them.
+    pub clone_from: Option<PathBuf>,
     pub colocate: bool,
 }
 
@@ -531,7 +534,18 @@ fn add_workspace_by_name_with_inventory(
     args.push("--revision".to_owned());
     args.push(options.base_commit_id.clone());
 
-    args.push(path.display().to_string());
+    if options.clone_from.is_some() {
+        // JJ writes no files; the clone below supplies them.
+        args.push("--sparse-patterns".to_owned());
+        args.push("empty".to_owned());
+    }
+
+    let command_path = if options.colocate {
+        crate::paths::external_command_path(&path)
+    } else {
+        std::borrow::Cow::Borrowed(path.as_path())
+    };
+    args.push(command_path.display().to_string());
     let client = JjClient::current()?;
     if options.colocate {
         client.require_workspace_colocation()?;
@@ -587,6 +601,21 @@ fn add_workspace_by_name_with_inventory(
         return Err(error);
     }
 
+    if let Some(source) = &options.clone_from {
+        match materialize_clone(source, &path) {
+            Ok(true) => {}
+            Ok(false) => {
+                // Recreate through JJ's ordinary path. That inherits the source
+                // sparse patterns verbatim, including paths with whitespace.
+                rollback_workspace_parts(name, &path, None, None)?;
+                let mut fallback = options.clone();
+                fallback.clone_from = None;
+                return add_workspace_by_name_with_inventory(name, &fallback, inventory);
+            }
+            Err(error) => return Err(rollback_failed_add(error, name, &path, None)),
+        }
+    }
+
     // Capture provenance before bookmark creation records another JJ operation.
     let creation_operation_id = match client.operation_id() {
         Ok(operation_id) => operation_id,
@@ -630,6 +659,63 @@ fn add_workspace_by_name_with_inventory(
         creation_base_commit_id: options.base_commit_id.clone(),
         owned_git_worktree,
     })
+}
+
+/// Fill a sparse-empty workspace from a copy-on-write clone of another checkout.
+///
+/// Only the files JJ tracks in the source's working-copy commit are cloned, so
+/// ignored and untracked files never reach the new workspace. JJ adopts the clone
+/// through the source's working-copy state. Return false when the caller must
+/// recreate through JJ's ordinary checkout path. Restoring `@` then rewrites every
+/// file that differs from the creation base, so the result matches a full checkout.
+fn materialize_clone(source_root: &Path, path: &Path) -> Result<bool> {
+    let client = JjClient::new(path);
+    if client.uses_watchman()? {
+        return Ok(false);
+    }
+    let files = JjClient::new(source_root).tracked_files()?;
+    cow::clone_files(source_root, &files, path).with_context(|| {
+        format!(
+            "failed to clone files from {}; retry with --no-cow for a full checkout",
+            source_root.display()
+        )
+    })?;
+    if !adopt_source_tree_state(&client, source_root, path)? {
+        return Ok(false);
+    }
+    client.run(["restore"])?;
+    Ok(true)
+}
+
+/// Let the new workspace reuse the source checkout's working-copy state.
+///
+/// The clone preserves sizes and modification times, so JJ's snapshot only stats
+/// files instead of hashing them. The copied state also carries the source's
+/// sparse patterns, matching `jj workspace add`'s default. Returns `false` when
+/// JJ rejects the copied state and must hash every file instead.
+fn adopt_source_tree_state(client: &JjClient, source_root: &Path, path: &Path) -> Result<bool> {
+    if client.uses_watchman()? {
+        return Ok(false);
+    }
+    let previous = jj::copy_tree_state(source_root, path)?;
+    if client.run(["status"]).is_ok() {
+        return Ok(true);
+    }
+    jj::write_tree_state(path, &previous)?;
+    Ok(false)
+}
+
+fn rollback_failed_add(
+    error: impl Into<anyhow::Error>,
+    name: &str,
+    path: &Path,
+    bookmark: Option<&str>,
+) -> anyhow::Error {
+    let error = error.into();
+    match rollback_workspace_parts(name, path, bookmark, None) {
+        Ok(()) => error,
+        Err(cleanup) => error.context(format!("cleanup also failed: {cleanup}")),
+    }
 }
 
 fn require_absent_workspace_path(path: &Path) -> Result<()> {
@@ -850,7 +936,10 @@ pub(crate) fn legacy_workspace_bookmark(root: &Path) -> Result<Option<String>> {
     }
 }
 
-fn workspace_dir_for_name(name: &str, inventory: &WorkspaceInventory) -> Result<PathBuf> {
+pub(crate) fn workspace_dir_for_name(
+    name: &str,
+    inventory: &WorkspaceInventory,
+) -> Result<PathBuf> {
     let default_root = workspace_base_root(inventory.current_root(), inventory.current_name())?;
     if name == "default" {
         Ok(default_root)

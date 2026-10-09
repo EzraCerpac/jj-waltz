@@ -21,11 +21,20 @@ const POWERSHELL_SWITCH_TEST_ARGS: &[&str] = &[
     "jw shell init powershell | Out-String | Invoke-Expression; jw '^' | Out-Null; (Get-Location).Path; jw '-' | Out-Null; (Get-Location).Path",
 ];
 
+#[cfg(not(windows))]
 const POWERSHELL_EXECUTE_TEST_ARGS: &[&str] = &[
     "-NoLogo",
     "-NoProfile",
     "-Command",
     "jw shell init powershell | Out-String | Invoke-Expression; jw switch feature-a '--execute=pwd'; jw switch feature-a '-xpwd'",
+];
+
+#[cfg(windows)]
+const POWERSHELL_EXECUTE_TEST_ARGS: &[&str] = &[
+    "-NoLogo",
+    "-NoProfile",
+    "-Command",
+    "jw shell init powershell | Out-String | Invoke-Expression; jw switch feature-a '--execute=cd'; jw switch feature-a '-xcd'",
 ];
 
 fn jj_available() -> bool {
@@ -537,8 +546,9 @@ fn installed_shell_init_adapters_switch_default_and_previous_shorthands() {
         assert_eq!(
             lines,
             vec![path_string(&repo.default_root), path_string(&feature_root)],
-            "{} shell integration returned wrong directories",
-            case.name
+            "{} shell integration returned wrong directories; stderr: {}",
+            case.name,
+            String::from_utf8_lossy(&output.stderr)
         );
 
         let execute = Command::new(case.program)
@@ -599,13 +609,27 @@ fn list_infers_current_default_without_recorded_path() {
             .contains("Workspace has no recorded path: default")
     );
 
-    let expected = format!("@ default\t{}", path_string(&repo.default_root));
-    repo.cmd()
+    let output = repo
+        .cmd()
         .args(["list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(expected))
-        .stdout(predicate::str::contains("(missing)").not());
+        .stdout(predicate::str::contains("(missing)").not())
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).expect("UTF-8 workspace listing");
+    let (name, root) = output.trim_end().split_once('\t').expect("workspace row");
+    assert_eq!(name, "@ default");
+    // Inferred paths may use Windows' verbatim prefix; compare checkout identity.
+    assert_eq!(
+        Path::new(root)
+            .canonicalize()
+            .expect("listed checkout exists"),
+        repo.default_root
+            .canonicalize()
+            .expect("canonical checkout")
+    );
 }
 
 #[test]
@@ -1034,6 +1058,293 @@ fn switch_applies_workspace_links_for_data_directory() {
         .join("data");
     let metadata = fs::symlink_metadata(&workspace_data).expect("metadata");
     assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
+fn add_with_cow_checks_out_exactly_the_base() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".gitignore"),
+        ".env\nnode_modules/\n",
+    )
+    .expect("write gitignore");
+    fs::create_dir_all(repo.default_root.join("src")).expect("create src");
+    fs::write(repo.default_root.join("src/lib.rs"), "fn main() {}\n").expect("write lib");
+    repo.run_jj(["commit", "-m", "add sources"]);
+    fs::write(repo.default_root.join(".env"), "SECRET=1\n").expect("write env");
+    fs::create_dir_all(repo.default_root.join("node_modules/pkg")).expect("create modules");
+    fs::write(repo.default_root.join("node_modules/pkg/index.js"), "x").expect("write module");
+    fs::write(repo.default_root.join("README.md"), "edited\n").expect("edit readme");
+    fs::write(repo.default_root.join("scratch.txt"), "draft\n").expect("write scratch");
+
+    let output = repo.command_output(&["add", "--cow", "feature-a"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workspace_root = repo.default_root.with_extension("feature-a");
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("README.md")).expect("read readme"),
+        "hello\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("src/lib.rs")).expect("read lib"),
+        "fn main() {}\n"
+    );
+    for absent in ["scratch.txt", ".env", "node_modules"] {
+        assert!(
+            !workspace_root.join(absent).exists(),
+            "{absent} should not be carried over"
+        );
+    }
+    assert_eq!(repo.jj_stdout(&workspace_root, &["diff", "--summary"]), "");
+}
+
+// macOS CI sets JW_TEST_REQUIRE_COW so these tests cannot silently take
+// the unsupported-filesystem path when validating the clone and its fallbacks.
+#[test]
+fn cow_preserves_sparse_patterns() {
+    check_cow_sparse(None);
+}
+
+#[cfg(unix)]
+#[test]
+fn cow_watchman_fallback_preserves_sparse_patterns() {
+    check_cow_sparse(Some("watchman"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cow_rejected_state_fallback_preserves_sparse_patterns() {
+    check_cow_sparse(Some("rejected-state"));
+}
+
+fn check_cow_sparse(mode: Option<&str>) {
+    skip_without_jj!();
+    let cases = vec![vec!["keep dir", "README.md"], vec![]];
+    #[cfg(unix)]
+    let cases = {
+        let mut cases = cases;
+        cases.push(vec!["keep\nnewline"]);
+        cases
+    };
+    for patterns in cases {
+        let repo = TestRepo::new().unwrap();
+        let directories = vec!["keep dir", "excluded"];
+        #[cfg(unix)]
+        let directories = {
+            let mut directories = directories;
+            directories.push("keep\nnewline");
+            directories
+        };
+        for directory in &directories {
+            fs::create_dir(repo.default_root.join(directory)).unwrap();
+            fs::write(repo.default_root.join(directory).join("tracked"), "base\n").unwrap();
+        }
+        repo.run_jj(["commit", "-m", "sparse base"]);
+        let mut sparse_args = vec!["jj", "sparse", "set", "--clear"];
+        for pattern in &patterns {
+            sparse_args.extend(["--add", *pattern]);
+        }
+        repo.run_in(&repo.default_root, sparse_args).unwrap();
+        if patterns.contains(&"README.md") {
+            fs::write(repo.default_root.join("README.md"), "source edit\n").unwrap();
+        }
+        let workspace = repo.default_root.with_extension("feature-a");
+        let mut command = repo.cmd();
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            install_cow_jj_proxy(&repo, &mut command, mode, &workspace);
+        }
+        #[cfg(not(unix))]
+        assert!(mode.is_none());
+        let output = command
+            .args(["add", "--cow", "feature-a"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if env::var_os("JW_TEST_REQUIRE_COW").is_some_and(|value| !value.is_empty()) {
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("copy-on-write is unavailable")
+            );
+            if mode.is_some() {
+                assert!(
+                    repo._tempdir.path().join("fallback-seen").exists(),
+                    "fallback branch not exercised"
+                );
+            }
+        }
+        assert_eq!(
+            repo.jj_stdout(&workspace, &["sparse", "list"]),
+            repo.jj_stdout(&repo.default_root, &["sparse", "list"])
+        );
+        assert!(!workspace.join("excluded").exists());
+        for directory in directories
+            .iter()
+            .copied()
+            .filter(|directory| *directory != "excluded")
+        {
+            assert_eq!(
+                workspace.join(directory).join("tracked").exists(),
+                patterns.contains(&directory)
+            );
+        }
+        assert_eq!(
+            workspace.join("README.md").exists(),
+            patterns.contains(&"README.md")
+        );
+        if patterns.contains(&"README.md") {
+            assert_eq!(
+                fs::read_to_string(workspace.join("README.md")).unwrap(),
+                "hello\n"
+            );
+            assert_eq!(
+                fs::read_to_string(repo.default_root.join("README.md")).unwrap(),
+                "source edit\n"
+            );
+        }
+        assert_eq!(repo.jj_stdout(&workspace, &["diff", "--summary"]), "");
+        assert_eq!(
+            repo.workspace_names()
+                .iter()
+                .filter(|name| *name == "feature-a")
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(unix)]
+fn install_cow_jj_proxy(repo: &TestRepo, command: &mut Command, mode: &str, workspace: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let original_path = env::var_os("PATH").unwrap();
+    let real_jj = env::split_paths(&original_path)
+        .map(|directory| directory.join("jj"))
+        .find(|path| path.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let proxy = repo._tempdir.path().join("proxy");
+    fs::create_dir(&proxy).unwrap();
+    let script = proxy.join("jj");
+    fs::write(&script, r#"#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+args = sys.argv[1:]
+mode = os.environ['JW_TEST_COW_MODE']
+marker = Path(os.environ['JW_TEST_COW_MARKER'])
+if mode == 'watchman' and args[-3:] == ['config', 'get', 'fsmonitor.backend']:
+    marker.write_text('watchman')
+    print('watchman')
+    sys.exit(0)
+if mode == 'rejected-state' and 'status' in args and Path.cwd() == Path(os.environ['JW_TEST_COW_WORKSPACE']).resolve() and not marker.exists():
+    marker.write_text('rejected-state')
+    sys.exit(1)
+os.execv(os.environ['JW_TEST_REAL_JJ'], [os.environ['JW_TEST_REAL_JJ']] + args)
+"#).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let paths = std::iter::once(proxy).chain(env::split_paths(&original_path));
+    command
+        .env("PATH", env::join_paths(paths).unwrap())
+        .env("JW_TEST_REAL_JJ", real_jj)
+        .env("JW_TEST_COW_MODE", mode)
+        .env(
+            "JW_TEST_COW_MARKER",
+            repo._tempdir.path().join("fallback-seen"),
+        )
+        .env("JW_TEST_COW_WORKSPACE", workspace);
+}
+
+#[test]
+fn cow_and_colocation_are_rejected_before_creation() {
+    skip_without_jj!();
+    for args in [
+        vec!["add", "feature-a", "--cow", "--colocate"],
+        vec!["switch", "feature-a", "--cow", "--colocate"],
+        vec!["add", "feature-a"],
+        vec!["switch", "feature-a"],
+    ] {
+        let repo = TestRepo::new().unwrap();
+        repo.write_config("[workspace]\ncopy_on_write = true\ncolocate = true\n");
+        repo.cmd()
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "colocation and copy-on-write cannot be combined",
+            ));
+        assert!(!repo.default_root.with_extension("feature-a").exists());
+        assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+    }
+}
+
+#[test]
+fn switch_with_cow_config_leaves_link_sources_to_links() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config("[workspace]\ncopy_on_write = true\n");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data directory");
+    fs::write(repo.default_root.join("data/blob"), "x").expect("write data");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\nrequired = true\n",
+    )
+    .expect("write links config");
+
+    repo.cmd()
+        .args(["switch", "solver-benchmark"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links: 1 created"));
+
+    let workspace_data = repo
+        .default_root
+        .with_extension("solver-benchmark")
+        .join("data");
+    let metadata = fs::symlink_metadata(&workspace_data).expect("metadata");
+    assert!(metadata.file_type().is_symlink());
+}
+
+#[test]
+fn no_cow_flag_overrides_copy_on_write_config() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    repo.write_config("[workspace]\ncopy_on_write = true\n");
+
+    repo.cmd()
+        .args(["add", "--no-cow", "feature-a"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("copy-on-write").not());
+
+    assert_eq!(
+        fs::read_to_string(
+            repo.default_root
+                .with_extension("feature-a")
+                .join("README.md")
+        )
+        .expect("read readme"),
+        "hello\n"
+    );
+}
+
+#[test]
+fn cow_and_no_cow_flags_conflict() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+
+    repo.cmd()
+        .args(["add", "--cow", "--no-cow", "feature-a"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
@@ -1939,6 +2250,16 @@ impl TestRepo {
             ["jj", "commit", "-m", "initial"],
         )?;
 
+        // Resolve DOS short names and platform aliases before comparing the
+        // fixture with JJ's reported checkout paths.
+        let default_root = fs::canonicalize(default_root)?;
+        #[cfg(windows)]
+        let default_root = PathBuf::from(
+            default_root
+                .to_string_lossy()
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&default_root.to_string_lossy()),
+        );
         Ok(Self {
             _tempdir: tempdir,
             default_root,
@@ -2196,10 +2517,11 @@ fn test_binary_path() -> OsString {
 }
 
 fn path_string(path: &Path) -> String {
-    fs::canonicalize(path)
-        .expect("canonicalize path")
-        .to_string_lossy()
-        .into_owned()
+    let path = fs::canonicalize(path).expect("canonicalize path");
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    text.to_string()
 }
 
 fn run_in<I, S>(cwd: &Path, config_home: &Path, args: I) -> anyhow::Result<()>

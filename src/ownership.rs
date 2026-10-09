@@ -108,6 +108,7 @@ fn git(args: &[&str]) -> Result<String> {
 }
 
 fn git_path(root: &Path, field: &str) -> Result<PathBuf> {
+    let root = crate::paths::external_command_path(root);
     let root = root.to_str().context("checkout path is not UTF-8")?;
     let output = git(&["-C", root, "rev-parse", "--path-format=absolute", field])?;
     let path = PathBuf::from(output.trim_end_matches(['\r', '\n']));
@@ -200,9 +201,11 @@ fn registrations(client: &JjClient) -> Result<Vec<PathBuf>> {
         bail!("cannot verify Git registrations: {}", output.stderr());
     }
     let backend = output.trimmed_stdout()?;
+    let backend = crate::paths::external_command_path(Path::new(&backend));
+    let backend = backend.to_str().context("Git backend path is not UTF-8")?;
     let output = git(&[
         "--git-dir",
-        &backend,
+        backend,
         "worktree",
         "list",
         "--porcelain",
@@ -623,7 +626,7 @@ fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     // SAFETY: Both paths are NUL-terminated and remain alive for the call. Zero
     // flags disallow replacement of an existing file or directory.
     let result = unsafe { move_file_ex_w(source.as_ptr(), destination.as_ptr(), 0) };
-    if result == 0 {
+    if result != 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())

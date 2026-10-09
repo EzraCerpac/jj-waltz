@@ -284,8 +284,14 @@ impl WorkspaceMetadataStore {
             // Recheck after creating the directory so concurrent initialization
             // either validates an identical manifest or observes an empty store.
             if !self.validate_existing_store()? {
-                write_json_atomic(&self.manifest_path(), &self.expected_manifest())
-                    .context("failed to initialize workspace metadata manifest")?;
+                // Install once without replacing a concurrent initializer's
+                // manifest. Readers on Windows can prevent rename replacement.
+                if let Err(error) = write_json_new(&self.manifest_path(), &self.expected_manifest())
+                {
+                    self.validate_manifest()
+                        .map_err(|_| error)
+                        .context("failed to initialize workspace metadata manifest")?;
+                }
             }
         }
         self.validate_manifest()?;
@@ -898,9 +904,9 @@ mod tests {
             assert!(loaded.owned_git_worktree.is_none());
             let mut replacement = loaded.clone();
             replacement.external_owner = Some(crate::ownership::ExternalOwner {
-                checkout_root: PathBuf::from("/app/checkout"),
-                git_dir: PathBuf::from("/primary/.git/worktrees/checkout"),
-                common_dir: PathBuf::from("/primary/.git"),
+                checkout_root: tempdir.path().join("app/checkout"),
+                git_dir: tempdir.path().join("primary/.git/worktrees/checkout"),
+                common_dir: tempdir.path().join("primary/.git"),
             });
             assert!(store.replace_if_matches(&loaded, &replacement).unwrap());
             assert_eq!(store.get("legacy").unwrap(), Some(replacement));

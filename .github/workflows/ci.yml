@@ -38,25 +38,45 @@ jobs:
           cargo clippy --locked --manifest-path plugins/herdr/Cargo.toml --all-targets --all-features -- -D warnings
 
   test:
-    name: test (jj ${{ matrix.jj_version }})
+    name: test (${{ matrix.os }}, jj ${{ matrix.jj_version }})
     strategy:
       fail-fast: false
       matrix:
         jj_version: ["0.39.0", "0.44.0", "0.45.1", "0.46.0"]
-    runs-on: ubuntu-latest
+        os: [ubuntu-latest, macos-14, windows-2022]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    env:
+      JW_TEST_REQUIRE_COW: ${{ matrix.os == 'macos-14' && '1' || '' }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install jj
+        shell: bash
         env:
           JJ_VERSION: ${{ matrix.jj_version }}
+          JJ_TARGET: ${{ matrix.target }}
+          JJ_ARCHIVE: ${{ matrix.archive }}
         run: |
-          mkdir -p /tmp/jj-install
-          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xzf - -C /tmp/jj-install
-          install /tmp/jj-install/jj /usr/local/bin/jj
-          jj --version
+          mkdir -p "$RUNNER_TEMP/jj-install"
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-${JJ_TARGET}.${JJ_ARCHIVE}" -o "$RUNNER_TEMP/jj-archive"
+          if [ "$JJ_ARCHIVE" = zip ]; then
+            unzip -q "$RUNNER_TEMP/jj-archive" -d "$RUNNER_TEMP/jj-install"
+          else
+            tar -xzf "$RUNNER_TEMP/jj-archive" -C "$RUNNER_TEMP/jj-install"
+          fi
+          echo "$RUNNER_TEMP/jj-install" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/jj-install/jj" --version
       - name: Check lockfile
         run: cargo check --locked
       - name: Test

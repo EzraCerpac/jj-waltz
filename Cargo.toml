@@ -26,6 +26,10 @@ shlex = "2.0.1"
 toml = "1.1.2"
 ratatui = "0.30.2"
 
+[target.'cfg(unix)'.dependencies]
+reflink-copy = "0.1.30"
+tempfile = "3.19.1"
+
 [dev-dependencies]
 assert_cmd = "2.0.17"
 predicates = "3.1.3"

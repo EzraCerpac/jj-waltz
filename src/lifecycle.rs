@@ -1,4 +1,5 @@
 use crate::config::{self, Config};
+use crate::cow;
 use crate::jj::{JjClient, ResolvedRevision};
 use crate::links::{self, LinkApplication, LinkApplyReport};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
@@ -14,6 +15,7 @@ pub struct CreationPolicy {
     explicit_bookmark: Option<String>,
     no_bookmark: bool,
     apply_links: bool,
+    copy_on_write: bool,
     config: Config,
     colocate_override: Option<bool>,
 }
@@ -24,6 +26,7 @@ impl CreationPolicy {
         explicit_bookmark: Option<String>,
         no_bookmark: bool,
         no_links: bool,
+        copy_on_write: Option<bool>,
         workspace_count: usize,
     ) -> Result<Self> {
         if explicit_bookmark.is_some() && no_bookmark {
@@ -33,12 +36,14 @@ impl CreationPolicy {
             bail!("--bookmark can only be used with a single workspace")
         }
 
+        let config = Config::load()?;
         Ok(Self {
             at_revset,
             explicit_bookmark,
             no_bookmark,
             apply_links: !no_links,
-            config: Config::load()?,
+            copy_on_write: copy_on_write.unwrap_or(config.workspace.copy_on_write),
+            config,
             colocate_override: None,
         })
     }
@@ -55,9 +60,9 @@ impl CreationPolicy {
 
     fn preflight_colocation(&self, client: &JjClient) -> Result<()> {
         if self.colocate() {
-            if self.config.workspace.copy_on_write {
+            if self.copy_on_write {
                 bail!(
-                    "colocation and copy-on-write cannot be combined; disable workspace.copy_on_write"
+                    "colocation and copy-on-write cannot be combined; use --no-cow or --no-colocate"
                 )
             }
             client.require_workspace_colocation()?;
@@ -85,10 +90,17 @@ pub struct CreatedWorkspace {
 }
 
 #[derive(Debug, Clone)]
+pub struct AddOutcome {
+    pub created: Vec<CreatedWorkspace>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SwitchOutcome {
     pub intermediate: Vec<CreatedWorkspace>,
     pub result: SwitchResult,
     pub links: Option<LinkApplyReport>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +139,13 @@ pub struct RepairResult {
     pub validation_operation_id: String,
 }
 
+/// How new workspaces receive their files, chosen once before any mutation.
+#[derive(Debug, Default)]
+struct CheckoutPlan {
+    clone_from: Option<PathBuf>,
+    warning: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PlannedWorkspace {
     name: String,
@@ -150,7 +169,7 @@ impl PendingWorkspace {
     }
 }
 
-pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<CreatedWorkspace>> {
+pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOutcome> {
     let mut inventory = workspace::WorkspaceInventory::load()?;
     let resolved_names = names
         .iter()
@@ -167,7 +186,10 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
         })
         .collect::<Result<Vec<_>>>()?;
     if plans.is_empty() {
-        return Ok(Vec::new());
+        return Ok(AddOutcome {
+            created: Vec::new(),
+            warnings: Vec::new(),
+        });
     }
     let client = JjClient::current()?;
     policy.preflight_colocation(&client)?;
@@ -178,6 +200,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
         .apply_links
         .then(|| inventory.root(inventory.default_name()?))
         .transpose()?;
+    let checkout = plan_checkout(policy, &inventory, &plans)?;
 
     let mut pending = Vec::new();
     for plan in plans {
@@ -187,6 +210,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
             &inventory,
             &store,
             config_root.as_deref(),
+            &checkout,
             policy.colocate(),
         ) {
             Ok(created) => {
@@ -196,7 +220,10 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<Vec<C
             Err(error) => return Err(rollback_after(error, Some(&store), &mut pending)),
         }
     }
-    Ok(pending.into_iter().map(PendingWorkspace::finish).collect())
+    Ok(AddOutcome {
+        created: pending.into_iter().map(PendingWorkspace::finish).collect(),
+        warnings: checkout.warning.into_iter().collect(),
+    })
 }
 
 pub fn switch_workspaces(names: &[String], policy: &CreationPolicy) -> Result<SwitchOutcome> {
@@ -282,6 +309,7 @@ fn switch_workspaces_with_creation(
         .apply_links
         .then(|| inventory.root(inventory.default_name()?))
         .transpose()?;
+    let checkout = plan_checkout(policy, &inventory, &all_plans)?;
 
     let mut intermediate = Vec::new();
     for plan in intermediate_plans {
@@ -293,6 +321,7 @@ fn switch_workspaces_with_creation(
             &inventory,
             store,
             config_root.as_deref(),
+            &checkout,
             policy.colocate(),
         ) {
             Ok(created) => {
@@ -312,6 +341,7 @@ fn switch_workspaces_with_creation(
             &inventory,
             store,
             config_root.as_deref(),
+            &checkout,
             policy.colocate(),
         ) {
             Ok(created) => Some(created),
@@ -379,6 +409,7 @@ fn switch_workspaces_with_creation(
             .collect(),
         result,
         links,
+        warnings: checkout.warning.into_iter().collect(),
     })
 }
 
@@ -590,12 +621,46 @@ fn resolve_creation_base(client: &JjClient, at_revset: Option<&str>) -> Result<R
     }
 }
 
+/// Decide whether new workspaces clone files from the current checkout.
+///
+/// Cloning falls back to ordinary JJ workspace creation with a warning when the filesystem
+/// cannot clone.
+fn plan_checkout(
+    policy: &CreationPolicy,
+    inventory: &workspace::WorkspaceInventory,
+    plans: &[PlannedWorkspace],
+) -> Result<CheckoutPlan> {
+    let Some(first) = plans.first().filter(|_| policy.copy_on_write) else {
+        return Ok(CheckoutPlan::default());
+    };
+    let source_root = inventory.current_root();
+    let destination = workspace::workspace_dir_for_name(&first.name, inventory)?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("workspace path has no parent directory"))?;
+    Ok(
+        match cow::unsupported_reason(source_root, destination_parent) {
+            Some(reason) => CheckoutPlan {
+                clone_from: None,
+                warning: Some(format!(
+                    "copy-on-write is unavailable, using ordinary JJ workspace creation: {reason}"
+                )),
+            },
+            None => CheckoutPlan {
+                clone_from: Some(source_root.to_path_buf()),
+                warning: None,
+            },
+        },
+    )
+}
+
 fn create_workspace(
     plan: &PlannedWorkspace,
     base: &ResolvedRevision,
     inventory: &workspace::WorkspaceInventory,
     store: &WorkspaceMetadataStore,
     config_root: Option<&Path>,
+    checkout: &CheckoutPlan,
     colocate: bool,
 ) -> Result<PendingWorkspace> {
     let result = workspace::add_workspace(
@@ -604,6 +669,7 @@ fn create_workspace(
         &AddOptions {
             base_commit_id: base.commit_id.clone(),
             bookmark: plan.bookmark.clone(),
+            clone_from: checkout.clone_from.clone(),
             colocate,
         },
     )
@@ -777,7 +843,7 @@ mod tests {
     fn manager_switch_does_not_recreate_removed_selection() {
         const CHILD: &str = "JW_TEST_EXISTING_SWITCH";
         if std::env::var_os(CHILD).is_some() {
-            let policy = CreationPolicy::load(None, None, true, true, 1).unwrap();
+            let policy = CreationPolicy::load(None, None, true, true, None, 1).unwrap();
             let stale_selection = workspace::WorkspaceInventory::load().unwrap();
             assert!(stale_selection.contains("selected"));
             let path = stale_selection.root("selected").unwrap();

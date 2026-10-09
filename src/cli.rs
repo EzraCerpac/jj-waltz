@@ -113,6 +113,19 @@ struct AddCommand {
     no_links: bool,
     #[arg(
         long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_cow",
+        help = "Clone new workspace files from the current workspace with copy-on-write"
+    )]
+    cow: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Let JJ write every file of a new workspace, ignoring config"
+    )]
+    no_cow: bool,
+    #[arg(
+        long,
         conflicts_with = "no_colocate",
         help = "Create new workspaces with a Git worktree (JJ 0.46+)"
     )]
@@ -160,6 +173,19 @@ struct SwitchCommand {
     print_path: bool,
     #[arg(long, action = ArgAction::SetTrue, help = "Skip applying workspace links")]
     no_links: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_cow",
+        help = "Clone new workspace files from the current workspace with copy-on-write"
+    )]
+    cow: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Let JJ write every file of a new workspace, ignoring config"
+    )]
+    no_cow: bool,
     #[arg(
         long,
         conflicts_with = "no_colocate",
@@ -448,7 +474,7 @@ fn run_ui(shell_path: bool) -> Result<()> {
     let Some(name) = crate::manager::run(&config.trunk.revset)? else {
         return Ok(());
     };
-    let policy = CreationPolicy::load(None, None, false, false, 1)?;
+    let policy = CreationPolicy::load(None, None, false, false, None, 1)?;
     let outcome = lifecycle::switch_existing_workspace(&name, &policy)?;
     print_switch_path(&outcome.result)?;
     if !shell_path {
@@ -596,6 +622,7 @@ fn run_add(cmd: AddCommand) -> Result<()> {
         cmd.bookmark,
         cmd.no_bookmark,
         cmd.no_links,
+        copy_on_write_override(cmd.cow, cmd.no_cow),
         cmd.names.len(),
     )?
     .with_colocation_override(if cmd.colocate {
@@ -605,8 +632,10 @@ fn run_add(cmd: AddCommand) -> Result<()> {
     } else {
         None
     });
-    for created in lifecycle::add_workspaces(&cmd.names, &policy)? {
-        print_created_workspace(&created, false);
+    let outcome = lifecycle::add_workspaces(&cmd.names, &policy)?;
+    print_warnings(&outcome.warnings);
+    for created in &outcome.created {
+        print_created_workspace(created, false);
     }
 
     Ok(())
@@ -621,6 +650,7 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         cmd.bookmark,
         cmd.no_bookmark,
         cmd.no_links,
+        copy_on_write_override(cmd.cow, cmd.no_cow),
         cmd.names.len(),
     )?
     .with_colocation_override(if cmd.colocate {
@@ -631,6 +661,7 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         None
     });
     let outcome = lifecycle::switch_workspaces(&cmd.names, &policy)?;
+    print_warnings(&outcome.warnings);
     for created in &outcome.intermediate {
         if !cmd.print_path {
             print_created_workspace(created, false);
@@ -669,6 +700,20 @@ fn print_switch_path(result: &workspace::SwitchResult) -> Result<()> {
         .filter(|path| path.is_dir())
         .unwrap_or(&result.path);
     print_line(path.display())
+}
+
+fn copy_on_write_override(cow: bool, no_cow: bool) -> Option<bool> {
+    match (cow, no_cow) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+fn print_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("jw: warning: {warning}");
+    }
 }
 
 fn print_created_workspace(created: &CreatedWorkspace, quiet: bool) {

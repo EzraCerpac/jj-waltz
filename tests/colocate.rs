@@ -122,7 +122,11 @@ impl Fixture {
         .unwrap()
     }
     fn stale_registration(&self) -> PathBuf {
-        let path = self.temp.path().join("unrelated stale\ncheckout");
+        #[cfg(unix)]
+        let name = "unrelated stale\ncheckout";
+        #[cfg(not(unix))]
+        let name = "unrelated stale checkout";
+        let path = self.temp.path().join(name);
         self.run(
             "git",
             &self.root,
