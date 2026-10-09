@@ -586,22 +586,22 @@ fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
             flags: u32,
         ) -> i32;
     }
-    #[cfg(target_os = "linux")]
-    unsafe extern "C" {
-        fn renameat2(
-            source_fd: i32,
-            source: *const std::ffi::c_char,
-            destination_fd: i32,
-            destination: *const std::ffi::c_char,
-            flags: u32,
-        ) -> i32;
-    }
     // SAFETY: These C strings are NUL-terminated and live through the call.
-    // macOS RENAME_EXCL=4; Linux AT_FDCWD=-100 and RENAME_NOREPLACE=1.
+    // macOS RENAME_EXCL=4. Linux uses the architecture's syscall number and
+    // RENAME_NOREPLACE directly: musl need not export a renameat2 wrapper.
     #[cfg(target_os = "macos")]
     let result = unsafe { renamex_np(source.as_ptr(), destination.as_ptr(), 4) };
     #[cfg(target_os = "linux")]
-    let result = unsafe { renameat2(-100, source.as_ptr(), -100, destination.as_ptr(), 1) };
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
     if result == 0 {
         Ok(())
     } else {
@@ -725,7 +725,11 @@ mod cleanup_tests {
                 fs::write(&source, "source").unwrap();
                 fs::write(&destination, "destination").unwrap();
             }
-            assert!(rename_no_replace(&source, &destination).is_err());
+            let error = rename_no_replace(&source, &destination).unwrap_err();
+            #[cfg(target_os = "linux")]
+            assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+            #[cfg(not(target_os = "linux"))]
+            let _ = error;
             assert!(source.exists());
             assert!(destination.exists());
             if !directory {
@@ -737,6 +741,34 @@ mod cleanup_tests {
             rename_no_replace(&source, &unused).unwrap();
             assert!(!source.exists());
             assert!(unused.exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exclusive_rename_preserves_live_and_dangling_destination_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for dangling in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            let destination = temp.path().join("destination");
+            let victim = temp.path().join("victim");
+            fs::write(&source, "source").unwrap();
+            if !dangling {
+                fs::write(&victim, "victim").unwrap();
+            }
+            symlink(&victim, &destination).unwrap();
+
+            let error = rename_no_replace(&source, &destination).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+            assert_eq!(fs::read_to_string(&source).unwrap(), "source");
+            assert_eq!(fs::read_link(&destination).unwrap(), victim);
+            if dangling {
+                assert!(!victim.exists());
+            } else {
+                assert_eq!(fs::read_to_string(&victim).unwrap(), "victim");
+            }
         }
     }
 

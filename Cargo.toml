@@ -1,6 +1,6 @@
 [package]
 name = "jj-waltz"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "A Jujutsu workspace switcher inspired by Worktrunk"
 license = "MIT"
@@ -29,6 +29,9 @@ ratatui = "0.30.2"
 [target.'cfg(unix)'.dependencies]
 reflink-copy = "0.1.30"
 tempfile = "3.19.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.190"
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
