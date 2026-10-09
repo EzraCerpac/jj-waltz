@@ -1220,7 +1220,7 @@ if mode == 'watchman' and args[-3:] == ['config', 'get', 'fsmonitor.backend']:
     marker.write_text('watchman')
     print('watchman')
     sys.exit(0)
-if mode == 'rejected-state' and 'status' in args and os.getcwd() == os.environ['JW_TEST_COW_WORKSPACE'] and not marker.exists():
+if mode == 'rejected-state' and 'status' in args and Path.cwd() == Path(os.environ['JW_TEST_COW_WORKSPACE']).resolve() and not marker.exists():
     marker.write_text('rejected-state')
     sys.exit(1)
 os.execv(os.environ['JW_TEST_REAL_JJ'], [os.environ['JW_TEST_REAL_JJ']] + args)
