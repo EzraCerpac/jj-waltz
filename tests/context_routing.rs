@@ -195,11 +195,14 @@ fn explicit_route_preserves_start_and_external_worktree() {
         &fixture.root,
         &["switch", "agent-task", "--execute", "jj root"],
     );
-    assert!(
-        executed
-            .lines()
-            .any(|line| { Path::new(line).canonicalize().ok() == workspace.canonicalize().ok() })
-    );
+    let expected_workspace = workspace
+        .canonicalize()
+        .expect("workspace exists after execution");
+    assert!(executed.lines().any(|line| {
+        Path::new(line)
+            .canonicalize()
+            .is_ok_and(|path| path == expected_workspace)
+    }));
     fixture.run(
         "jw",
         &fixture.root,
