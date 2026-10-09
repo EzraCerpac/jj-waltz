@@ -675,7 +675,11 @@ fn remove_created_symlink(link: &CreatedLink) -> std::io::Result<()> {
         ));
     }
     let target = fs::read_link(&link.source)?;
-    if target != link.target {
+    let same_target = target == link.target;
+    #[cfg(windows)]
+    let same_target =
+        same_target || same_existing_path(&target, &link.target).map_err(std::io::Error::other)?;
+    if !same_target {
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
             "symlink target changed after jw created it",

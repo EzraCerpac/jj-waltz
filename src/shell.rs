@@ -226,9 +226,9 @@ fn powershell_init() -> String {
         r#"$script:__jwExecutable = (Get-Command jw -CommandType Application).Path
 
 function jw {{
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$JwArgs)
 
-    if ($Args.Length -eq 0) {{
+    if ($JwArgs.Length -eq 0) {{
         $target = (& $script:__jwExecutable --ui-path | Out-String).TrimEnd("`r", "`n")
         if ($LASTEXITCODE -ne 0) {{ return }}
         if ($target.Length -gt 0) {{
@@ -237,7 +237,7 @@ function jw {{
         return
     }}
 
-    if (($Args[0] -eq 'ui') -and ($Args.Length -eq 1)) {{
+    if (($JwArgs[0] -eq 'ui') -and ($JwArgs.Length -eq 1)) {{
         $target = (& $script:__jwExecutable --ui-path ui | Out-String).TrimEnd("`r", "`n")
         if ($LASTEXITCODE -ne 0) {{ return }}
         if ($target.Length -gt 0) {{
@@ -249,19 +249,19 @@ function jw {{
     $switchCommands = @({switch_commands})
     $passthroughArgs = @({passthrough_args})
     $shouldPassthrough = $false
-    foreach ($arg in $Args) {{
+    foreach ($arg in $JwArgs) {{
         if (($passthroughArgs -contains $arg) -or $arg.StartsWith('{ATTACHED_EXECUTE_LONG}') -or $arg.StartsWith('{ATTACHED_EXECUTE_SHORT}')) {{
             $shouldPassthrough = $true
             break
         }}
     }}
 
-    if (($switchCommands -contains $Args[0]) -and -not $shouldPassthrough) {{
-        $target = & $script:__jwExecutable @Args --print-path
+    if (($switchCommands -contains $JwArgs[0]) -and -not $shouldPassthrough) {{
+        $target = & $script:__jwExecutable @JwArgs --print-path
         if ($LASTEXITCODE -ne 0) {{ return }}
-        Set-Location $target
+        Set-Location -LiteralPath $target
     }} else {{
-        & $script:__jwExecutable @Args
+        & $script:__jwExecutable @JwArgs
     }}
 }}
 

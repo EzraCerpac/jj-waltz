@@ -2226,6 +2226,16 @@ impl TestRepo {
             ["jj", "commit", "-m", "initial"],
         )?;
 
+        // Resolve DOS short names and platform aliases before comparing the
+        // fixture with JJ's reported checkout paths.
+        let default_root = fs::canonicalize(default_root)?;
+        #[cfg(windows)]
+        let default_root = PathBuf::from(
+            default_root
+                .to_string_lossy()
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&default_root.to_string_lossy()),
+        );
         Ok(Self {
             _tempdir: tempdir,
             default_root,
@@ -2483,10 +2493,11 @@ fn test_binary_path() -> OsString {
 }
 
 fn path_string(path: &Path) -> String {
-    fs::canonicalize(path)
-        .expect("canonicalize path")
-        .to_string_lossy()
-        .into_owned()
+    let path = fs::canonicalize(path).expect("canonicalize path");
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    text.to_string()
 }
 
 fn run_in<I, S>(cwd: &Path, config_home: &Path, args: I) -> anyhow::Result<()>
