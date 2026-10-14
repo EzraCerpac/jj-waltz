@@ -99,10 +99,17 @@ Git checkouts remain externally owned even after JJ adoption. `jw` refuses remov
 forgetting (including `--keep-dir`), UI removal, and pruning of those checkouts.
 Do not bypass this with native JJ/Git cleanup or a gardener; use the owning app.
 
-- `jw remove <name>` forgets the workspace and deletes its directory by default.
+- `jw remove <name>` uses native `jj workspace remove` when supported (JJ 0.46+)
+  to snapshot tracked target changes before deleting its directory. Older supported
+  JJ versions use guarded forgetting and directory deletion.
 - `--keep-dir` forgets it while preserving the directory; prefer this when file preservation is uncertain.
 - Removing the default workspace is refused.
 - Deleting the current workspace directory is refused until the user switches away. `--keep-dir` can still forget the current workspace.
+- Native errors never trigger custom deletion. Stale targets must be inspected and
+  updated with `jj workspace update-stale` before retrying. Directory deletion can
+  fail after forgetting; jw reports the remaining path as partial progress.
+- Ignored/untracked files outside JJ's snapshot are deleted with the directory;
+  preserve them with `--keep-dir` when needed. Manager review gates still apply.
 - Associated bookmarks prompt by default. Use `--keep-bookmark` or `--delete-bookmark` to make the user's choice explicit for non-interactive work.
 
 Complete removal when `jw list` no longer contains the workspace and the directory and bookmarks match the chosen preservation policy.
@@ -129,10 +136,15 @@ explicit reconciliation. Schemas 1 and 2 remain readable; new records use schema
 ownership or explicit jw-created Git provenance. Live topology checks protect old
 records without inferring ownership. `jw add --colocate`, `jw switch --colocate`,
 and `workspace.colocate = true` opt into creation on JJ 0.46+; `--no-colocate`
-overrides config, and existing workspaces are never converted. For a jw-created
+overrides config, and existing workspaces are never converted. Unsupported explicit
+requests advise upgrading to JJ 0.46+ or passing `--no-colocate`; automatic inheritance
+continues to use JJ-only workspaces on older builds. For a jw-created
 colocated workspace, removal validates its provenance token and reciprocal Git
 metadata and cleans only that Git registration. `--keep-dir` preserves files but
 disconnects the Git link. Changed topology, locks, and missing/damaged provenance
 require inspection; native app ownership remains protected. Interrupted cleanup
 can retain `.jj/jw-detached-git` or `.git/worktrees/.jw-cleanup-<token>`; inspect
 those paths and the retained lifecycle record before manual recovery.
+Native removal uses the same validated link detachment to prevent unrelated stale
+Git registrations from being pruned. An unverifiable result retains the owned Git
+registration and lifecycle record even if native removal already deleted the directory.

@@ -420,12 +420,23 @@ pub fn execute_remove_workspace(
     if current_metadata != plan.managed_metadata {
         bail!("workspace metadata changed during removal; review it again")
     }
-    crate::ownership::forget_workspace(
-        &client,
-        &plan.workspace,
-        Some(&plan.path),
-        current_metadata.as_ref(),
-    )?;
+    let deleted_dir = plan.delete_dir && plan.path.is_dir();
+    let native_removal = deleted_dir && client.supports_workspace_removal()?;
+    if native_removal {
+        crate::ownership::remove_workspace(
+            &client,
+            &plan.workspace,
+            &plan.path,
+            current_metadata.as_ref(),
+        )?;
+    } else {
+        crate::ownership::forget_workspace(
+            &client,
+            &plan.workspace,
+            Some(&plan.path),
+            current_metadata.as_ref(),
+        )?;
+    }
 
     let mut deleted_bookmarks = Vec::new();
     if delete_bookmarks && !plan.bookmarks.is_empty() {
@@ -460,8 +471,23 @@ pub fn execute_remove_workspace(
         }
     }
 
-    let deleted_dir = plan.delete_dir && plan.path.is_dir();
-    if deleted_dir {
+    if native_removal {
+        match fs::symlink_metadata(&plan.path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            outcome => {
+                let detail = match outcome {
+                    Err(error) => format!("; cannot verify directory deletion: {error}"),
+                    Ok(_) => String::new(),
+                };
+                bail!(
+                    "{}; workspace directory remains at {}{}",
+                    partial_removal_progress(&plan.workspace, &deleted_bookmarks),
+                    plan.path.display(),
+                    detail
+                )
+            }
+        }
+    } else if deleted_dir {
         remove_workspace_directory(&plan.path).with_context(|| {
             format!(
                 "{}; workspace directory remains at {}",

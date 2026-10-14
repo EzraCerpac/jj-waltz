@@ -380,7 +380,25 @@ fn validate_admin_topology(owner: &ExternalOwner) -> Result<()> {
     Ok(())
 }
 
-/// All forget operations pass this boundary. JJ 0.46 unlinks `.git` then runs a
+/// Use native snapshot/removal with the same bounded Git unlink protection as
+/// forgetting: detach only jw's validated link and clean only its registration.
+pub fn remove_workspace(
+    client: &JjClient,
+    name: &str,
+    path: &Path,
+    metadata: Option<&ManagedWorkspaceMetadata>,
+) -> Result<()> {
+    ensure_removal_allowed(client, name, Some(path), metadata)?;
+    cleanup_validated(
+        client,
+        name,
+        Some(path),
+        metadata.and_then(|record| record.owned_git_worktree.as_ref()),
+        true,
+    )
+}
+
+/// All cleanup operations pass this boundary. JJ 0.46 unlinks `.git` then runs a
 /// global worktree prune, so detach only our validated gitlink and delete only
 /// our exact administrative directory. Never invoke global Git cleanup.
 pub fn forget_workspace(
@@ -391,11 +409,12 @@ pub fn forget_workspace(
 ) -> Result<()> {
     ensure_removal_allowed(client, name, path, metadata)?;
     let resolved = target_path(client, name)?;
-    forget_validated(
+    cleanup_validated(
         client,
         name,
         resolved.as_deref().or(path),
         metadata.and_then(|m| m.owned_git_worktree.as_ref()),
+        false,
     )
 }
 
@@ -411,14 +430,15 @@ pub fn forget_created(
     } else {
         ensure_removal_allowed(client, name, Some(path), None)?;
     }
-    forget_validated(client, name, Some(path), owner)
+    cleanup_validated(client, name, Some(path), owner, false)
 }
 
-fn forget_validated(
+fn cleanup_validated(
     client: &JjClient,
     name: &str,
     path: Option<&Path>,
     owner: Option<&OwnedGitWorktree>,
+    delete_dir: bool,
 ) -> Result<()> {
     let gitlink = path.map(|p| p.join(".git"));
     let backup = path.map(|p| p.join(".jj/jw-detached-git"));
@@ -465,11 +485,12 @@ fn forget_validated(
     }
     // Nonzero status need not mean no mutation. Query the result before restoring
     // the link or deleting anything, and treat a confirmed completed forget as success.
-    let outcome = client.run(["workspace", "forget", name]);
+    let command = if delete_dir { "remove" } else { "forget" };
+    let outcome = client.run(["workspace", command, name]);
     let remaining = match client.workspace_names() {
         Ok(names) => names.iter().any(|candidate| candidate == name),
         Err(error) => {
-            let detail = if detached {
+            let detail = if detached && backup.as_ref().unwrap().exists() {
                 format!(
                     "; detached Git link retained at {}",
                     backup.as_ref().unwrap().display()
@@ -478,21 +499,21 @@ fn forget_validated(
                 String::new()
             };
             return Err(error.context(format!(
-                "cannot verify forget outcome; checkout, registration and metadata retained{detail}"
+                "cannot verify {command} outcome; registration and lifecycle metadata retained{detail}"
             )));
         }
     };
     if remaining {
         if detached {
-            validate_admin(owner.unwrap()).context(
-                "forget did not complete and Git registration changed; detached link retained",
-            )?;
+            validate_admin(owner.unwrap()).with_context(|| format!(
+                "workspace {command} did not complete and Git registration changed; detached link retained",
+            ))?;
             restore_gitlink(backup.as_ref().unwrap(), gitlink.as_ref().unwrap())?;
         }
         return match outcome {
             Err(error) => Err(error),
             Ok(_) => Err(anyhow::anyhow!(
-                "workspace forget did not remove {name}; checkout retained"
+                "workspace {command} did not remove {name}; checkout retained"
             )),
         };
     }
@@ -529,8 +550,15 @@ fn forget_validated(
         fs::remove_dir_all(&staged_path)
             .context("workspace forgotten but staged Git registration cleanup failed")?;
         if detached {
-            fs::remove_file(backup.as_ref().unwrap())
-                .context("workspace forgotten but detached Git link cleanup failed")?;
+            match fs::remove_file(backup.as_ref().unwrap()) {
+                Ok(()) => {}
+                // Native removal also deletes the backup with the checkout.
+                Err(error) if delete_dir && error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .context("workspace forgotten but detached Git link cleanup failed");
+                }
+            }
         }
         if owner.git_dir.exists()
             || registrations(client)?

@@ -328,7 +328,8 @@ records remain readable. Adoption and registration inspect actual topology; repa
 preserves ownership. Older or absent records still receive live topology checks.
 
 CLI removal, manager preview and execution, pruning, and rollback revalidate ownership
-before `workspace forget`. A linked Git checkout or remaining Git registration is
+before native `workspace remove` or `workspace forget`. An externally owned linked
+Git checkout or remaining external Git registration is
 ineligible for destructive cleanup; uncertainty fails closed. A native app owns its
 checkout even after JJ adoption. Creation resolves CLI overrides, explicit jw config,
 then automatic inheritance from verified primary topology and its effective JJ
@@ -339,6 +340,15 @@ creation path; existing workspaces are never converted by a default change.
 This is a breaking creation-default change in v0.8.0. Set
 `workspace.colocate = false` or pass `--no-colocate` to preserve the previous
 JJ-only creation behavior; automatic CoW remains JJ-only.
+
+Existing-directory removal probes `workspace remove --help` and uses native
+snapshotting/removal when advertised (JJ 0.46+); minimum support remains JJ 0.39.
+Keep-directory, missing-directory, rollback, and older-JJ cleanup retain guarded
+forgetting. Both commands share the owned Git-link detachment and exact-registration
+cleanup boundary, preventing JJ 0.46's global prune from touching unrelated missing
+registrations. Workspace absence is verified even after command failure; native
+removal never retries through custom deletion. A remaining directory is reported as
+partial progress after bookmark/metadata cleanup, including JJ's warning-only failures.
 
 `reconcile-external` is separate from automatic pruning. It verifies that the recorded
 checkout and Git admin directory are absent and the live registration is gone,
