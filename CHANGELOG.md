@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Prefer native `jj workspace remove` when the executable advertises it (JJ 0.46+),
+  snapshotting dirty target changes before deletion while retaining ownership,
+  manager review gates, unrelated Git registrations, and older-JJ fallback.
+  Keep-directory and missing-directory cleanup continue to use guarded forgetting.
+  Verify native partial progress, including warning-only directory deletion failures,
+  without retrying through custom deletion. Minimum JJ remains 0.39.
+- Explicit unsupported workspace colocation now advises upgrading to JJ 0.46+
+  or using `--no-colocate`; automatic inheritance still falls back to JJ-only.
+
 ## Version 0.8.0 (2026-10-09)
 
 **Breaking change: new workspace colocation defaults.**

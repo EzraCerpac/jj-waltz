@@ -284,8 +284,18 @@ jw remove --keep-bookmark feature-api
 ```
 
 Removal is planned before mutation, so default/current-workspace checks and bookmark
-choices happen before the workspace is forgotten. `--keep-dir` forgets the workspace
-without deleting its directory.
+choices happen before cleanup. On JJ 0.46+ or a build advertising `workspace remove`,
+directory removal uses that native command to snapshot the target's tracked changes
+before deletion. A stale target fails safely; inspect it and run `jj workspace
+update-stale` there before retrying. Older supported JJ versions use guarded forgetting
+and directory deletion. `--keep-dir` and already-missing directories use forgetting;
+`--keep-dir` preserves files. Ignored and other files outside JJ's snapshot are deleted
+with the directory, as before; use `--keep-dir` when they need preservation. The
+interactive manager still requires review of ignored/untracked files.
+
+Native errors are checked for partial progress and never trigger a deletion fallback.
+If JJ forgets the workspace but only warns that directory deletion failed, jw reports
+the remaining path as a partial removal after cleaning bookmarks and lifecycle metadata.
 
 ### Colocated workspaces
 
@@ -319,8 +329,9 @@ Set `colocate = false` to explicitly keep new workspaces JJ-only; omit the setti
 to inherit automatically. `--colocate` and `--no-colocate` override the jw setting
 for one command. They affect
 only newly created workspaces; switching to an existing workspace never converts
-it. Explicit colocation requests on unsupported JJ versions or non-Git backends
-fail before creation.
+it. Explicit colocation requests on unsupported JJ versions fail before creation and
+advise upgrading to JJ 0.46+ or using `--no-colocate`. Non-Git backends also fail
+before creation.
 
 `jw` records provenance only for Git worktrees it creates. `jw remove` cleans that
 workspace's Git registration, and `--keep-dir` retains its files while removing the
@@ -329,6 +340,12 @@ matches. Cleanup validates both live topology and the ownership marker, and neve
 runs a global Git worktree prune. Changed topology or missing/damaged provenance
 requires inspection instead of automatic deletion. Native app checkouts remain
 externally owned, including after adoption.
+
+For native removal, jw temporarily detaches only its validated Git link to prevent
+JJ's repository-wide pruning from deleting unrelated missing registrations, then
+cleans only the matching owned registration. A failed removal restores the link
+when the workspace is still registered; unverifiable outcomes retain lifecycle metadata
+and the owned registration for inspection.
 
 `jw doctor` validates recorded ownership against live topology and the marker,
 and reports invalid provenance as a metadata-consistency error.

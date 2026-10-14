@@ -346,9 +346,24 @@ impl JjClient {
             .contains("--colocate"))
     }
 
+    /// Probe the subcommand rather than assuming a release number implies support.
+    pub fn supports_workspace_removal(&self) -> Result<bool> {
+        let output =
+            self.run_unchecked(["--ignore-working-copy", "workspace", "remove", "--help"])?;
+        if output.success() {
+            return Ok(true);
+        }
+        if output.stderr().contains("unrecognized subcommand 'remove'") {
+            return Ok(false);
+        }
+        bail!("cannot probe native workspace removal: {}", output.stderr())
+    }
+
     pub fn require_workspace_colocation(&self) -> Result<()> {
         if !self.supports_workspace_colocation()? {
-            bail!("workspace colocation requires JJ with `workspace add --colocate` (JJ 0.46+)")
+            bail!(
+                "workspace colocation requires JJ with `workspace add --colocate`; upgrade to JJ 0.46+ or use --no-colocate"
+            )
         }
         // A local backend cannot create Git worktrees. Check before any mutation.
         self.run(["--ignore-working-copy", "git", "root"])
