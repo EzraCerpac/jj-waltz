@@ -100,7 +100,8 @@ by itself a claim that a command exposing that concept already exists.
 - One status or planning command derives from one final repository snapshot and
   names its JJ operation ID.
 - Trunk resolves to exactly one revision; no ordinary `jw` operation moves a
-  trunk bookmark.
+  trunk bookmark. `jw merge --into` is the explicit exception: it fast-forwards
+  the bookmark it lands on.
 - Refresh completes before snapshot capture. Status derivation performs no
   process execution or filesystem mutation.
 - Managed metadata records only `jw` lifecycle intent. Unmanaged inference stays
@@ -121,7 +122,9 @@ by itself a claim that a command exposing that concept already exists.
   shared entries with the same source. Relative targets are resolved per
   receiving workspace.
 - Removal preserves bookmarks unless the user confirms deletion.
-- Publication and cleanup remain separate workflows.
+- Publication and cleanup remain separate workflows, except that `jw merge`
+  sequences landing and removal: removal is planned first and runs only after
+  landing succeeds.
 - Core workspace lifecycle and local status remain offline; forge and network
   information are optional enrichment.
 - JSON stdout contains only its versioned document; diagnostics use stderr.

@@ -18,7 +18,10 @@ work. The current command surface remains authoritative in `jw --help`.
 | `gh` / `glab` | Pull or merge requests, forge checks, and CI state |
 
 `jw` may coordinate a graph or publication step through `jj`, but it does not add
-general wrappers for ordinary JJ verbs. Forge and network adapters are optional;
+general wrappers for ordinary JJ verbs. `jw merge` is that coordination for landing: a fixed
+snapshot, optional squash, insertion before a working copy or rebase and fast-forward
+of an explicit bookmark, optional push, and removal,
+with removal planned before the first rewrite. Forge and network adapters are optional;
 core creation, switching, inventory, local status, links, and removal stay
 offline.
 
@@ -37,6 +40,16 @@ offline.
 - `metadata` persists repository-scoped managed-workspace intent.
 - `doctor` runs independent read-only checks and always produces a complete report,
   including configured-link health for every managed workspace.
+- `merge` owns the landing workflow. It selects the publish tip and stack, refuses
+  merges and conflicts, and reuses `workspace` removal planning and execution. Before
+  any rewrite it decides which associated bookmarks point into the landed stack (only
+  those are deleted; trunk and the `--into` target never are) and, unless the directory
+  is kept, refuses when `unpreserved` finds untracked files only that checkout has.
+- `unpreserved` decides which of the paths JJ reports as untracked but not ignored
+  (the `jj` adapter reads them from `jj status`) a directory deletion would lose: those
+  with no identical copy (same size and modification time, else same bytes) at the same
+  path in a reference checkout. Ignored files are regenerable and never checked. A
+  directory JJ collapses into one entry is walked whole; symlinks are skipped.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
 - `cow` owns copy-on-write file cloning and filesystem capability probing. The

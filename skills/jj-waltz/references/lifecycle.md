@@ -114,6 +114,23 @@ Do not bypass this with native JJ/Git cleanup or a gardener; use the owning app.
 
 Complete removal when `jw list` no longer contains the workspace and the directory and bookmarks match the chosen preservation policy.
 
+## Merge
+
+Run `jw merge` only when the user asks to land a workspace. It lands the workspace's
+stack (before the receiving `@`, or onto `--into <bookmark>`), then forgets the
+workspace and deletes its directory.
+
+- It deletes the associated bookmark only when it points into the landed stack; trunk,
+  the `--into` target, and bookmarks pointing elsewhere are kept with a warning.
+- Ignored files (dependencies, build output) are deleted with the directory. If the
+  user may want ignored data kept, use `--keep-dir`.
+- It refuses, changing nothing, when the directory holds files JJ leaves untracked
+  although they are not ignored (for example secrets excluded by `snapshot.auto-track`)
+  without an identical copy at the same path in the default workspace. Show the listed
+  files to the user; pass `--keep-dir` only when they want the directory kept, and never
+  delete those files without asking.
+- Conflicts or a failed `--push` keep the workspace; resolve and rerun.
+
 ## Prune
 
 `jw prune` forgets workspaces whose paths are already missing. It does not share `remove`'s explicit default-workspace guard. Inspect `jw list` and `jj workspace list` first, and run it only when every missing entry is intended for forgetting.
