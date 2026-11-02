@@ -835,23 +835,16 @@ pub fn prune_missing_workspaces() -> Result<Vec<String>> {
     Ok(removed)
 }
 
+/// Workspace names for shell completion, from a single JJ call that skips the snapshot.
+///
+/// Completion runs on every keypress, so it deliberately avoids `WorkspaceInventory::load`,
+/// which resolves every workspace root. Invalid targets are reported by the command itself.
 pub fn completion_workspace_candidates() -> Result<Vec<(String, String)>> {
-    let inventory = WorkspaceInventory::load()?;
-
-    let mut candidates = Vec::new();
-
-    for entry in inventory.entries() {
-        let description = if inventory.current_name() == entry.name {
-            "Existing workspace (current)"
-        } else if inventory.previous.as_deref() == Some(entry.name.as_str()) {
-            "Existing workspace (previous)"
-        } else if inventory.default.as_deref() == Some(entry.name.as_str()) {
-            "Existing workspace (default)"
-        } else {
-            "Existing workspace"
-        };
-        candidates.push((entry.name.clone(), description.to_owned()));
-    }
+    let mut candidates = JjClient::current()?
+        .workspace_names()?
+        .into_iter()
+        .map(|name| (name, "Existing workspace".to_owned()))
+        .collect::<Vec<_>>();
 
     candidates.push(("@".to_owned(), "Current workspace".to_owned()));
     candidates.push(("-".to_owned(), "Previous workspace".to_owned()));

@@ -10,6 +10,9 @@
   without retrying through custom deletion. Minimum JJ remains 0.39.
 - Explicit unsupported workspace colocation now advises upgrading to JJ 0.46+
   or using `--no-colocate`; automatic inheritance still falls back to JJ-only.
+- Speed up workspace-name shell completion: it now makes a single JJ call that
+  skips the working-copy snapshot instead of one snapshotting call per workspace.
+  Candidates no longer note which workspace is current, previous, or default.
 
 ## Version 0.8.0 (2026-10-09)
 
