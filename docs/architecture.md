@@ -39,7 +39,9 @@ offline.
   including configured-link health for every managed workspace.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
-- `cow` owns copy-on-write file cloning and filesystem capability probing. The
+- `cow` owns copy-on-write cloning, planned as maximal whole-directory clones of
+  the selected entries (tracked files, or everything but JJ/Git metadata and
+  link sources), and filesystem capability probing. The
   `workspace` module orchestrates JJ adoption of the clone. The `jj` adapter owns
   listing tracked files and reading and writing JJ's local working-copy state,
   which is not a public interface: every copied state is validated by JJ and
@@ -275,9 +277,21 @@ health field to `jw status`.
 
 When copy-on-write is requested, creation probes the destination filesystem before
 any mutation and falls back to ordinary JJ workspace creation with a warning if it cannot clone.
-Otherwise it adds the workspace with empty sparse patterns, clones the files JJ
-tracks in the current workspace's working-copy commit, and copies the current
-workspace's working-copy state. Ignored and untracked files are never cloned.
+Otherwise it adds the workspace with empty sparse patterns, clones the selected
+entries of the current workspace, and copies the current workspace's working-copy
+state. The default `tracked` scope selects the files JJ tracks in the current
+workspace's working-copy commit; ignored and untracked files are never cloned.
+The `all` scope selects every entry except `.jj`, `.git`, and the link sources
+that links will supply: those whose target already exists outside the new
+workspace. Sources with a missing optional target are skipped with a warning,
+because a private copy at a link source is a link conflict; private overrides
+targeting the new workspace itself are cloned.
+The clone is planned as maximal subtrees: a directory whose entries are all
+selected is cloned with one call (one `clonefile(2)` on macOS), and only
+directories mixing selected and unselected entries are walked further.
+Because the source can change between planning and cloning, each whole-directory
+clone is then pruned back to the selection, so a file created in the gap, such as
+an ignored build artifact, cannot survive in a tracked-only clone.
 A JJ snapshot validates the copied state; if JJ rejects it, the previous state is
 restored, the attempted clone workspace is rolled back, and JJ recreates it
 through its ordinary workspace-add path, preserving the source sparse patterns.

@@ -42,9 +42,24 @@ pub struct AddOptions {
     /// Full commit ID resolved before any workspace mutation.
     pub base_commit_id: String,
     pub bookmark: Option<String>,
-    /// Clone tracked files from this checkout root instead of letting JJ write them.
-    pub clone_from: Option<PathBuf>,
+    /// Clone files from another checkout instead of letting JJ write them.
+    pub clone_from: Option<CloneSource>,
     pub colocate: bool,
+}
+
+/// A checkout whose files seed a new workspace through copy-on-write cloning.
+#[derive(Debug, Clone)]
+pub struct CloneSource {
+    pub root: PathBuf,
+    pub contents: CloneContents,
+}
+
+#[derive(Debug, Clone)]
+pub enum CloneContents {
+    /// Only files JJ tracks in the source's working-copy commit.
+    Tracked,
+    /// Every entry except JJ and Git metadata and these workspace-relative paths.
+    All { excluded: Vec<PathBuf> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,24 +718,33 @@ fn add_workspace_by_name_with_inventory(
 
 /// Fill a sparse-empty workspace from a copy-on-write clone of another checkout.
 ///
-/// Only the files JJ tracks in the source's working-copy commit are cloned, so
-/// ignored and untracked files never reach the new workspace. JJ adopts the clone
+/// By default only the files JJ tracks in the source's working-copy commit are
+/// cloned, so ignored and untracked files never reach the new workspace; a
+/// whole-checkout clone also brings those, except link sources. JJ adopts the clone
 /// through the source's working-copy state. Return false when the caller must
 /// recreate through JJ's ordinary checkout path. Restoring `@` then rewrites every
-/// file that differs from the creation base, so the result matches a full checkout.
-fn materialize_clone(source_root: &Path, path: &Path) -> Result<bool> {
+/// tracked file that differs from the creation base, so tracked content matches a
+/// full checkout.
+fn materialize_clone(source: &CloneSource, path: &Path) -> Result<bool> {
     let client = JjClient::new(path);
     if client.uses_watchman()? {
         return Ok(false);
     }
-    let files = JjClient::new(source_root).tracked_files()?;
-    cow::clone_files(source_root, &files, path).with_context(|| {
+    let tracked;
+    let selection = match &source.contents {
+        CloneContents::Tracked => {
+            tracked = JjClient::new(&source.root).tracked_files()?;
+            cow::CloneSelection::Tracked(&tracked)
+        }
+        CloneContents::All { excluded } => cow::CloneSelection::All { excluded },
+    };
+    cow::clone_into(&source.root, selection, path).with_context(|| {
         format!(
             "failed to clone files from {}; retry with --no-cow for a full checkout",
-            source_root.display()
+            source.root.display()
         )
     })?;
-    if !adopt_source_tree_state(&client, source_root, path)? {
+    if !adopt_source_tree_state(&client, &source.root, path)? {
         return Ok(false);
     }
     client.run(["restore"])?;

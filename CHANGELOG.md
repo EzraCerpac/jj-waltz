@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add `jw add --cow-all` and `jw switch --cow-all`, and
+  `workspace.copy_on_write = "all"`, which clone everything in the current
+  workspace, including ignored and untracked files such as `node_modules` and
+  `.env`. Link sources are skipped only when a link will supply them; a source
+  whose optional target is missing is skipped with a warning, and private
+  overrides are cloned. `copy_on_write` also accepts `"tracked"` (the existing
+  behavior, still selected by `true`) and `"off"`.
+- Copy-on-write creation clones directories whose entries are all selected with
+  one call instead of file by file; on APFS a ~9,000-file checkout now clones in
+  about half a second.
 - Read every workspace root with one `jj workspace list` process on JJ releases
   whose templates expose `WorkspaceRef.root()`, instead of one `jj workspace root`
   process per workspace. With ~180 workspaces this takes `jw add` and `jw remove`

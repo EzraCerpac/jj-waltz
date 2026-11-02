@@ -1,9 +1,11 @@
-use crate::config::{self, Config};
+use crate::config::{self, Config, CopyOnWrite};
 use crate::cow;
 use crate::jj::{JjClient, ResolvedRevision};
 use crate::links::{self, LinkApplication, LinkApplyReport};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
-use crate::workspace::{self, AddOptions, AddResult, SwitchOptions, SwitchResult};
+use crate::workspace::{
+    self, AddOptions, AddResult, CloneContents, CloneSource, SwitchOptions, SwitchResult,
+};
 use anyhow::{Context, Error, Result, anyhow, bail};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,7 @@ pub struct CreationPolicy {
     explicit_bookmark: Option<String>,
     no_bookmark: bool,
     apply_links: bool,
-    copy_on_write: bool,
+    copy_on_write: CopyOnWrite,
     config: Config,
     colocate_override: Option<bool>,
 }
@@ -26,7 +28,7 @@ impl CreationPolicy {
         explicit_bookmark: Option<String>,
         no_bookmark: bool,
         no_links: bool,
-        copy_on_write: Option<bool>,
+        copy_on_write: Option<CopyOnWrite>,
         workspace_count: usize,
     ) -> Result<Self> {
         if explicit_bookmark.is_some() && no_bookmark {
@@ -58,7 +60,7 @@ impl CreationPolicy {
             if !colocate {
                 return Ok(false);
             }
-            if self.copy_on_write {
+            if self.copy_on_write.enabled() {
                 bail!(
                     "colocation and copy-on-write cannot be combined; use --no-cow or --no-colocate"
                 )
@@ -67,7 +69,7 @@ impl CreationPolicy {
             return Ok(true);
         }
         // Inheritance must not turn an otherwise valid CoW request into a conflict.
-        if self.copy_on_write {
+        if self.copy_on_write.enabled() {
             return Ok(false);
         }
         client.inherited_workspace_colocation()
@@ -145,8 +147,8 @@ pub struct RepairResult {
 /// How new workspaces receive their files, chosen once before any mutation.
 #[derive(Debug, Default)]
 struct CheckoutPlan {
-    clone_from: Option<PathBuf>,
-    warning: Option<String>,
+    clone_from: Option<CloneSource>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +205,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOu
         .apply_links
         .then(|| inventory.root(inventory.default_name()?))
         .transpose()?;
-    let checkout = plan_checkout(policy, &inventory, &plans)?;
+    let checkout = plan_checkout(policy, &inventory, &plans, config_root.as_deref())?;
 
     let mut pending = Vec::new();
     for plan in plans {
@@ -225,7 +227,7 @@ pub fn add_workspaces(names: &[String], policy: &CreationPolicy) -> Result<AddOu
     }
     Ok(AddOutcome {
         created: pending.into_iter().map(PendingWorkspace::finish).collect(),
-        warnings: checkout.warning.into_iter().collect(),
+        warnings: checkout.warnings,
     })
 }
 
@@ -316,7 +318,7 @@ fn switch_workspaces_with_creation(
         .apply_links
         .then(|| inventory.root(inventory.default_name()?))
         .transpose()?;
-    let checkout = plan_checkout(policy, &inventory, &all_plans)?;
+    let checkout = plan_checkout(policy, &inventory, &all_plans, config_root.as_deref())?;
 
     let mut intermediate = Vec::new();
     for plan in intermediate_plans {
@@ -416,7 +418,7 @@ fn switch_workspaces_with_creation(
             .collect(),
         result,
         links,
-        warnings: checkout.warning.into_iter().collect(),
+        warnings: checkout.warnings,
     })
 }
 
@@ -631,13 +633,16 @@ fn resolve_creation_base(client: &JjClient, at_revset: Option<&str>) -> Result<R
 /// Decide whether new workspaces clone files from the current checkout.
 ///
 /// Cloning falls back to ordinary JJ workspace creation with a warning when the filesystem
-/// cannot clone.
+/// cannot clone. A whole-checkout clone skips the paths that workspace links will supply.
+/// New workspaces are siblings sharing one parent, so link targets resolved against the
+/// first destination resolve the same way for the rest.
 fn plan_checkout(
     policy: &CreationPolicy,
     inventory: &workspace::WorkspaceInventory,
     plans: &[PlannedWorkspace],
+    links_root: Option<&Path>,
 ) -> Result<CheckoutPlan> {
-    let Some(first) = plans.first().filter(|_| policy.copy_on_write) else {
+    let Some(first) = plans.first().filter(|_| policy.copy_on_write.enabled()) else {
         return Ok(CheckoutPlan::default());
     };
     let source_root = inventory.current_root();
@@ -645,20 +650,36 @@ fn plan_checkout(
     let destination_parent = destination
         .parent()
         .ok_or_else(|| anyhow!("workspace path has no parent directory"))?;
-    Ok(
-        match cow::unsupported_reason(source_root, destination_parent) {
-            Some(reason) => CheckoutPlan {
-                clone_from: None,
-                warning: Some(format!(
-                    "copy-on-write is unavailable, using ordinary JJ workspace creation: {reason}"
-                )),
-            },
-            None => CheckoutPlan {
-                clone_from: Some(source_root.to_path_buf()),
-                warning: None,
-            },
-        },
-    )
+    if let Some(reason) = cow::unsupported_reason(source_root, destination_parent) {
+        return Ok(CheckoutPlan {
+            clone_from: None,
+            warnings: vec![format!(
+                "copy-on-write is unavailable, using ordinary JJ workspace creation: {reason}"
+            )],
+        });
+    }
+    let (contents, warnings) = match policy.copy_on_write {
+        CopyOnWrite::All => {
+            let exclusions = links_root
+                .map(|root| links::clone_exclusions(root, &destination))
+                .transpose()?
+                .unwrap_or_default();
+            (
+                CloneContents::All {
+                    excluded: exclusions.excluded,
+                },
+                exclusions.warnings,
+            )
+        }
+        CopyOnWrite::Tracked | CopyOnWrite::Off => (CloneContents::Tracked, Vec::new()),
+    };
+    Ok(CheckoutPlan {
+        clone_from: Some(CloneSource {
+            root: source_root.to_path_buf(),
+            contents,
+        }),
+        warnings,
+    })
 }
 
 fn create_workspace(

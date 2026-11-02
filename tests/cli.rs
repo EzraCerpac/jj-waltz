@@ -1103,6 +1103,154 @@ fn add_with_cow_checks_out_exactly_the_base() {
     assert_eq!(repo.jj_stdout(&workspace_root, &["diff", "--summary"]), "");
 }
 
+#[test]
+fn add_with_cow_all_carries_ignored_files_but_not_edits_or_link_sources() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".gitignore"),
+        ".env\nnode_modules/\ndata\n",
+    )
+    .expect("write gitignore");
+    fs::create_dir_all(repo.default_root.join("src")).expect("create src");
+    fs::write(repo.default_root.join("src/lib.rs"), "fn main() {}\n").expect("write lib");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"data\"\ntarget = \"../repo/data\"\n",
+    )
+    .expect("write links config");
+    repo.run_jj(["commit", "-m", "add sources"]);
+    fs::write(repo.default_root.join(".env"), "SECRET=1\n").expect("write env");
+    fs::create_dir_all(repo.default_root.join("node_modules/pkg")).expect("create modules");
+    fs::write(repo.default_root.join("node_modules/pkg/index.js"), "x").expect("write module");
+    fs::create_dir_all(repo.default_root.join("data")).expect("create data");
+    fs::write(repo.default_root.join("data/blob"), "shared").expect("write data");
+    fs::write(repo.default_root.join("README.md"), "edited\n").expect("edit readme");
+    fs::write(repo.default_root.join("scratch.txt"), "draft\n").expect("write scratch");
+
+    let output = repo.command_output(&["add", "--cow-all", "feature-a"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workspace_root = repo.default_root.with_extension("feature-a");
+    if String::from_utf8_lossy(&output.stderr).contains("copy-on-write is unavailable") {
+        assert!(
+            env::var_os("JW_TEST_REQUIRE_COW").is_none_or(|value| value.is_empty()),
+            "real cloning required"
+        );
+        return;
+    }
+    assert_eq!(
+        fs::read_to_string(workspace_root.join(".env")).expect("read env"),
+        "SECRET=1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("node_modules/pkg/index.js")).expect("read module"),
+        "x"
+    );
+    // Tracked content matches the creation base; uncommitted edits stay behind.
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("README.md")).expect("read readme"),
+        "hello\n"
+    );
+    assert!(!workspace_root.join("scratch.txt").exists());
+    // Links, not stale copies, supply link sources.
+    let data = fs::symlink_metadata(workspace_root.join("data")).expect("data metadata");
+    assert!(data.file_type().is_symlink());
+    assert_eq!(repo.jj_stdout(&workspace_root, &["diff", "--summary"]), "");
+}
+
+#[test]
+fn cow_all_clones_private_overrides_and_warns_about_unlinked_sources() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(
+        repo.default_root.join(".gitignore"),
+        "private\noptional-cache\n",
+    )
+    .expect("write gitignore");
+    fs::write(
+        repo.default_root.join(".jwlinks.toml"),
+        "[[link]]\nsource = \"private\"\ntarget = \"private\"\nrequired = true\n\n\
+         [[link]]\nsource = \"optional-cache\"\ntarget = \"../repo/missing-cache\"\n",
+    )
+    .expect("write links config");
+    repo.run_jj(["commit", "-m", "add links"]);
+    fs::create_dir_all(repo.default_root.join("private")).expect("create private");
+    fs::write(repo.default_root.join("private/state"), "mine").expect("write private");
+    fs::create_dir_all(repo.default_root.join("optional-cache")).expect("create cache");
+    fs::write(repo.default_root.join("optional-cache/blob"), "x").expect("write cache");
+
+    let output = repo.command_output(&["add", "--cow-all", "feature-a"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    if stderr.contains("copy-on-write is unavailable") {
+        assert!(
+            env::var_os("JW_TEST_REQUIRE_COW").is_none_or(|value| value.is_empty()),
+            "real cloning required"
+        );
+        return;
+    }
+
+    let workspace_root = repo.default_root.with_extension("feature-a");
+    // A target inside the new workspace is a private override, never a link.
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("private/state")).expect("read private"),
+        "mine"
+    );
+    // A private copy at a link source would conflict, so it is skipped, loudly.
+    assert!(!workspace_root.join("optional-cache").exists());
+    assert!(
+        stderr.contains("not cloning optional-cache"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cow_all_config_scope_and_flag_conflicts() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(repo.default_root.join(".gitignore"), "node_modules/\n").expect("gitignore");
+    repo.run_jj(["commit", "-m", "ignore modules"]);
+    fs::create_dir_all(repo.default_root.join("node_modules")).expect("create modules");
+    fs::write(repo.default_root.join("node_modules/marker"), "x").expect("write module");
+    repo.write_config("[workspace]\ncopy_on_write = \"all\"\n");
+
+    let output = repo.command_output(&["add", "feature-a"]);
+    assert!(output.status.success());
+    let unsupported =
+        String::from_utf8_lossy(&output.stderr).contains("copy-on-write is unavailable");
+    assert_eq!(
+        repo.default_root
+            .with_extension("feature-a")
+            .join("node_modules/marker")
+            .exists(),
+        !unsupported
+    );
+    repo.cmd()
+        .args(["add", "--cow", "feature-b"])
+        .assert()
+        .success();
+    assert!(
+        !repo
+            .default_root
+            .with_extension("feature-b")
+            .join("node_modules")
+            .exists()
+    );
+
+    for conflict in [["--cow", "--cow-all"], ["--cow-all", "--no-cow"]] {
+        repo.cmd()
+            .args(["add", conflict[0], conflict[1], "feature-c"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("cannot be used with"));
+    }
+}
+
 // macOS CI sets JW_TEST_REQUIRE_COW so these tests cannot silently take
 // the unsupported-filesystem path when validating the clone and its fallbacks.
 #[test]
