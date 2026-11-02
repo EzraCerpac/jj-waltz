@@ -25,6 +25,7 @@ const REVISION_TEMPLATE: &str =
 const LOCAL_BOOKMARK_NAMES_TEMPLATE: &str = r#"if(remote, "", json(name) ++ "\n")"#;
 const BOOKMARK_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
 const TRACKED_FILES_TEMPLATE: &str = r#"json(path) ++ "\n""#;
+const DESCRIPTIONS_TEMPLATE: &str = r#"json(description) ++ "\n""#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjVersion {
@@ -631,6 +632,25 @@ impl JjClient {
             .collect())
     }
 
+    /// Read full revision descriptions, oldest first, at one frozen operation.
+    pub fn descriptions_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        revset: impl AsRef<OsStr>,
+    ) -> Result<Vec<String>> {
+        let args = [
+            OsString::from("log"),
+            OsString::from("-r"),
+            revset.as_ref().to_owned(),
+            OsString::from("--no-graph"),
+            OsString::from("--reversed"),
+            OsString::from("--template"),
+            OsString::from(DESCRIPTIONS_TEMPLATE),
+        ];
+        let output = self.run_at(operation_id, args)?;
+        parse_json_string_lines(output.stdout()?, "description")
+    }
+
     /// Read conflicted bookmark names at one frozen repository operation.
     pub fn conflicted_bookmark_names_at(
         &self,
@@ -684,6 +704,22 @@ impl JjClient {
             .into_iter()
             .map(|path| path.split('/').collect())
             .collect())
+    }
+
+    /// Snapshot the working copy and list the paths JJ leaves untracked although they
+    /// are not ignored: files excluded by `snapshot.auto-track`, and files JJ refused to
+    /// snapshot (for example over `snapshot.max-new-file-size`). Ignored paths are never
+    /// listed.
+    ///
+    /// The paths come from the `Untracked paths:` section of `jj status`, the only public
+    /// interface that reports this set; JJ 0.39, the minimum supported release, already
+    /// prints it. JJ omits the section when nothing is untracked, so a missing header
+    /// means none. Paths are relative to this client's directory, which must be the
+    /// workspace root. JJ collapses a directory holding no tracked files into one
+    /// `dir/` entry, reported here with `directory` set; it can also contain ignored
+    /// files, which JJ does not distinguish there.
+    pub(crate) fn snapshot_untracked_paths(&self) -> Result<Vec<UntrackedPath>> {
+        Ok(parse_untracked_paths(self.run(["status"])?.stdout()?))
     }
 
     /// Whether the watchman filesystem monitor is configured.
@@ -879,6 +915,34 @@ fn parse_workspace_target_facts(output: &str) -> Result<BTreeMap<String, Workspa
     Ok(facts)
 }
 
+/// A path `jj status` lists as untracked but not ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UntrackedPath {
+    pub path: PathBuf,
+    /// JJ collapsed a whole directory into this entry.
+    pub directory: bool,
+}
+
+/// Parse the `? path` lines that follow `Untracked paths:` in `jj status` output.
+///
+/// JJ prints these paths raw, so a name containing a newline cannot be recovered; its
+/// continuation line ends the section early.
+fn parse_untracked_paths(output: &str) -> Vec<UntrackedPath> {
+    output
+        .lines()
+        .skip_while(|line| *line != "Untracked paths:")
+        .skip(1)
+        .map_while(|line| line.strip_prefix("? "))
+        .map(|path| {
+            let trimmed = path.trim_end_matches(['/', std::path::MAIN_SEPARATOR]);
+            UntrackedPath {
+                path: PathBuf::from(trimmed),
+                directory: trimmed.len() != path.len(),
+            }
+        })
+        .collect()
+}
+
 /// Workspace name to recorded root; `None` when JJ could not render that root.
 pub(crate) type WorkspaceRoots = BTreeMap<String, Option<PathBuf>>;
 
@@ -934,6 +998,29 @@ fn parse_count(value: &str, record_index: usize, field: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_untracked_paths_from_status() {
+        let output = "Working copy changes:\nA tracked.txt\nUntracked paths:\n? secret.local\n? sp ace \"q\".local\n? udir/\nWorking copy  (@) : abc (no description set)\n";
+        assert_eq!(
+            parse_untracked_paths(output),
+            [
+                UntrackedPath {
+                    path: PathBuf::from("secret.local"),
+                    directory: false,
+                },
+                UntrackedPath {
+                    path: PathBuf::from("sp ace \"q\".local"),
+                    directory: false,
+                },
+                UntrackedPath {
+                    path: PathBuf::from("udir"),
+                    directory: true,
+                },
+            ]
+        );
+        assert!(parse_untracked_paths("The working copy has no changes.\n").is_empty());
+    }
 
     #[test]
     fn parses_batched_workspace_roots() {

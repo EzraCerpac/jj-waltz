@@ -18,6 +18,7 @@ JJ-native workspace lifecycle and cross-workspace coordination.
 The responsibility split is deliberate:
 
 - `jj` owns revision-graph work, bookmarks, fetch/push, and operation-log recovery.
+  `jw merge` is the one exception: it runs a fixed rebase-and-land sequence through `jj`.
 - `jw` owns workspace creation, navigation, links, lifecycle metadata, and safe
   cross-workspace coordination.
 - Forge tools such as `gh` and `glab` own pull requests, merge requests, and CI.
@@ -42,6 +43,7 @@ to a warning rather than make local workspace management fail.
 - `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
 - `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
 - `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
+- `jw merge [workspace]` lands a workspace before your `@` (or `--into` a bookmark), then removes it
 - `jw reconcile-external <name>` reconciles stale JJ state after external checkout cleanup
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
@@ -272,6 +274,48 @@ Each target is revalidated before mutation. Changed targets require another
 review. Independent rows continue after a failure; results identify partial
 progress, and failed rows remain selected for an explicit retry. No batch rollback
 or automatic repair is performed.
+
+## Merging workspaces
+
+`jw merge` lands a workspace's work and retires the workspace in one step. Like
+`git merge`, it brings the named workspace into where you are:
+
+```bash
+jw merge feature-api                # insert feature-api's work before your @
+jw merge                            # from inside a workspace: insert it before the default workspace's @
+jw merge feature-api --into main    # rebase onto main instead, and advance main
+jw merge feature-api --squash       # combine the workspace's revisions into one first
+jw merge feature-api --into main --push
+jw merge feature-api --keep-dir     # land and forget it, but leave its directory
+```
+
+The landed work is the workspace's publish tip (a non-empty `@`, otherwise its sole
+parent) and every ancestor not already in the destination. By default it is inserted
+between the receiving workspace's `@` and its parent, as `jj rebase -B @` would, so
+uncommitted work stays on top and no bookmark moves. With `--into`, it is rebased onto
+the bookmark, which is fast-forwarded, and `--push` pushes it. Then the merged
+workspace and its directory are removed, along with its associated bookmark when that
+bookmark points into the landed work. The `--into` target, trunk bookmarks, and
+bookmarks pointing anywhere else, such as one associated with trunk through `jw repair`,
+are kept with a warning. Merging the current workspace moves the shell to the default
+workspace.
+
+Deleting the directory loses files JJ does not track. Ignored files, such as
+dependencies and build output, are treated as regenerable and deleted with it; pass
+`--keep-dir` when an ignored file holds data worth keeping. Files JJ leaves untracked
+although they are not ignored, such as local secrets excluded by `snapshot.auto-track`
+or files too large to snapshot, are different: before changing anything, `jw merge`
+refuses if any of them has no identical copy at the same path in the default workspace,
+and lists them. Copies cloned from the default workspace, as `jw add --cow-all` creates,
+count as identical. Pass `--keep-dir` to land and forget the workspace while keeping
+its directory, or delete or move the listed files and rerun.
+
+`jw merge` refuses the default workspace, conflicted or divergent working copies, merge
+commits, conflicted revisions, and directories holding unpreserved untracked files that
+are not ignored.
+Removal is planned before any rewrite, so these refusals change nothing. If landing leaves conflicts, or the push fails, the workspace
+is kept; resolve the problem and rerun `jw merge`. Work already landed is not landed
+twice. A conflicted landing names the `jj op restore` operation that undoes it.
 
 ## Removing workspaces
 
