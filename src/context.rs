@@ -329,6 +329,7 @@ fn probe_jj(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> JjProbe {
             Vec::new()
         }
     };
+    let roots = WorkspaceRoots::load(path);
     let current_names = names
         .iter()
         .filter_map(|(name, current)| (*current).then_some(name.clone()))
@@ -336,14 +337,15 @@ fn probe_jj(path: &Path, diagnostics: &mut Vec<ContextDiagnostic>) -> JjProbe {
     let workspace_name = match current_names.as_slice() {
         [name] => Some(name.clone()),
         _ => current_names.into_iter().find(|name| {
-            workspace_root_for(path, name)
+            roots
+                .root(name)
                 .ok()
                 .map(canonical_or_path)
                 .is_some_and(|root| root == workspace_root)
         }),
     };
     let (primary_checkout, primary_workspace) =
-        find_primary_workspace(path, &names, repository_path.as_deref(), diagnostics);
+        find_primary_workspace(&roots, &names, repository_path.as_deref(), diagnostics);
     let (git_backend_dir, git_backend_common_dir) = jj_git_backend(&workspace_root, diagnostics);
 
     JjProbe {
@@ -438,13 +440,20 @@ fn discover_primary_from_git(
 }
 
 fn find_primary_workspace(
-    path: &Path,
+    roots: &WorkspaceRoots,
     names: &[(String, bool)],
     expected_repository_path: Option<&Path>,
     diagnostics: &mut Vec<ContextDiagnostic>,
 ) -> (Option<PathBuf>, Option<String>) {
-    for (name, _) in names {
-        let Ok(root) = workspace_root_for(path, name) else {
+    // The primary is almost always `default`. Without the batched root listing
+    // (JJ before `WorkspaceRef.root()`), each candidate costs a JJ process, so try
+    // it first instead of walking every workspace alphabetically.
+    let candidates = names
+        .iter()
+        .filter(|(name, _)| name == "default")
+        .chain(names.iter().filter(|(name, _)| name != "default"));
+    for (name, _) in candidates {
+        let Ok(root) = roots.root(name) else {
             continue;
         };
         let root = canonical_or_path(root);
@@ -556,6 +565,43 @@ fn workspace_names(path: &Path) -> Result<Vec<(String, bool)>, String> {
             Ok((name, current))
         })
         .collect()
+}
+
+/// Workspace roots read with one JJ process when the template supports it.
+///
+/// JJ releases without `WorkspaceRef.root()` reject the template; those fall back
+/// to one `jj workspace root --name` query per workspace that is actually needed.
+struct WorkspaceRoots<'a> {
+    path: &'a Path,
+    listed: Option<crate::jj::WorkspaceRoots>,
+}
+
+impl<'a> WorkspaceRoots<'a> {
+    fn load(path: &'a Path) -> Self {
+        let listed = run_jj(
+            path,
+            [
+                "--ignore-working-copy",
+                "workspace",
+                "list",
+                "-T",
+                crate::jj::WORKSPACE_ROOTS_TEMPLATE,
+            ],
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|stdout| crate::jj::parse_workspace_roots(&stdout));
+        Self { path, listed }
+    }
+
+    fn root(&self, name: &str) -> Result<PathBuf, String> {
+        match self.listed.as_ref().and_then(|listed| listed.get(name)) {
+            Some(Some(root)) => Ok(root.clone()),
+            Some(None) => Err(format!("JJ workspace {name} has no readable root")),
+            None => workspace_root_for(self.path, name),
+        }
+    }
 }
 
 fn workspace_root_for(path: &Path, name: &str) -> Result<PathBuf, String> {

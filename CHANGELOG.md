@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Read every workspace root with one `jj workspace list` process on JJ releases
+  whose templates expose `WorkspaceRef.root()`, instead of one `jj workspace root`
+  process per workspace. With ~180 workspaces this takes `jw add` and `jw remove`
+  from about 13 seconds to about one. Older JJ keeps per-workspace queries, trying
+  `default` first when locating the primary workspace.
 - Prefer native `jj workspace remove` when the executable advertises it (JJ 0.46+),
   snapshotting dirty target changes before deletion while retaining ownership,
   manager review gates, unrelated Git registrations, and older-JJ fallback.

@@ -13,6 +13,10 @@ pub const MINIMUM_SUPPORTED_JJ_VERSION: JjVersion = JjVersion::new(0, 39, 0);
 // Keep every workspace field JSON encoded. Tabs and newlines inside names and descriptions cannot
 // corrupt record boundaries. The conflict guards keep diff statistics compatible with JJ 0.39.
 const WORKSPACE_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
+/// `WorkspaceRef.root()` is newer than the minimum supported JJ; callers fall back
+/// to per-workspace `jj workspace root --name` queries when the template is rejected.
+pub(crate) const WORKSPACE_ROOTS_TEMPLATE: &str =
+    r#"json(name) ++ "\t" ++ json(self.root()) ++ "\n""#;
 const CURRENT_WORKSPACE_NAMES_TEMPLATE: &str =
     r#"if(target.current_working_copy(), json(name) ++ "\n", "")"#;
 const WORKSPACE_FACTS_TEMPLATE: &str = r#"json(name) ++ "\t" ++ json(target.change_id()) ++ "\t" ++ json(target.commit_id()) ++ "\t" ++ json(target.description().first_line()) ++ "\t" ++ json(target.current_working_copy()) ++ "\t" ++ json(target.empty()) ++ "\t" ++ json(target.conflict()) ++ "\t" ++ json(target.divergent()) ++ "\t" ++ json(target.diff().files().len()) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_added())) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_removed())) ++ "\t" ++ json(target.conflicted_files().len()) ++ "\n""#;
@@ -454,6 +458,24 @@ impl JjClient {
         parse_json_string_lines(output.stdout()?, "workspace name")
     }
 
+    /// List every workspace root with one JJ process, without snapshotting.
+    ///
+    /// Returns `None` when this JJ cannot render workspace roots in templates, so
+    /// callers can fall back to one `jj workspace root --name` query per workspace.
+    pub fn workspace_roots(&self) -> Result<Option<WorkspaceRoots>> {
+        let output = self.run_unchecked([
+            "--ignore-working-copy",
+            "workspace",
+            "list",
+            "-T",
+            WORKSPACE_ROOTS_TEMPLATE,
+        ])?;
+        if !output.success() {
+            return Ok(None);
+        }
+        Ok(parse_workspace_roots(output.stdout()?))
+    }
+
     /// List targets that JJ marks as the current working copy without snapshotting it.
     pub fn current_workspace_target_names(&self) -> Result<Vec<String>> {
         let output = self.run([
@@ -857,6 +879,27 @@ fn parse_workspace_target_facts(output: &str) -> Result<BTreeMap<String, Workspa
     Ok(facts)
 }
 
+/// Workspace name to recorded root; `None` when JJ could not render that root.
+pub(crate) type WorkspaceRoots = BTreeMap<String, Option<PathBuf>>;
+
+/// Parse `json(name) TAB json(root)` records. Any unparseable name makes the whole
+/// listing unusable so callers fall back to per-workspace queries.
+pub(crate) fn parse_workspace_roots(output: &str) -> Option<WorkspaceRoots> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (name, root) = line.split_once('\t')?;
+            let name = serde_json::from_str::<String>(name).ok()?;
+            let root = serde_json::from_str::<String>(root)
+                .ok()
+                .filter(|root| !root.is_empty())
+                .map(PathBuf::from);
+            Some((name, root))
+        })
+        .collect()
+}
+
 fn parse_json_string_lines(output: &str, field: &str) -> Result<Vec<String>> {
     output
         .lines()
@@ -891,6 +934,23 @@ fn parse_count(value: &str, record_index: usize, field: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_batched_workspace_roots() {
+        let roots = parse_workspace_roots(
+            "\"default\"\t\"/repo\"\n\"tab\\tname\"\t\"/repo.tab\"\n\"lost\"\t\"\"\n",
+        )
+        .expect("listing parses");
+        assert_eq!(roots["default"], Some(PathBuf::from("/repo")));
+        assert_eq!(roots["tab\tname"], Some(PathBuf::from("/repo.tab")));
+        assert_eq!(roots["lost"], None);
+    }
+
+    #[test]
+    fn unparseable_workspace_root_listing_falls_back() {
+        assert!(parse_workspace_roots("default /repo\n").is_none());
+        assert!(parse_workspace_roots("not-json\t\"/repo\"\n").is_none());
+    }
 
     #[test]
     fn parses_jj_semantic_versions() {

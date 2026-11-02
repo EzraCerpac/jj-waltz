@@ -71,12 +71,13 @@ impl WorkspaceInventory {
     pub fn load() -> Result<Self> {
         let current_root = canonicalize_dir(&workspace_root_current()?)?;
         let names = workspace_names()?;
+        let listed_roots = JjClient::current()?.workspace_roots()?;
         let mut entries = names
             .iter()
             .map(|name| {
                 Ok(WorkspaceEntry {
                     name: name.clone(),
-                    root: workspace_root_by_name_direct(name)?,
+                    root: workspace_root_by_name(listed_roots.as_ref(), name)?,
                     is_current: false,
                 })
             })
@@ -243,6 +244,19 @@ pub struct RemovalResult {
 
 pub fn current_workspace_name() -> Result<String> {
     Ok(WorkspaceInventory::load()?.current)
+}
+
+/// Resolve a root from the batched listing. JJ renders the same recorded path that
+/// `jj workspace root --name` prints, including for a deleted checkout, so the
+/// listing is used verbatim. Names it could not render use the per-workspace query.
+fn workspace_root_by_name(
+    listed: Option<&crate::jj::WorkspaceRoots>,
+    name: &str,
+) -> Result<Option<PathBuf>> {
+    match listed.and_then(|listed| listed.get(name)) {
+        Some(Some(root)) => Ok(Some(root.clone())),
+        _ => workspace_root_by_name_direct(name),
+    }
 }
 
 fn workspace_root_by_name_direct(name: &str) -> Result<Option<PathBuf>> {
