@@ -46,7 +46,8 @@ to a warning rather than make local workspace management fail.
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
 - optional workspace links via `.jwlinks.toml` for sharing large ignored directories
-- optional copy-on-write workspace creation (`--cow`) on APFS, Btrfs, and XFS
+- optional copy-on-write workspace creation (`--cow`, or `--cow-all` to include
+  ignored files such as `node_modules`) on APFS, Btrfs, and XFS
 - shell integration for `fish`, `zsh`, `bash`, `elvish`, and `powershell`
 - generated shell completions from the CLI definition
 
@@ -135,27 +136,68 @@ is `SKIP`.
 `jw add --cow` and `jw switch --cow` fill a new workspace by cloning the current
 workspace's tracked files instead of letting JJ write each one. Clones share
 storage until either copy changes: APFS `clonefile(2)` on macOS and reflinks on
-Linux filesystems such as Btrfs and XFS. Creation is typically several times
-faster, and a new workspace uses almost no extra disk space. Enable it for every
-new workspace in config, and use `--no-cow` to opt out for one command:
+Linux filesystems such as Btrfs and XFS. Directories whose entries are all
+cloned are cloned whole, which macOS does in one system call, so creation takes
+about a second even for large checkouts, and a new workspace uses almost no extra
+disk space.
+
+`--cow-all` clones everything in the current workspace instead, including
+ignored and untracked files such as `node_modules`, build output, and `.env`, so
+a new workspace is ready to run without reinstalling dependencies. Enable either
+scope for every new workspace in config, and use `--no-cow` to opt out for one
+command:
 
 ```toml
 [workspace]
-copy_on_write = true
+copy_on_write = "tracked"  # or "all"; `true` means "tracked"
 ```
 
-The result matches an ordinary JJ checkout of the creation base, including the
-current workspace’s sparse patterns. Only files JJ tracks are cloned, so
-ignored and untracked files such as `.env` or `node_modules` never reach the new
-workspace; use [workspace links](#workspace-links) to share those. JJ adopts the
-clone with the current workspace's working-copy state, then `jw` restores `@` from
-its parent, so uncommitted edits in the current workspace never leak into the new
-one.
+Tracked files match an ordinary JJ checkout of the creation base, including the
+current workspace’s sparse patterns. With `--cow`, ignored and untracked files
+such as `.env` or `node_modules` never reach the new workspace; use workspace
+links or `--cow-all` to share those. JJ adopts the clone with the current
+workspace's working-copy state, then `jw` restores `@` from its parent, so
+uncommitted edits to tracked files in the current workspace never leak into the
+new one.
 
 When the filesystem cannot clone, `jw` warns and uses ordinary JJ workspace
 creation. With Watchman configured, or if JJ rejects the copied working-copy
-state, `jw` also recreates through the ordinary path. Every fallback preserves
-the current workspace’s sparse patterns.
+state, `jw` also recreates through the ordinary path without a warning. Every
+fallback preserves the current workspace’s sparse patterns, and every fallback is
+an ordinary checkout: with `--cow-all`, ignored and untracked files are then not
+carried over.
+
+### Links or `--cow-all`?
+
+[Workspace links](#workspace-links) and `--cow-all` both bring files JJ does not
+track into a new workspace, with opposite sharing:
+
+- A link shares one mutable target across workspaces. A write through any
+  workspace is visible in all of them, and there is one copy on disk. Use links
+  for large data or caches every workspace should see the same way.
+- `--cow-all` gives each workspace an independently writable copy. Writes stay in
+  that workspace, and storage is shared only until a block changes. Use it for
+  dependencies and build output that diverge per branch, such as `node_modules`.
+
+They combine: with `--cow-all`, a link source is not cloned when the link will
+supply it, that is when its target already exists outside the new workspace. A
+source whose target lies inside the new workspace, such as a private override
+with `target` equal to `source`, is cloned like any other path. A source whose
+optional target is missing is not cloned either, because a private copy there
+would be a link conflict; `jw` warns that it skipped it.
+
+Know what `--cow-all` copies:
+
+- Secrets such as `.env` and `.dev.vars` are copied into every new workspace as
+  independent files. Rotating a secret in one workspace does not update the
+  others; make such files link sources if they should have one source of truth.
+- Symlinks are copied as symlinks with their targets unchanged. A relative
+  symlink resolves from the new workspace; an absolute one keeps pointing at the
+  same place, which may be inside the current workspace.
+- Untracked files that are not ignored are cloned, then JJ's snapshot in the new
+  workspace tracks them and `jw` restoring `@` removes them again, like any other
+  uncommitted change. Only files JJ does not snapshot, because they are ignored
+  or excluded from `snapshot.auto-track`, stay in the new workspace.
 
 ## Shell setup
 
