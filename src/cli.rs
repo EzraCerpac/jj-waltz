@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as FmtWrite;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Parser)]
@@ -69,6 +69,9 @@ enum Commands {
         about = "Reconcile an external workspace after its owner removed checkout and Git registration"
     )]
     ReconcileExternal { name: String },
+    /// Internal: delete a directory that `jw remove` renamed aside. Runs detached.
+    #[command(name = workspace::PURGE_RETIRED_COMMAND, hide = true)]
+    PurgeRetiredDirectory { path: PathBuf },
     #[command(about = "Print the current workspace root")]
     Root,
     #[command(about = "Print the current workspace name")]
@@ -425,6 +428,7 @@ pub fn run() -> Result<()> {
             println!("Reconciled external workspace: {name}; commits and bookmarks retained");
             Ok(())
         }
+        Commands::PurgeRetiredDirectory { path } => workspace::purge_retired_directory(&path),
         Commands::Root => {
             workspace::workspace_root_current().and_then(|root| print_line(root.display()))
         }
