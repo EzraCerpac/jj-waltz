@@ -45,11 +45,15 @@ offline.
   any rewrite it decides which associated bookmarks point into the landed stack (only
   those are deleted; trunk and the `--into` target never are) and, unless the directory
   is kept, refuses when `unpreserved` finds untracked files only that checkout has.
-- `unpreserved` decides which of the paths JJ reports as untracked but not ignored
-  (the `jj` adapter reads them from `jj status`) a directory deletion would lose: those
+- `unpreserved` walks a checkout's untracked entries (everything not in the snapshot's
+  tracked file list) and reports those a directory deletion would lose: not trash, and
   with no identical copy (same size and modification time, else same bytes) at the same
-  path in a reference checkout. Ignored files are regenerable and never checked. A
-  directory JJ collapses into one entry is walked whole; symlinks are skipped.
+  path in a reference checkout. Trash directories are never entered, a directory is
+  decided whole by the rule that decides it, and symlinks are skipped.
+- `trash` classifies untracked paths with one batched `git check-ignore --verbose` per
+  walk level, against the repository's Git directory with the checkout as work tree.
+  A path is trash only when the deciding pattern sits in a `# jw:trash` section of its
+  ignore file; unmarked rules, negations, and unignored paths are precious.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
 - `cow` owns copy-on-write file cloning and filesystem capability probing. The

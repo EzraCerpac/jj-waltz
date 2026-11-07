@@ -1,62 +1,161 @@
 //! Find untracked checkout files that deleting a workspace directory would lose.
 //!
-//! JJ preserves tracked files in the working-copy commit. Ignored files are treated as
-//! regenerable, like dependencies and build output, and are deleted with the workspace.
-//! What remains are files JJ leaves untracked although they are not ignored: those
-//! excluded by `snapshot.auto-track`, such as local secrets, and files JJ refused to
-//! snapshot. One with an identical copy at the same path in a reference checkout is not
-//! lost either, as copy-on-write clones of the default workspace show.
+//! JJ preserves tracked files in the working-copy commit. An untracked file is safe to
+//! delete only when a trash section of an ignore file covers it (see [`crate::trash`]),
+//! or when a reference checkout has an identical copy at the same path, as copy-on-write
+//! clones of the default workspace do. Every other untracked file is unpreserved:
+//! ignored by an unmarked rule, such as a local secret, excluded by
+//! `snapshot.auto-track`, or refused by JJ's snapshot.
 
-use crate::jj::UntrackedPath;
+use crate::trash::Verdict;
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
-/// Return the regular files among `candidates` under `root` that have no identical copy
-/// at the same relative path under `reference`, sorted.
+/// Untracked top-level entry, file or directory, holding files deletion would lose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unpreserved {
+    /// Relative to the workspace root; a directory when its rule covers it whole.
+    pub path: PathBuf,
+    pub directory: bool,
+    /// Why no trash section covers the entry.
+    pub verdict: Verdict,
+    /// Files under `path` with no identical reference copy, sorted.
+    pub files: Vec<PathBuf>,
+}
+
+/// Find untracked files under `root` that no trash rule covers and that have no
+/// identical copy at the same relative path under `reference`, grouped by the entry
+/// whose rule decides them, sorted by path.
 ///
-/// A directory candidate is walked whole. JJ reports such a directory as one entry, so
-/// ignored files inside it cannot be told apart and are checked too. Symlinks are skipped:
-/// deleting one loses no data, and workspace links are symlinks to shared targets.
-/// Identity is the same size plus the same modification time, which clones preserve;
-/// contents are only read when sizes match but times differ.
+/// `tracked` lists the tracked files after a snapshot. Only untracked entries are
+/// passed to `classify`, a batch at a time: those beside tracked files first, then the
+/// contents of untracked directories that are not ignored, so a workspace typically
+/// needs one batch. Trash directories are never entered. Symlinks are skipped: deleting
+/// one loses no data, and workspace links are symlinks to shared targets. The workspace's
+/// `.jj` and colocated `.git` are never candidates.
 pub(crate) fn unpreserved_files(
     root: &Path,
-    candidates: &[UntrackedPath],
+    tracked: &[PathBuf],
+    reference: &Path,
+    mut classify: impl FnMut(&[PathBuf]) -> Result<Vec<Verdict>>,
+) -> Result<Vec<Unpreserved>> {
+    let tracked_files = tracked.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+    let tracked_dirs = tracked
+        .iter()
+        .flat_map(|file| file.ancestors().skip(1))
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect::<HashSet<_>>();
+    let mut found = Vec::new();
+    // Directories whose children are listed rather than classified as a whole.
+    let mut open = vec![PathBuf::new()];
+    while !open.is_empty() {
+        let mut candidates = Vec::new();
+        while let Some(relative) = open.pop() {
+            let Some(entries) = read_dir(root, &relative)? else {
+                continue;
+            };
+            for (child, file_type) in entries {
+                if relative.as_os_str().is_empty()
+                    && [".jj", ".git"].map(OsStr::new).contains(&child.as_os_str())
+                {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    if tracked_dirs.contains(child.as_path()) {
+                        open.push(child);
+                    } else {
+                        candidates.push((child, true));
+                    }
+                } else if file_type.is_file() && !tracked_files.contains(child.as_path()) {
+                    candidates.push((child, false));
+                }
+            }
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        let paths = candidates
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        let verdicts = classify(&paths)?;
+        anyhow::ensure!(
+            verdicts.len() == paths.len(),
+            "ignore classification returned {} verdicts for {} paths",
+            verdicts.len(),
+            paths.len()
+        );
+        for ((path, directory), verdict) in candidates.into_iter().zip(verdicts) {
+            match verdict {
+                Verdict::Trash => {}
+                // Its contents may be decided by other rules.
+                Verdict::NotIgnored if directory => open.push(path),
+                verdict => {
+                    let files = if directory {
+                        unpreserved_in_directory(root, &path, reference)?
+                    } else {
+                        unpreserved_file(root, &path, reference)?
+                            .into_iter()
+                            .collect()
+                    };
+                    if !files.is_empty() {
+                        found.push(Unpreserved {
+                            path,
+                            directory,
+                            verdict,
+                            files,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    found.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(found)
+}
+
+/// List a directory's entries as root-relative paths with their non-followed types.
+/// `None` when it was removed since the snapshot: nothing is left to lose.
+fn read_dir(root: &Path, relative: &Path) -> Result<Option<Vec<(PathBuf, fs::FileType)>>> {
+    let directory = root.join(relative);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", directory.display()));
+        }
+    };
+    let mut listed = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
+        let child = relative.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", root.join(&child).display()))?;
+        listed.push((child, file_type));
+    }
+    Ok(Some(listed))
+}
+
+/// Every regular file under an untracked directory that lacks an identical reference copy.
+/// The rule deciding the directory decides everything inside it, so nothing is classified.
+fn unpreserved_in_directory(
+    root: &Path,
+    relative: &Path,
     reference: &Path,
 ) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
-    let mut pending = Vec::new();
-    for candidate in candidates {
-        if candidate.directory {
-            pending.push(candidate.path.clone());
-        } else {
-            check_file(root, &candidate.path, reference, &mut found)?;
-        }
-    }
-    while let Some(relative) = pending.pop() {
-        let directory = root.join(&relative);
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            // Removed since the snapshot: nothing left to lose.
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to read {}", directory.display()));
-            }
-        };
-        for entry in entries {
-            let entry = entry.with_context(|| format!("failed to read {}", directory.display()))?;
-            let child = relative.join(entry.file_name());
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("failed to inspect {}", root.join(&child).display()))?;
+    let mut pending = vec![relative.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for (child, file_type) in read_dir(root, &directory)?.unwrap_or_default() {
             if file_type.is_dir() {
                 pending.push(child);
             } else if file_type.is_file() {
-                check_file(root, &child, reference, &mut found)?;
+                found.extend(unpreserved_file(root, &child, reference)?);
             }
         }
     }
@@ -64,25 +163,18 @@ pub(crate) fn unpreserved_files(
     Ok(found)
 }
 
-fn check_file(
-    root: &Path,
-    relative: &Path,
-    reference: &Path,
-    found: &mut Vec<PathBuf>,
-) -> Result<()> {
+/// The file itself when it is still a regular file without an identical reference copy.
+fn unpreserved_file(root: &Path, relative: &Path, reference: &Path) -> Result<Option<PathBuf>> {
     let path = root.join(relative);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
         }
     }
-    if !has_identical_copy(&path, &reference.join(relative))? {
-        found.push(relative.to_path_buf());
-    }
-    Ok(())
+    Ok((!has_identical_copy(&path, &reference.join(relative))?).then(|| relative.to_path_buf()))
 }
 
 fn has_identical_copy(path: &Path, reference: &Path) -> Result<bool> {
@@ -142,29 +234,25 @@ fn read_full(reader: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usize
     Ok(filled)
 }
 
-/// Summarize files for an error message: one line per top-level entry, collapsing
-/// directories into a file count, capped at `limit` lines.
-pub(crate) fn summarize(files: &[PathBuf], limit: usize) -> String {
-    let mut groups: BTreeMap<PathBuf, Vec<&PathBuf>> = BTreeMap::new();
-    for file in files {
-        let top = file
-            .components()
-            .next()
-            .map_or_else(PathBuf::new, |component| {
-                PathBuf::from(component.as_os_str())
-            });
-        groups.entry(top).or_default().push(file);
-    }
-    let mut lines = groups
+/// Summarize unpreserved entries for an error message, one line each with the rule that
+/// keeps it from being trash, capped at `limit` lines.
+pub(crate) fn summarize(entries: &[Unpreserved], limit: usize) -> String {
+    let mut lines = entries
         .iter()
         .take(limit)
-        .map(|(top, members)| match members.as_slice() {
-            [only] => format!("  {}", only.display()),
-            members => format!("  {}/ ({} files)", top.display(), members.len()),
+        .map(|entry| {
+            let name = if entry.directory {
+                let count = entry.files.len();
+                let noun = if count == 1 { "file" } else { "files" };
+                format!("{}/ ({count} {noun})", entry.path.display())
+            } else {
+                entry.path.display().to_string()
+            };
+            format!("  {name}  [{}]", entry.verdict)
         })
         .collect::<Vec<_>>();
-    if groups.len() > limit {
-        lines.push(format!("  … and {} more", groups.len() - limit));
+    if entries.len() > limit {
+        lines.push(format!("  … and {} more", entries.len() - limit));
     }
     lines.join("\n")
 }
@@ -172,29 +260,47 @@ pub(crate) fn summarize(files: &[PathBuf], limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trash::IgnoreRule;
 
     fn write(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
     }
 
-    fn file(path: &str) -> UntrackedPath {
-        UntrackedPath {
-            path: PathBuf::from(path),
-            directory: false,
-        }
+    fn rule(pattern: &str) -> Verdict {
+        Verdict::Ignored(IgnoreRule {
+            source: PathBuf::from(".gitignore"),
+            line: 1,
+            pattern: pattern.to_owned(),
+        })
+    }
+
+    /// Classify by name the way the ignore rules of a typical repository would.
+    fn fake_rules(paths: &[PathBuf]) -> Result<Vec<Verdict>> {
+        Ok(paths
+            .iter()
+            .map(|path| match path.file_name().unwrap().to_str().unwrap() {
+                "target" | "debug.log" => Verdict::Trash,
+                ".env.local" | "cache.local" | "copied.local" | "shared.local" => rule(".env*"),
+                ".vscode" => rule(".vscode/"),
+                _ => Verdict::NotIgnored,
+            })
+            .collect())
     }
 
     #[test]
-    fn reports_candidates_without_an_identical_reference_copy() {
+    fn reports_untracked_files_outside_trash_without_an_identical_reference_copy() {
         let temp = tempfile::tempdir().unwrap();
         let (root, reference) = (temp.path().join("work"), temp.path().join("default"));
-        write(&root.join(".env.local"), "unique secret");
+        write(&root.join("src/main.rs"), "tracked");
+        write(&root.join("src/.env.local"), "unique secret");
         write(&root.join("shared.local"), "same");
         write(&reference.join("shared.local"), "same");
         write(&root.join("notes/a.md"), "only here");
         write(&root.join("notes/deep/b.md"), "same");
         write(&reference.join("notes/deep/b.md"), "same");
+        write(&root.join(".vscode/settings.json"), "mine");
+        write(&root.join(".vscode/launch.json"), "mine too");
         // Same size, different times: contents decide.
         write(&root.join("cache.local"), "changed");
         write(&reference.join("cache.local"), "CHANGED");
@@ -208,36 +314,65 @@ mod tests {
                 .set_modified(std::time::SystemTime::UNIX_EPOCH)
                 .unwrap();
         }
-        // Not a candidate: ignored or tracked files are never checked.
+        // Trash, and JJ's own state, are never reported or entered.
         write(&root.join("target/debug/app"), "built here");
+        write(&root.join("src/debug.log"), "trace");
+        write(&root.join(".jj/working_copy/state"), "jj");
         #[cfg(unix)]
         std::os::unix::fs::symlink("/nonexistent/shared", root.join("notes/linked")).unwrap();
-        let candidates = [
-            file(".env.local"),
-            file("shared.local"),
-            file("cache.local"),
-            file("copied.local"),
-            file("gone.local"),
-            UntrackedPath {
-                path: PathBuf::from("notes"),
-                directory: true,
+
+        let mut batches = Vec::new();
+        let found = unpreserved_files(
+            &root,
+            &[PathBuf::from("src/main.rs")],
+            &reference,
+            |paths| {
+                batches.push(paths.len());
+                fake_rules(paths)
             },
-        ];
+        )
+        .unwrap();
 
-        let found = unpreserved_files(&root, &candidates, &reference).unwrap();
-
+        let summary = found
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.to_str().unwrap(),
+                    entry.files.len(),
+                    entry.verdict.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            found,
-            [".env.local", "cache.local", "notes/a.md"].map(PathBuf::from)
+            summary,
+            [
+                (".vscode", 2, rule(".vscode/")),
+                ("cache.local", 1, rule(".env*")),
+                ("notes/a.md", 1, Verdict::NotIgnored),
+                ("src/.env.local", 1, rule(".env*")),
+            ]
         );
+        // One batch beside tracked files, then one per level of untracked, unignored
+        // directories: `notes`, then `notes/deep`.
+        assert_eq!(batches.len(), 3);
     }
 
     #[test]
-    fn summarizes_by_top_level_entry_with_a_cap() {
-        let files = [".env", "target/a", "target/b", "z/one", "zz"].map(PathBuf::from);
+    fn summarizes_entries_with_their_rule_and_a_cap() {
+        let entry = |path: &str, directory, files: &[&str]| Unpreserved {
+            path: PathBuf::from(path),
+            directory,
+            verdict: rule(".env*"),
+            files: files.iter().map(PathBuf::from).collect(),
+        };
+        let entries = [
+            entry(".env", false, &[".env"]),
+            entry(".vscode", true, &[".vscode/a", ".vscode/b"]),
+            entry("zz", false, &["zz"]),
+        ];
         assert_eq!(
-            summarize(&files, 3),
-            "  .env\n  target/ (2 files)\n  z/one\n  … and 1 more"
+            summarize(&entries, 2),
+            "  .env  [.gitignore:1: .env*]\n  .vscode/ (2 files)  [.gitignore:1: .env*]\n  … and 1 more"
         );
     }
 }

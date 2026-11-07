@@ -63,6 +63,13 @@ by itself a claim that a command exposing that concept already exists.
   possibly stale rows must say so.
 - **Creation workflow** — ordered policy, workspace creation, bookmark creation,
   link application, rollback, and switch-state recording.
+- **Trash section** — the lines after a `# jw:trash` comment in any ignore file Git
+  and JJ read, up to the next blank line or `# jw:` line. Untracked files whose
+  deciding ignore pattern sits in one are **trash**: regenerable, and deleted with a
+  merged workspace's directory.
+- **Precious file** — any other untracked file: ignored by a pattern outside a trash
+  section, or not ignored at all. Merge never deletes one that the default workspace
+  lacks an identical copy of.
 - **Removal plan** — workspace, directory action, and associated bookmarks known
   before destructive work begins.
 - **Associated bookmark** — a local bookmark recorded by `jw` for one workspace.

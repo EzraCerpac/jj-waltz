@@ -1,5 +1,6 @@
 use crate::config::Config;
-use crate::jj::{JjClient, UntrackedPath};
+use crate::jj::JjClient;
+use crate::trash::{self, Classifier};
 use crate::unpreserved;
 use crate::workspace::{self, RemovalResult, WorkspaceInventory};
 use anyhow::{Context, Result, bail};
@@ -85,11 +86,11 @@ pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
 
     // Each rewrite runs in the workspace whose working copy it moves, so JJ keeps it current.
     let source = JjClient::new(&source_root);
-    let untracked = source
-        .snapshot_untracked_paths()
+    let tracked = source
+        .snapshot_tracked_files()
         .with_context(|| format!("failed to snapshot workspace {name}"))?;
     if !request.keep_dir {
-        refuse_unpreserved_files(&untracked, &name, &source_root, &default_root)?;
+        refuse_unpreserved_files(&source, &tracked, &name, &source_root, &default_root)?;
     }
 
     // Merging the current workspace moves the caller to the default workspace, which also
@@ -301,24 +302,33 @@ pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
 
 /// Refuse to delete a workspace directory that holds untracked files only it has.
 ///
-/// Tracked files are preserved in the working-copy commit after the snapshot, and ignored
-/// files are treated as regenerable. Files JJ leaves untracked although they are not
-/// ignored survive deletion only if the default workspace has an identical copy.
+/// Tracked files are preserved in the working-copy commit after the snapshot. An
+/// untracked file survives deletion only when a `# jw:trash` section of an ignore file
+/// marks it regenerable, or when the default workspace has an identical copy.
 fn refuse_unpreserved_files(
-    untracked: &[UntrackedPath],
+    source: &JjClient,
+    tracked: &[PathBuf],
     name: &str,
     source_root: &Path,
     default_root: &Path,
 ) -> Result<()> {
-    let files = unpreserved::unpreserved_files(source_root, untracked, default_root)
-        .with_context(|| format!("failed to check workspace {name} for untracked files"))?;
-    if files.is_empty() {
+    let check = || {
+        let mut classifier = Classifier::new(source.git_root()?, source_root.to_path_buf());
+        unpreserved::unpreserved_files(source_root, tracked, default_root, |paths| {
+            classifier.classify(paths)
+        })
+    };
+    let entries = check().with_context(|| {
+        format!("failed to check workspace {name} for untracked files; pass --keep-dir to keep its directory")
+    })?;
+    if entries.is_empty() {
         return Ok(());
     }
+    let files = entries.iter().map(|entry| entry.files.len()).sum::<usize>();
     bail!(
-        "workspace {name} has {} untracked file(s) that are not ignored and that the default workspace has no identical copy of; removing the workspace would delete them:\n{}\nPass --keep-dir to keep the directory, or delete or move these files and rerun `jw merge`",
-        files.len(),
-        unpreserved::summarize(&files, UNPRESERVED_LIST_LIMIT)
+        "workspace {name} has {files} untracked file(s) that no `{marker}` ignore rule covers and that the default workspace has no identical copy of; removing the workspace would delete them:\n{}\nIf they are regenerable, move the patterns shown into a `{marker}` section of their ignore file (it ends at the next blank line). Otherwise pass --keep-dir to keep the directory, or delete or move these files and rerun `jw merge`",
+        unpreserved::summarize(&entries, UNPRESERVED_LIST_LIMIT),
+        marker = trash::TRASH_MARKER,
     )
 }
 

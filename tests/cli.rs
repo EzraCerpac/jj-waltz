@@ -1268,8 +1268,9 @@ fn merge_keeps_an_associated_bookmark_that_is_the_target() {
     assert!(!feature.exists());
 }
 
-/// Commit a `.gitignore` and exclude `*.local` from auto-tracking, so the feature
-/// workspace can hold both ignored and untracked-but-not-ignored files.
+/// Commit a `.gitignore` with a trash section and a precious rule after it, and exclude
+/// `*.local` from auto-tracking, so the feature workspace can hold trash, precious
+/// ignored files, and untracked-but-not-ignored files.
 fn untracked_fixture() -> (TestRepo, PathBuf) {
     let (repo, feature) = merge_fixture(None);
     repo.run_jj([
@@ -1280,7 +1281,13 @@ fn untracked_fixture() -> (TestRepo, PathBuf) {
         // `jj config set` parses the value as TOML.
         r#"'all() ~ glob:"**/*.local"'"#,
     ]);
-    commit_file(&repo, &feature, ".gitignore", "*.log\ndist/\n", "ignore");
+    commit_file(
+        &repo,
+        &feature,
+        ".gitignore",
+        "# jw:trash\n*.log\ndist/\n\n.env*\n",
+        "ignore",
+    );
     (repo, feature)
 }
 
@@ -1291,11 +1298,24 @@ fn write_in(root: &Path, relative: &str, contents: &str) {
 }
 
 #[test]
-fn merge_deletes_ignored_files_with_the_workspace() {
+fn merge_deletes_trash_with_the_workspace() {
     skip_without_jj!();
     let (repo, feature) = untracked_fixture();
+    fs::create_dir_all(feature.join("app")).expect("create app directory");
+    commit_file(
+        &repo,
+        &feature,
+        "app/.gitignore",
+        "# jw:trash\nnode_modules/\n",
+        "ignore app",
+    );
     write_in(&feature, "dist/app.js", "built here\n");
     write_in(&feature, "debug.log", "only here\n");
+    write_in(&feature, "app/node_modules/pkg/index.js", "installed\n");
+    // Trash sections count in every ignore file Git and JJ read.
+    let git_dir = PathBuf::from(repo.jj_stdout(&repo.default_root, &["git", "root"]).trim());
+    write_in(&git_dir, "info/exclude", "# jw:trash\ncache/\n");
+    write_in(&feature, "cache/blob", "fetched\n");
 
     repo.cmd()
         .args(["merge", "feature-a", "--into", "main"])
@@ -1304,9 +1324,48 @@ fn merge_deletes_ignored_files_with_the_workspace() {
 
     assert_eq!(
         main_history(&repo),
-        ["ignore", "feature two", "feature one", "trunk", "initial"]
+        [
+            "ignore app",
+            "ignore",
+            "feature two",
+            "feature one",
+            "trunk",
+            "initial"
+        ]
     );
     assert!(!feature.exists());
+}
+
+#[test]
+fn merge_refuses_ignored_files_outside_trash_sections() {
+    skip_without_jj!();
+    let (repo, feature) = untracked_fixture();
+    write_in(&feature, "dist/app.js", "built here\n");
+    write_in(&feature, ".env.local", "SECRET=1\n");
+    // A rule appended later, after the trash section's blank line, stays precious.
+    write_in(&feature, "data/dev.db", "rows\n");
+    let ignore = fs::read_to_string(feature.join(".gitignore")).expect("read .gitignore");
+    fs::write(feature.join(".gitignore"), format!("{ignore}data/\n")).expect("append rule");
+
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "workspace feature-a has 2 untracked file(s)",
+        ))
+        .stderr(predicate::str::contains(
+            ".env.local  [.gitignore:5: .env*]",
+        ))
+        .stderr(predicate::str::contains(
+            "data/ (1 file)  [.gitignore:6: data/]",
+        ))
+        .stderr(predicate::str::contains("dist").not())
+        .stderr(predicate::str::contains("# jw:trash"));
+
+    assert_eq!(main_history(&repo), ["trunk", "initial"]);
+    assert!(feature.join(".env.local").is_file());
+    assert!(repo.workspace_names().contains(&"feature-a".to_owned()));
 }
 
 #[test]

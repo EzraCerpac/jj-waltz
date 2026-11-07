@@ -122,13 +122,14 @@ workspace and deletes its directory.
 
 - It deletes the associated bookmark only when it points into the landed stack; trunk,
   the `--into` target, and bookmarks pointing elsewhere are kept with a warning.
-- Ignored files (dependencies, build output) are deleted with the directory. If the
-  user may want ignored data kept, use `--keep-dir`.
-- It refuses, changing nothing, when the directory holds files JJ leaves untracked
-  although they are not ignored (for example secrets excluded by `snapshot.auto-track`)
-  without an identical copy at the same path in the default workspace. Show the listed
-  files to the user; pass `--keep-dir` only when they want the directory kept, and never
-  delete those files without asking.
+- Only untracked files covered by a `# jw:trash` section of an ignore file are deleted
+  with the directory. A section starts at a `# jw:trash` line and ends at the next blank
+  line or `# jw:` line.
+- It refuses, changing nothing, when the directory holds any other untracked file, ignored
+  or not, without an identical copy at the same path in the default workspace. Show the
+  listed files and rules to the user. Move a pattern into a trash section only when the
+  user confirms its files are regenerable; pass `--keep-dir` only when they want the
+  directory kept, and never delete those files without asking.
 - Conflicts or a failed `--push` keep the workspace; resolve and rerun.
 
 ## Prune

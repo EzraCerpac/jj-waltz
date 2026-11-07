@@ -14,5 +14,6 @@ pub(crate) mod ownership;
 pub(crate) mod paths;
 pub(crate) mod shell;
 pub mod snapshot;
+pub(crate) mod trash;
 pub(crate) mod unpreserved;
 pub(crate) mod workspace;

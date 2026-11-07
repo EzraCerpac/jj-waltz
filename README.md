@@ -300,19 +300,37 @@ bookmarks pointing anywhere else, such as one associated with trunk through `jw 
 are kept with a warning. Merging the current workspace moves the shell to the default
 workspace.
 
-Deleting the directory loses files JJ does not track. Ignored files, such as
-dependencies and build output, are treated as regenerable and deleted with it; pass
-`--keep-dir` when an ignored file holds data worth keeping. Files JJ leaves untracked
-although they are not ignored, such as local secrets excluded by `snapshot.auto-track`
-or files too large to snapshot, are different: before changing anything, `jw merge`
-refuses if any of them has no identical copy at the same path in the default workspace,
-and lists them. Copies cloned from the default workspace, as `jw add --cow-all` creates,
-count as identical. Pass `--keep-dir` to land and forget the workspace while keeping
-its directory, or delete or move the listed files and rerun.
+Deleting the directory loses every file JJ does not track, so `jw merge` only deletes
+the ones you have marked regenerable. Mark them in your ignore files: a `# jw:trash` line
+starts a trash section, which runs until the next blank line or `# jw:` line.
+
+```gitignore
+# jw:trash
+target/
+node_modules/
+*.log
+
+# Everything else stays precious, including rules appended later.
+.env*
+```
+
+Every other untracked file is precious: one ignored by a rule outside a trash section,
+such as a local secret, and one JJ leaves untracked although it is not ignored, such as
+a file `snapshot.auto-track` excludes or one too large to snapshot. Before changing
+anything, `jw merge` refuses if any precious file has no identical copy at the same path
+in the default workspace, and lists each one with the ignore file, line, and pattern that
+decided it. Copies cloned from the default workspace, as `jw add --cow-all` creates,
+count as identical. Move regenerable patterns into a trash section, pass `--keep-dir` to
+land and forget the workspace while keeping its directory, or delete or move the listed
+files and rerun.
+
+Trash sections work in every ignore file Git and JJ read: `.gitignore` in any directory,
+the Git directory's `info/exclude`, and `core.excludesFile`, so personal trash such as
+`.DS_Store` can live in your global ignore file. `jw merge` asks Git which rule decides
+each path (`git check-ignore`), so it needs `git` on `PATH` unless you pass `--keep-dir`.
 
 `jw merge` refuses the default workspace, conflicted or divergent working copies, merge
-commits, conflicted revisions, and directories holding unpreserved untracked files that
-are not ignored.
+commits, conflicted revisions, and directories holding precious untracked files.
 Removal is planned before any rewrite, so these refusals change nothing. If landing leaves conflicts, or the push fails, the workspace
 is kept; resolve the problem and rerun `jw merge`. Work already landed is not landed
 twice. A conflicted landing names the `jj op restore` operation that undoes it.

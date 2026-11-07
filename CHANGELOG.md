@@ -8,12 +8,13 @@
   workspace's when merging the current one) without moving bookmarks; `--into`
   rebases onto a bookmark and advances it. The associated bookmark is deleted only
   when it points into the landed stack; trunk, the `--into` target, and bookmarks
-  pointing elsewhere are kept with a warning. Ignored files are treated as
-  regenerable and deleted with the directory. Before any change, merge refuses when
-  the directory holds files JJ leaves untracked although they are not ignored (such
-  as those `snapshot.auto-track` excludes) with no identical copy in the default
-  workspace, listing them; `--keep-dir` lands and forgets the workspace but keeps the
-  directory. Merging the current workspace moves the shell to the default workspace.
+  pointing elsewhere are kept with a warning. Only untracked files covered by a
+  `# jw:trash` section of an ignore file (which ends at the next blank line or `# jw:`
+  line) are deleted with the directory. Before any change, merge refuses when the
+  directory holds any other untracked file, ignored or not, with no identical copy in
+  the default workspace, listing each with the ignore file, line, and pattern that
+  decided it, as `git check-ignore` reports; `--keep-dir` lands and forgets the
+  workspace but keeps the directory. Merging the current workspace moves the shell to the default workspace.
   Conflicts and push failures keep the workspace; reruns do not land work twice.
 - Read every workspace root with one `jj workspace list` process on JJ releases
   whose templates expose `WorkspaceRef.root()`, instead of one `jj workspace root`
