@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::jj::JjClient;
-use crate::trash::{self, Classifier};
-use crate::unpreserved;
+use crate::trash::{self, Classifier, Verdict};
+use crate::unpreserved::{self, Unpreserved};
 use crate::workspace::{self, RemovalResult, WorkspaceInventory};
 use anyhow::{Context, Result, bail};
 use std::env;
@@ -304,7 +304,8 @@ pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
 ///
 /// Tracked files are preserved in the working-copy commit after the snapshot. An
 /// untracked file survives deletion only when a `# jw:trash` section of an ignore file
-/// marks it regenerable, or when the default workspace has an identical copy.
+/// marks it regenerable, or an ignore file adopted by `# jw:trash-rules` decides it, or
+/// when the default workspace has an identical copy.
 fn refuse_unpreserved_files(
     source: &JjClient,
     tracked: &[PathBuf],
@@ -326,9 +327,47 @@ fn refuse_unpreserved_files(
     }
     let files = entries.iter().map(|entry| entry.files.len()).sum::<usize>();
     bail!(
-        "workspace {name} has {files} untracked file(s) that no `{marker}` ignore rule covers and that the default workspace has no identical copy of; removing the workspace would delete them:\n{}\nIf they are regenerable, move the patterns shown into a `{marker}` section of their ignore file (it ends at the next blank line). Otherwise pass --keep-dir to keep the directory, or delete or move these files and rerun `jw merge`",
+        "workspace {name} has {files} untracked file(s) that no `{marker}` ignore rule covers and that the default workspace has no identical copy of; removing the workspace would delete them:\n{}\nIf they are regenerable, move the patterns shown into a `{marker}` section of their ignore file (it ends at the next blank line).{} Otherwise pass --keep-dir to keep the directory, or delete or move these files and rerun `jw merge`",
         unpreserved::summarize(&entries, UNPRESERVED_LIST_LIMIT),
+        adoption_hint(&entries, tracked),
         marker = trash::TRASH_MARKER,
+    )
+}
+
+/// Suggest adopting the nested ignore files that decided `entries` and that JJ does not
+/// track. A tool may write such a file, and rewrite it, so it cannot keep a marker.
+fn adoption_hint(entries: &[Unpreserved], tracked: &[PathBuf]) -> String {
+    let mut sources = entries
+        .iter()
+        .filter_map(|entry| match &entry.verdict {
+            Verdict::Ignored(rule) => Some(rule.source.as_path()),
+            _ => None,
+        })
+        .filter(|source| {
+            trash::adoptable_directory(source).is_some()
+                && !tracked.iter().any(|file| file == source)
+        })
+        .collect::<Vec<_>>();
+    sources.sort();
+    sources.dedup();
+    if sources.is_empty() {
+        return String::new();
+    }
+    let lines = sources
+        .iter()
+        .map(|source| {
+            // Ignore files use `/` on every platform.
+            let path = source
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("`{} {path}`", trash::ADOPT_MARKER)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        " An untracked ignore file may be written by a tool that would overwrite a marker; if all of its rules are regenerable, add {lines} to the root .gitignore instead."
     )
 }
 

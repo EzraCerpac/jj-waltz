@@ -10,7 +10,9 @@
   when it points into the landed stack; trunk, the `--into` target, and bookmarks
   pointing elsewhere are kept with a warning. Only untracked files covered by a
   `# jw:trash` section of an ignore file (which ends at the next blank line or `# jw:`
-  line) are deleted with the directory. Before any change, merge refuses when the
+  line) are deleted with the directory. A `# jw:trash-rules <path>` line in a
+  `.gitignore` adopts a nested `.gitignore` below it, such as one a tool writes and
+  rewrites, making all of its rules trash. Before any change, merge refuses when the
   directory holds any other untracked file, ignored or not, with no identical copy in
   the default workspace, listing each with the ignore file, line, and pattern that
   decided it, as `git check-ignore` reports; `--keep-dir` lands and forgets the

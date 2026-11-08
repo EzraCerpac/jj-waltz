@@ -53,7 +53,9 @@ offline.
 - `trash` classifies untracked paths with one batched `git check-ignore --verbose` per
   walk level, against the repository's Git directory with the checkout as work tree.
   A path is trash only when the deciding pattern sits in a `# jw:trash` section of its
-  ignore file; unmarked rules, negations, and unignored paths are precious.
+  ignore file, or in a nested `.gitignore` that a `# jw:trash-rules <path>` line in a
+  `.gitignore` above it adopts; unmarked rules, negations, and unignored paths are
+  precious.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
 - `cow` owns copy-on-write file cloning and filesystem capability probing. The

@@ -1369,6 +1369,105 @@ fn merge_refuses_ignored_files_outside_trash_sections() {
 }
 
 #[test]
+fn merge_deletes_files_an_adopted_tool_ignore_file_decides() {
+    skip_without_jj!();
+    let (repo, feature) = untracked_fixture();
+    // A tool directory holding tracked source, whose own `.gitignore` the tool writes:
+    // the deepest ignore file decides, so no rule above it can mark its files as trash.
+    fs::create_dir_all(feature.join("tool")).expect("create tool directory");
+    commit_file(
+        &repo,
+        &feature,
+        "tool/settings.json",
+        "{}\n",
+        "tool settings",
+    );
+    write_in(
+        &feature,
+        "tool/.gitignore",
+        "# written by the tool\n*\n!settings.json\n",
+    );
+    write_in(&feature, "tool/cache/plugin.js", "downloaded\n");
+
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "tool/cache/ (1 file)  [tool/.gitignore:2: *]",
+        ))
+        .stderr(predicate::str::contains(
+            "add `# jw:trash-rules tool/.gitignore` to the root .gitignore",
+        ));
+    assert!(feature.join("tool/cache/plugin.js").is_file());
+
+    // A precious rule in the root file stays precious beside the adoption.
+    let ignore = fs::read_to_string(feature.join(".gitignore")).expect("read .gitignore");
+    fs::write(
+        feature.join(".gitignore"),
+        format!("{ignore}\n# jw:trash-rules tool/.gitignore\n"),
+    )
+    .expect("adopt tool ignore file");
+    write_in(&feature, ".env.local", "SECRET=1\n");
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "workspace feature-a has 1 untracked file(s)",
+        ))
+        .stderr(predicate::str::contains(
+            ".env.local  [.gitignore:5: .env*]",
+        ))
+        .stderr(predicate::str::contains("trash-rules").not());
+
+    fs::remove_file(feature.join(".env.local")).expect("remove secret");
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main"])
+        .assert()
+        .success();
+    assert!(!feature.exists());
+}
+
+#[test]
+fn merge_ignores_trash_rules_lines_that_do_not_sit_above_the_file() {
+    skip_without_jj!();
+    let (repo, feature) = untracked_fixture();
+    fs::create_dir_all(feature.join("tool")).expect("create tool directory");
+    commit_file(
+        &repo,
+        &feature,
+        "tool/settings.json",
+        "{}\n",
+        "tool settings",
+    );
+    // A sibling cannot adopt it, nor can the file adopt itself.
+    fs::create_dir_all(feature.join("other")).expect("create other directory");
+    commit_file(
+        &repo,
+        &feature,
+        "other/.gitignore",
+        "# jw:trash-rules ../tool/.gitignore\n",
+        "sibling",
+    );
+    write_in(
+        &feature,
+        "tool/.gitignore",
+        "# jw:trash-rules .gitignore\n*\n!settings.json\n",
+    );
+    write_in(&feature, "tool/cache/plugin.js", "downloaded\n");
+
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "tool/cache/ (1 file)  [tool/.gitignore:2: *]",
+        ));
+    assert!(feature.join("tool/cache/plugin.js").is_file());
+}
+
+#[test]
 fn merge_refuses_before_any_change_when_untracked_files_would_be_lost() {
     skip_without_jj!();
     let (repo, feature) = untracked_fixture();

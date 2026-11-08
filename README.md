@@ -324,6 +324,20 @@ count as identical. Move regenerable patterns into a trash section, pass `--keep
 land and forget the workspace while keeping its directory, or delete or move the listed
 files and rerun.
 
+Some tools write their own `.gitignore` inside a directory that also holds source you
+track, and rewrite it on every run. inlang's `project.inlang/.gitignore` is `*` with
+exceptions for its settings. You cannot keep a marker in such a file, and no rule above
+it can override it, because Git lets the deepest ignore file decide. Adopt it instead
+from a `.gitignore` in a directory above it, with a path relative to that directory:
+
+```gitignore
+# jw:trash-rules project.inlang/.gitignore
+```
+
+Every ignoring rule in an adopted file is trash; its negations still re-include files,
+which JJ then tracks. Only adopt a file whose rules cover nothing but regenerable files.
+When merge refuses over a rule in an untracked nested `.gitignore`, it suggests the line.
+
 Trash sections work in every ignore file Git and JJ read: `.gitignore` in any directory,
 the Git directory's `info/exclude`, and `core.excludesFile`, so personal trash such as
 `.DS_Store` can live in your global ignore file. `jw merge` asks Git which rule decides

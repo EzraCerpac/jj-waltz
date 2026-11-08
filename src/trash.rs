@@ -8,6 +8,13 @@
 //! so an unmarked pattern, including one a tool appends later, never makes a file
 //! deletable.
 //!
+//! Some tools write their own `.gitignore`, often a bare `*`, and rewrite it on every run,
+//! so it cannot hold a marker. Git lets the deepest ignore file decide, so no rule above
+//! it can override it either. A `# jw:trash-rules <path>` line in a `.gitignore` above
+//! such a file adopts it instead: every ignoring rule in the adopted file is trash. The
+//! path is relative to the directory of the `.gitignore` holding the line, as Git
+//! patterns are.
+//!
 //! `git check-ignore --verbose` names the ignore file and line of the pattern that
 //! decides each path, which is what ties a path to its section. Git and JJ read the same
 //! ignore files: `.gitignore` in any directory, `info/exclude` in the Git directory, and
@@ -24,6 +31,8 @@ use std::process::{Command, Stdio};
 
 /// Starts a trash section in an ignore file.
 pub(crate) const TRASH_MARKER: &str = "# jw:trash";
+/// Followed by a path, adopts the `.gitignore` at that path: all its rules are trash.
+pub(crate) const ADOPT_MARKER: &str = "# jw:trash-rules";
 /// Any line with this prefix ends a section; only [`TRASH_MARKER`] starts a trash one.
 const MARKER_PREFIX: &str = "# jw:";
 
@@ -74,12 +83,21 @@ impl fmt::Display for IgnoreRule {
     }
 }
 
-/// Classifies paths in one workspace, reading each ignore file's sections once.
+/// Classifies paths in one workspace, reading each ignore file once.
 pub(crate) struct Classifier {
     git_dir: PathBuf,
     root: PathBuf,
-    /// Per ignore file, whether each line (zero-based) is inside a trash section.
-    sections: HashMap<PathBuf, Vec<bool>>,
+    /// Parsed ignore files by absolute path.
+    files: HashMap<PathBuf, IgnoreFile>,
+}
+
+/// What an ignore file's `# jw:` lines say.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct IgnoreFile {
+    /// Whether each line (zero-based) is inside a trash section.
+    trash_lines: Vec<bool>,
+    /// The `.gitignore` files it adopts, relative to its own directory.
+    adopted: Vec<PathBuf>,
 }
 
 impl Classifier {
@@ -89,7 +107,7 @@ impl Classifier {
         Self {
             git_dir,
             root,
-            sections: HashMap::new(),
+            files: HashMap::new(),
         }
     }
 
@@ -129,7 +147,7 @@ impl Classifier {
             verdicts[index] = match record.rule {
                 None => Verdict::NotIgnored,
                 Some(rule) if rule.pattern.starts_with('!') => Verdict::NotIgnored,
-                Some(rule) if self.in_trash_section(&rule) => Verdict::Trash,
+                Some(rule) if self.is_trash(&rule) => Verdict::Trash,
                 Some(rule) => Verdict::Ignored(rule),
             };
         }
@@ -191,45 +209,100 @@ impl Classifier {
         Ok(output.stdout)
     }
 
-    fn in_trash_section(&mut self, rule: &IgnoreRule) -> bool {
-        let path = self.root.join(&rule.source);
-        let sections = self.sections.entry(path).or_insert_with_key(|path| {
-            // An ignore file that cannot be read now marks nothing as trash.
-            fs::read_to_string(path)
-                .map(|contents| trash_lines(&contents))
-                .unwrap_or_default()
-        });
-        rule.line
+    /// Whether `rule` sits in a trash section or in an adopted ignore file.
+    fn is_trash(&mut self, rule: &IgnoreRule) -> bool {
+        let in_section = rule
+            .line
             .checked_sub(1)
-            .and_then(|index| sections.get(index))
-            .copied()
-            .unwrap_or(false)
+            .and_then(|index| {
+                let path = self.root.join(&rule.source);
+                self.ignore_file(path).trash_lines.get(index).copied()
+            })
+            .unwrap_or(false);
+        in_section || self.is_adopted(&rule.source)
+    }
+
+    /// Whether a `.gitignore` in a directory above `source`'s own adopts it.
+    fn is_adopted(&mut self, source: &Path) -> bool {
+        let Some(own_directory) = adoptable_directory(source) else {
+            return false;
+        };
+        own_directory.ancestors().skip(1).any(|directory| {
+            let path = self.root.join(directory).join(GITIGNORE);
+            self.ignore_file(path)
+                .adopted
+                .iter()
+                .any(|adopted| directory.join(adopted) == source)
+        })
+    }
+
+    fn ignore_file(&mut self, path: PathBuf) -> &IgnoreFile {
+        self.files.entry(path).or_insert_with_key(|path| {
+            // An ignore file that cannot be read, or does not exist, marks nothing as trash.
+            fs::read_to_string(path)
+                .map(|contents| parse_ignore_file(&contents))
+                .unwrap_or_default()
+        })
     }
 }
 
-/// Whether each line of an ignore file is inside a trash section.
+const GITIGNORE: &str = ".gitignore";
+
+/// The directory of an ignore file that a `# jw:trash-rules` line could adopt: a
+/// `.gitignore` inside the workspace, below its root, since the adopting `.gitignore`
+/// must sit in a directory above it.
+pub(crate) fn adoptable_directory(source: &Path) -> Option<&Path> {
+    if source.is_absolute() || source.file_name()? != GITIGNORE {
+        return None;
+    }
+    source
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+}
+
+/// Read an ignore file's trash sections and adopted files.
 ///
 /// A section starts after a [`TRASH_MARKER`] line and ends at the next blank line or
 /// marker line. Comment lines inside it are allowed. Git skips a leading byte-order
-/// mark, so a marker on the first line still counts.
-fn trash_lines(contents: &str) -> Vec<bool> {
+/// mark, so a marker on the first line still counts. An [`ADOPT_MARKER`] line is a
+/// marker line too, so it ends a section. One whose path is empty or absolute, or has an
+/// empty, `.`, `..`, or backslashed component, adopts nothing.
+fn parse_ignore_file(contents: &str) -> IgnoreFile {
     let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+    let mut file = IgnoreFile::default();
     let mut in_section = false;
-    contents
-        .lines()
-        .map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                in_section = false;
-                false
-            } else if line.starts_with(MARKER_PREFIX) {
-                in_section = line == TRASH_MARKER;
-                false
-            } else {
-                in_section
-            }
-        })
-        .collect()
+    for line in contents.lines() {
+        let line = line.trim();
+        let in_trash = if line.is_empty() {
+            in_section = false;
+            false
+        } else if line.starts_with(MARKER_PREFIX) {
+            in_section = line == TRASH_MARKER;
+            file.adopted.extend(adopted_path(line));
+            false
+        } else {
+            in_section
+        };
+        file.trash_lines.push(in_trash);
+    }
+    file
+}
+
+/// The relative path an [`ADOPT_MARKER`] line names, `/`-separated like Git patterns.
+fn adopted_path(line: &str) -> Option<PathBuf> {
+    let rest = line.strip_prefix(ADOPT_MARKER)?;
+    // The marker must stand alone: `# jw:trash-rulesx` is another marker.
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let mut path = PathBuf::new();
+    for part in rest.trim().split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+            return None;
+        }
+        path.push(part);
+    }
+    Some(path)
 }
 
 /// A workspace-relative path as Git expects it on the command line: `/`-separated UTF-8.
@@ -292,7 +365,7 @@ mod tests {
     fn trash_sections_end_at_blank_and_marker_lines() {
         let contents = "\u{feff}# jw:trash\ntarget/\n# rust\n*.rlib\n\nnode_modules/\n# jw:trash\ndist/\n# jw:precious\n.env*\n# jw:trash\r\n*.log\r\n";
         assert_eq!(
-            trash_lines(contents),
+            parse_ignore_file(contents).trash_lines,
             [
                 false, // # jw:trash
                 true,  // target/
@@ -313,9 +386,56 @@ mod tests {
     #[test]
     fn near_miss_markers_mark_nothing() {
         assert_eq!(
-            trash_lines("#jw:trash\na\n# jw: trash\nb\n# JW:TRASH\nc\n"),
+            parse_ignore_file("#jw:trash\na\n# jw: trash\nb\n# JW:TRASH\nc\n").trash_lines,
             [false, false, false, false, false, false]
         );
+    }
+
+    #[test]
+    fn trash_rules_lines_adopt_relative_paths_and_end_sections() {
+        let file = parse_ignore_file(
+            "# jw:trash\ndist/\n# jw:trash-rules project.inlang/.gitignore\n*.log\n# jw:trash-rules\ta b/.gitignore \n",
+        );
+        assert_eq!(file.trash_lines, [false, true, false, false, false]);
+        assert_eq!(
+            file.adopted,
+            [
+                PathBuf::from("project.inlang/.gitignore"),
+                PathBuf::from("a b/.gitignore")
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_trash_rules_lines_adopt_nothing() {
+        for line in [
+            "# jw:trash-rules",
+            "# jw:trash-rules   ",
+            "# jw:trash-rulesx/.gitignore",
+            "# jw:trash-rules /abs/.gitignore",
+            "# jw:trash-rules ../up/.gitignore",
+            "# jw:trash-rules a/./.gitignore",
+            "# jw:trash-rules a//.gitignore",
+            "# jw:trash-rules a\\.gitignore",
+            "#jw:trash-rules a/.gitignore",
+        ] {
+            assert_eq!(
+                parse_ignore_file(line).adopted,
+                [] as [PathBuf; 0],
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_nested_gitignore_files_are_adoptable() {
+        assert_eq!(
+            adoptable_directory(Path::new("project.inlang/.gitignore")),
+            Some(Path::new("project.inlang"))
+        );
+        assert_eq!(adoptable_directory(Path::new(".gitignore")), None);
+        assert_eq!(adoptable_directory(Path::new("app/ignore")), None);
+        assert_eq!(adoptable_directory(Path::new("/home/u/.gitignore")), None);
     }
 
     #[test]

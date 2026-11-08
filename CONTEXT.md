@@ -67,6 +67,9 @@ by itself a claim that a command exposing that concept already exists.
   and JJ read, up to the next blank line or `# jw:` line. Untracked files whose
   deciding ignore pattern sits in one are **trash**: regenerable, and deleted with a
   merged workspace's directory.
+- **Adopted ignore file** — a nested `.gitignore`, typically written by a tool, named
+  by a `# jw:trash-rules <path>` line in a `.gitignore` in a directory above it. Every
+  ignoring rule in it is a trash rule, since the tool's rewrites would drop a marker.
 - **Precious file** — any other untracked file: ignored by a pattern outside a trash
   section, or not ignored at all. Merge never deletes one that the default workspace
   lacks an identical copy of.

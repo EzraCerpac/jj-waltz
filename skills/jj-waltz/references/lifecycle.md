@@ -124,11 +124,13 @@ workspace and deletes its directory.
   the `--into` target, and bookmarks pointing elsewhere are kept with a warning.
 - Only untracked files covered by a `# jw:trash` section of an ignore file are deleted
   with the directory. A section starts at a `# jw:trash` line and ends at the next blank
-  line or `# jw:` line.
+  line or `# jw:` line. A `# jw:trash-rules <path>` line in a `.gitignore` adopts a nested
+  `.gitignore` below it, path relative to its own directory, making all of that file's
+  rules trash; use it for ignore files a tool writes, which cannot keep a marker.
 - It refuses, changing nothing, when the directory holds any other untracked file, ignored
   or not, without an identical copy at the same path in the default workspace. Show the
-  listed files and rules to the user. Move a pattern into a trash section only when the
-  user confirms its files are regenerable; pass `--keep-dir` only when they want the
+  listed files and rules to the user. Move a pattern into a trash section, or adopt a
+  tool's ignore file, only when the user confirms its files are regenerable; pass `--keep-dir` only when they want the
   directory kept, and never delete those files without asking.
 - Conflicts or a failed `--push` keep the workspace; resolve and rerun.
 
