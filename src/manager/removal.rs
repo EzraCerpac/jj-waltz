@@ -1,8 +1,9 @@
 //! Reviewed, drift-resistant workspace removal for the interactive manager.
 
 use super::status::{self, Integration, ManagerRow};
-use crate::jj::JjClient;
+use crate::jj::{JjClient, RecordedRoot};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
+use crate::ownership::OwnershipView;
 use crate::snapshot::{ManagementState, WorkingCopyStatus, WorkspaceSnapshot};
 use crate::workspace;
 use anyhow::{Context, Result, anyhow, bail};
@@ -103,6 +104,9 @@ pub fn prepare(trunk: &str, names: &[String], prune: bool) -> Result<BatchPlan> 
     let operation_id = captured.snapshot.repository.operation_id.clone();
     let client = JjClient::current()?;
     let store = metadata_store(&client)?;
+    // Repository-wide facts are read once for the whole batch, however many rows it reviews.
+    let all_bookmark_targets = client.local_bookmark_targets_at(&operation_id)?;
+    let ownership = OwnershipView::live(&client).with_all_roots();
     let selected = names.iter().cloned().collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
@@ -124,15 +128,20 @@ pub fn prepare(trunk: &str, names: &[String], prune: bool) -> Result<BatchPlan> 
         let metadata = store
             .get(&workspace.name)
             .with_context(|| format!("failed to read metadata for workspace {}", workspace.name))?;
-        let bookmark_targets = bookmark_targets(&client, &operation_id, metadata.as_ref())?;
+        let bookmark_targets = bookmark_targets(&all_bookmark_targets, metadata.as_ref());
         let mut warnings = status_row.warnings.clone();
         let mut blocked = structural_block(&status_row, prune);
-        if let Err(error) = crate::ownership::ensure_removal_allowed(
-            &client,
-            &workspace.name,
-            workspace.path.as_deref(),
-            metadata.as_ref(),
-        ) {
+        let allowed = match &ownership {
+            Ok(ownership) => ownership
+                .ensure_removal_allowed(
+                    &workspace.name,
+                    workspace.path.as_deref(),
+                    metadata.as_ref(),
+                )
+                .map(|_| ()),
+            Err(error) => Err(anyhow!("cannot verify workspace ownership: {error:#}")),
+        };
+        if let Err(error) = allowed {
             set_blocked(&mut blocked, error.to_string());
         }
         let mut ignored = Vec::new();
@@ -153,7 +162,11 @@ pub fn prepare(trunk: &str, names: &[String], prune: bool) -> Result<BatchPlan> 
                 Err(error) => set_blocked(&mut blocked, error.to_string()),
             }
         } else if prune {
-            match inspect_missing_workspace(&client, &workspace.name) {
+            let inspected = ownership
+                .as_ref()
+                .map_err(|error| anyhow!("{error:#}"))
+                .and_then(|ownership| inspect_missing_workspace(ownership, &workspace.name));
+            match inspected {
                 Ok(path) => missing_path = Some(path),
                 Err(error) => set_blocked(&mut blocked, error.to_string()),
             }
@@ -218,7 +231,9 @@ pub fn prepare(trunk: &str, names: &[String], prune: bool) -> Result<BatchPlan> 
     })
 }
 
-/// Execute reviewed removals one at a time. Every row is recaptured immediately before mutation.
+/// Execute reviewed removals. One capture revalidates every runnable row against its preview;
+/// each row's live ownership, path identity, and content checks still run immediately before that
+/// row's mutation. Missing workspaces in prune mode are forgotten together with one JJ operation.
 pub fn execute(
     plan: BatchPlan,
     delete_bookmarks: bool,
@@ -232,113 +247,327 @@ pub fn execute(
         mut frozen,
     } = plan;
 
-    rows.into_iter()
-        .map(|row| {
-            let Some(expected) = frozen.remove(&row.name) else {
-                return failed(&row.name, "internal removal plan is incomplete");
-            };
-            if let Some(reason) = &row.blocked {
-                return skipped(&row.name, format!("blocked: {reason}"));
+    let mut outcomes = Vec::with_capacity(rows.len());
+    let mut runnable = Vec::new();
+    for row in rows {
+        let Some(expected) = frozen.remove(&row.name) else {
+            outcomes.push(Some(failed(
+                &row.name,
+                "internal removal plan is incomplete",
+            )));
+            continue;
+        };
+        let skip = if let Some(reason) = &row.blocked {
+            Some(format!("blocked: {reason}"))
+        } else if row.risky && !include_risky {
+            Some("excluded because it needs the risky-removal override".to_owned())
+        } else if !row.ignored.is_empty() && !acknowledge_ignored {
+            Some(
+                "skipped because files not recorded by JJ were not approved for deletion"
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        match skip {
+            Some(reason) => outcomes.push(Some(skipped(&row.name, reason))),
+            None => {
+                runnable.push((outcomes.len(), row.name, expected));
+                outcomes.push(None);
             }
-            if row.risky && !include_risky {
-                return skipped(
-                    &row.name,
-                    "excluded because it needs the risky-removal override",
-                );
-            }
-            if !row.ignored.is_empty() && !acknowledge_ignored {
-                return skipped(
-                    &row.name,
-                    "skipped because files not recorded by JJ were not approved for deletion",
-                );
-            }
+        }
+    }
+    if runnable.is_empty() {
+        return outcomes.into_iter().flatten().collect();
+    }
 
-            match execute_one(&trunk, prune, row, expected, delete_bookmarks) {
-                Ok(message) => BatchOutcome {
-                    name: message.0,
-                    state: OutcomeState::Completed,
-                    message: message.1,
-                },
-                Err(error) => failed(&error.0, error.1),
-            }
-        })
-        .collect()
+    let names = runnable
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let results = match Revalidation::capture(&trunk, &names) {
+        Ok(revalidation) if prune => execute_prune_batch(&revalidation, runnable, delete_bookmarks),
+        Ok(revalidation) => runnable
+            .into_iter()
+            .map(|(index, name, expected)| {
+                let result = execute_removal(&revalidation, &name, expected, delete_bookmarks);
+                (index, name, result)
+            })
+            .collect(),
+        // A row that vanished since the preview fails the batch capture. Revalidate rows alone
+        // so independent removals still proceed.
+        Err(_) => runnable
+            .into_iter()
+            .map(|(index, name, expected)| {
+                let result = Revalidation::capture(&trunk, std::slice::from_ref(&name))
+                    .with_context(|| format!("failed to revalidate workspace {name}"))
+                    .and_then(|revalidation| {
+                        if prune {
+                            execute_prune_batch(
+                                &revalidation,
+                                vec![(index, name.clone(), expected)],
+                                delete_bookmarks,
+                            )
+                            .pop()
+                            .expect("one prune result per row")
+                            .2
+                        } else {
+                            execute_removal(&revalidation, &name, expected, delete_bookmarks)
+                        }
+                    });
+                (index, name, result)
+            })
+            .collect(),
+    };
+    for (index, name, result) in results {
+        outcomes[index] = Some(match result {
+            Ok(message) => BatchOutcome {
+                name,
+                state: OutcomeState::Completed,
+                message,
+            },
+            Err(error) => failed(&name, format!("{error:#}")),
+        });
+    }
+    outcomes.into_iter().flatten().collect()
 }
 
-fn execute_one(
-    trunk: &str,
-    prune: bool,
-    row: RemovalRow,
-    expected: FrozenRow,
-    delete_bookmarks: bool,
-) -> std::result::Result<(String, String), (String, String)> {
-    let name = row.name.clone();
-    let result = (|| -> Result<String> {
-        let requested = vec![name.clone()];
-        let captured = status::capture(trunk, &requested)
-            .with_context(|| format!("failed to revalidate workspace {name}"))?;
-        let operation_id = captured.snapshot.repository.operation_id.clone();
-        let current = captured
-            .rows
-            .into_iter()
-            .find(|candidate| candidate.workspace.name == name)
-            .ok_or_else(|| anyhow!("workspace disappeared during revalidation"))?;
-        ensure_status_unchanged(&expected.status, &current)?;
+/// One fresh capture of the rows about to be removed, plus the repository facts their
+/// revalidation compares against the preview.
+struct Revalidation {
+    rows: BTreeMap<String, ManagerRow>,
+    bookmark_targets: BTreeMap<String, Vec<String>>,
+    client: JjClient,
+    store: WorkspaceMetadataStore,
+}
 
+impl Revalidation {
+    fn capture(trunk: &str, names: &[String]) -> Result<Self> {
+        let captured = status::capture(trunk, names)?;
         let client = JjClient::current()?;
+        let bookmark_targets =
+            client.local_bookmark_targets_at(&captured.snapshot.repository.operation_id)?;
         let store = metadata_store(&client)?;
-        let current_metadata = store.get(&name)?;
-        crate::ownership::ensure_removal_allowed(
-            &client,
-            &name,
+        Ok(Self {
+            rows: captured
+                .rows
+                .into_iter()
+                .map(|row| (row.workspace.name.clone(), row))
+                .collect(),
+            bookmark_targets,
+            client,
+            store,
+        })
+    }
+
+    /// Checks that hold for both removal and pruning. Ownership is judged on the current
+    /// metadata before it is compared, so a newly recorded owner is reported as such.
+    fn revalidate(
+        &self,
+        ownership: &OwnershipView<'_>,
+        name: &str,
+        expected: &FrozenRow,
+    ) -> Result<&ManagerRow> {
+        let current = self
+            .rows
+            .get(name)
+            .ok_or_else(|| anyhow!("workspace disappeared during revalidation"))?;
+        ensure_status_unchanged(&expected.status, current)?;
+        let current_metadata = self.store.get(name)?;
+        ownership.ensure_removal_allowed(
+            name,
             current.workspace.path.as_deref(),
             current_metadata.as_ref(),
         )?;
         if current_metadata != expected.metadata {
             bail!("workspace metadata changed since the removal preview; review it again")
         }
-        let current_bookmark_targets =
-            bookmark_targets(&client, &operation_id, current_metadata.as_ref())?;
-        if current_bookmark_targets != expected.bookmark_targets {
+        if bookmark_targets(&self.bookmark_targets, expected.metadata.as_ref())
+            != expected.bookmark_targets
+        {
             bail!("associated bookmark moved since the removal preview; review it again")
         }
+        Ok(current)
+    }
+}
 
-        match current.workspace.path.as_deref() {
-            Some(path) => {
-                let identity = inspect_workspace_path(&client, path, &name)?;
-                if Some(identity) != expected.path_identity {
-                    bail!(
-                        "workspace path identity changed since the removal preview; review it again"
-                    )
+fn execute_removal(
+    revalidation: &Revalidation,
+    name: &str,
+    expected: FrozenRow,
+    delete_bookmarks: bool,
+) -> Result<String> {
+    let client = &revalidation.client;
+    let store = &revalidation.store;
+    let current = revalidation.revalidate(&OwnershipView::live(client), name, &expected)?;
+    let Some(path) = current.workspace.path.as_deref() else {
+        if expected.path_identity.is_some() {
+            bail!("workspace path disappeared since the removal preview; review it again")
+        }
+        bail!("workspace path is missing; use prune instead")
+    };
+    let identity = inspect_workspace_path(client, path, name)?;
+    if Some(identity) != expected.path_identity {
+        bail!("workspace path identity changed since the removal preview; review it again")
+    }
+    let scan = scan_ignored(path)?;
+    if scan.inventory != expected.ignored_inventory {
+        bail!("workspace content changed since the removal preview; review it again")
+    }
+
+    let inventory = workspace::WorkspaceInventory::load()?;
+    let mut low_level = workspace::plan_remove_workspace(&inventory, Some(name), true)?;
+    // The general-purpose lifecycle command can infer bookmark ownership for unmanaged
+    // workspaces. The manager has no authoritative association for those rows, so its
+    // explicit removal approval covers only the workspace and directory.
+    if expected.metadata.is_none() {
+        low_level.bookmarks.clear();
+    }
+    if store.get(name)? != expected.metadata {
+        bail!("workspace metadata changed during final removal planning; review it again")
+    }
+    let expected_bookmarks = expected
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.associated_bookmark.as_ref())
+        .filter(|_| !expected.bookmark_targets.is_empty())
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if low_level.bookmarks != expected_bookmarks {
+        bail!("associated bookmark changed during final removal planning; review it again")
+    }
+    let planned_path = canonicalize(&low_level.path)?;
+    let expected_path = expected
+        .path_identity
+        .as_ref()
+        .ok_or_else(|| anyhow!("workspace path is missing; use prune instead"))?;
+    if planned_path != expected_path.canonical {
+        bail!("workspace path changed during final removal planning; review it again")
+    }
+    let registered = client.workspace_names()?.into_iter().collect();
+    let shared = shared_bookmark(store, &registered, name, expected.metadata.as_ref())?;
+    let result = workspace::execute_remove_workspace(
+        low_level,
+        delete_bookmarks && !shared && expected.metadata.is_some(),
+    )?;
+    let action = if result.deleted_dir {
+        "Removed workspace and directory"
+    } else {
+        "Forgot workspace"
+    };
+    Ok(success_message(
+        action,
+        name,
+        expected.metadata.as_ref(),
+        delete_bookmarks,
+        shared,
+    ))
+}
+
+type RowResult = (usize, String, Result<String>);
+
+/// Revalidate every missing row, forget the valid ones with one JJ operation, then delete their
+/// unshared bookmarks with one more and retire their metadata.
+fn execute_prune_batch(
+    revalidation: &Revalidation,
+    rows: Vec<(usize, String, FrozenRow)>,
+    delete_bookmarks: bool,
+) -> Vec<RowResult> {
+    let client = &revalidation.client;
+    let store = &revalidation.store;
+    let ownership = OwnershipView::live(client).with_all_roots();
+    let mut results = Vec::new();
+    let mut valid = Vec::new();
+    for (index, name, expected) in rows {
+        let checked = ownership
+            .as_ref()
+            .map_err(|error| anyhow!("cannot verify workspace ownership: {error:#}"))
+            .and_then(|ownership| {
+                let current = revalidation.revalidate(ownership, &name, &expected)?;
+                if current.workspace.path.is_some() {
+                    bail!("workspace path reappeared since the removal preview; review it again")
                 }
-                let scan = scan_ignored(path)?;
-                if scan.inventory != expected.ignored_inventory {
-                    bail!("workspace content changed since the removal preview; review it again")
-                }
-            }
-            None if expected.path_identity.is_some() => {
-                bail!("workspace path disappeared since the removal preview; review it again")
-            }
-            None if prune => {
-                let missing_path = inspect_missing_workspace(&client, &name)?;
-                if Some(missing_path) != expected.missing_path {
+                if Some(inspect_missing_workspace(ownership, &name)?) != expected.missing_path {
                     bail!(
                         "missing workspace path changed since the removal preview; review it again"
                     )
                 }
-            }
-            None => {}
+                Ok(())
+            });
+        match checked {
+            Ok(()) => valid.push((index, name, expected)),
+            Err(error) => results.push((index, name, Err(error))),
         }
+    }
+    if valid.is_empty() {
+        return results;
+    }
 
-        if prune {
-            let shared = shared_bookmark(&client, &store, &name, expected.metadata.as_ref())?;
-            execute_prune(
-                &client,
-                &store,
-                &name,
-                expected.metadata.as_ref(),
-                delete_bookmarks && !shared,
-            )?;
+    let targets = valid
+        .iter()
+        .map(|(_, name, expected)| crate::ownership::MissingWorkspace {
+            name,
+            metadata: expected.metadata.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    if let Err(error) = crate::ownership::forget_missing(client, &targets) {
+        let message = format!("{error:#}");
+        results.extend(
+            valid
+                .into_iter()
+                .map(|(index, name, _)| (index, name, Err(anyhow!("{message}")))),
+        );
+        return results;
+    }
+
+    // Shared means another workspace that survives this batch still records the bookmark.
+    let survivors = client.workspace_names().map(BTreeSet::from_iter);
+    let mut sharing = BTreeMap::new();
+    for (_, name, expected) in &valid {
+        let shared = survivors
+            .as_ref()
+            .map_err(|error| anyhow!("{error:#}"))
+            .and_then(|survivors| {
+                shared_bookmark(store, survivors, name, expected.metadata.as_ref())
+            });
+        sharing.insert(name.clone(), shared);
+    }
+    let doomed = valid
+        .iter()
+        .filter(|(_, name, _)| delete_bookmarks && matches!(sharing.get(name), Some(Ok(false))))
+        .filter_map(|(_, _, expected)| managed_association(expected.metadata.as_ref()))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let deleted = delete_local_bookmarks(client, &doomed);
+
+    for (index, name, expected) in valid {
+        let bookmark = managed_association(expected.metadata.as_ref());
+        let result = (|| -> Result<String> {
+            let mut progress = format!("partial removal: workspace {name} was forgotten");
+            let shared = sharing
+                .remove(&name)
+                .expect("sharing computed for every row")
+                .with_context(|| progress.clone())?;
+            if let Some(bookmark) = bookmark.filter(|bookmark| doomed.contains(*bookmark)) {
+                match &deleted {
+                    Ok(deleted) if deleted.contains(bookmark) => {
+                        progress.push_str(&format!(" and bookmark {bookmark} was deleted"));
+                    }
+                    Ok(_) => {}
+                    Err(error) => bail!("{progress}, but bookmark {bookmark} remains: {error}"),
+                }
+            }
+            if let Some(metadata) = &expected.metadata {
+                let removed = store.remove_if_matches(metadata).with_context(|| {
+                    format!("{progress}; managed workspace metadata cleanup failed")
+                })?;
+                if !removed {
+                    bail!(
+                        "{progress}; workspace metadata changed during removal and was retained: {name}"
+                    )
+                }
+            }
             Ok(success_message(
                 "Pruned missing workspace",
                 &name,
@@ -346,101 +575,43 @@ fn execute_one(
                 delete_bookmarks,
                 shared,
             ))
-        } else {
-            let inventory = workspace::WorkspaceInventory::load()?;
-            let mut low_level = workspace::plan_remove_workspace(&inventory, Some(&name), true)?;
-            // The general-purpose lifecycle command can infer bookmark ownership for unmanaged
-            // workspaces. The manager has no authoritative association for those rows, so its
-            // explicit removal approval covers only the workspace and directory.
-            if expected.metadata.is_none() {
-                low_level.bookmarks.clear();
-            }
-            if store.get(&name)? != expected.metadata {
-                bail!("workspace metadata changed during final removal planning; review it again")
-            }
-            let expected_bookmarks = expected
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.associated_bookmark.as_ref())
-                .filter(|_| !expected.bookmark_targets.is_empty())
-                .cloned()
-                .into_iter()
-                .collect::<Vec<_>>();
-            if low_level.bookmarks != expected_bookmarks {
-                bail!("associated bookmark changed during final removal planning; review it again")
-            }
-            let planned_path = canonicalize(&low_level.path)?;
-            let expected_path = expected
-                .path_identity
-                .as_ref()
-                .ok_or_else(|| anyhow!("workspace path is missing; use prune instead"))?;
-            if planned_path != expected_path.canonical {
-                bail!("workspace path changed during final removal planning; review it again")
-            }
-            let shared = shared_bookmark(&client, &store, &name, expected.metadata.as_ref())?;
-            let result = workspace::execute_remove_workspace(
-                low_level,
-                delete_bookmarks && !shared && expected.metadata.is_some(),
-            )?;
-            let action = if result.deleted_dir {
-                "Removed workspace and directory"
-            } else {
-                "Forgot workspace"
-            };
-            Ok(success_message(
-                action,
-                &name,
-                expected.metadata.as_ref(),
-                delete_bookmarks,
-                shared,
-            ))
-        }
-    })();
-
-    result
-        .map(|message| (name.clone(), message))
-        .map_err(|error| (name, format!("{error:#}")))
+        })();
+        results.push((index, name, result));
+    }
+    results
 }
 
-fn execute_prune(
+fn managed_association(metadata: Option<&ManagedWorkspaceMetadata>) -> Option<&str> {
+    metadata.and_then(|entry| entry.associated_bookmark.as_deref())
+}
+
+/// Delete whichever of the given bookmarks still exist locally, with one JJ operation.
+/// Returns the bookmarks that were deleted.
+fn delete_local_bookmarks(
     client: &JjClient,
-    store: &WorkspaceMetadataStore,
-    name: &str,
-    metadata: Option<&ManagedWorkspaceMetadata>,
-    delete_bookmark: bool,
-) -> Result<()> {
-    if store.get(name)?.as_ref() != metadata {
-        bail!("workspace metadata changed during final prune planning; review it again")
+    bookmarks: &BTreeSet<String>,
+) -> std::result::Result<BTreeSet<String>, String> {
+    if bookmarks.is_empty() {
+        return Ok(BTreeSet::new());
     }
-    crate::ownership::ensure_removal_allowed(client, name, None, metadata)?;
-    crate::ownership::forget_workspace(client, name, None, metadata)?;
-    let mut progress = format!("partial removal: workspace {name} was forgotten");
-
-    if delete_bookmark
-        && let Some(bookmark) = metadata.and_then(|entry| entry.associated_bookmark.as_deref())
-    {
-        let operation_id = client.operation_id().with_context(|| progress.clone())?;
-        if client
-            .local_bookmark_names_at(&operation_id)
-            .with_context(|| progress.clone())?
-            .contains(bookmark)
-        {
-            client
-                .run(["bookmark", "delete", bookmark])
-                .with_context(|| format!("{progress}, but bookmark {bookmark} remains"))?;
-            progress.push_str(&format!(" and bookmark {bookmark} was deleted"));
-        }
+    let existing = client
+        .operation_id()
+        .and_then(|operation_id| client.local_bookmark_names_at(&operation_id))
+        .map_err(|error| format!("{error:#}"))?;
+    let present = bookmarks
+        .iter()
+        .filter(|bookmark| existing.contains(*bookmark))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if present.is_empty() {
+        return Ok(present);
     }
-
-    if let Some(metadata) = metadata {
-        let removed = store
-            .remove_if_matches(metadata)
-            .with_context(|| format!("{progress}; managed workspace metadata cleanup failed"))?;
-        if !removed {
-            bail!("{progress}; workspace metadata changed during removal and was retained: {name}")
-        }
-    }
-    Ok(())
+    let mut args = vec!["bookmark".to_owned(), "delete".to_owned()];
+    args.extend(present.iter().cloned());
+    client
+        .run(&args)
+        .map(|_| present)
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn success_message(
@@ -545,20 +716,16 @@ fn managed_bookmark(
         .flatten()
 }
 
+/// Whether another registered, managed workspace records the same bookmark association.
 fn shared_bookmark(
-    client: &JjClient,
     store: &WorkspaceMetadataStore,
+    registered: &BTreeSet<String>,
     removed_name: &str,
     removed_metadata: Option<&ManagedWorkspaceMetadata>,
 ) -> Result<bool> {
-    let Some(bookmark) = removed_metadata.and_then(|entry| entry.associated_bookmark.as_deref())
-    else {
+    let Some(bookmark) = managed_association(removed_metadata) else {
         return Ok(false);
     };
-    let registered = client
-        .workspace_names()?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
     Ok(store.list()?.into_iter().any(|entry| {
         entry.workspace_name != removed_name
             && registered.contains(&entry.workspace_name)
@@ -566,23 +733,15 @@ fn shared_bookmark(
     }))
 }
 
+/// The sorted targets of a row's associated bookmark, from one frozen listing of all bookmarks.
 fn bookmark_targets(
-    client: &JjClient,
-    operation_id: &str,
+    all_targets: &BTreeMap<String, Vec<String>>,
     metadata: Option<&ManagedWorkspaceMetadata>,
-) -> Result<Vec<String>> {
-    let Some(bookmark) = metadata.and_then(|entry| entry.associated_bookmark.as_deref()) else {
-        return Ok(Vec::new());
-    };
-    let quoted = serde_json::to_string(bookmark)?;
-    let revset = format!("bookmarks(exact:{quoted})");
-    let mut targets = client
-        .resolve_all_at(operation_id, revset)?
-        .into_iter()
-        .map(|revision| revision.commit_id)
-        .collect::<Vec<_>>();
-    targets.sort();
-    Ok(targets)
+) -> Vec<String> {
+    managed_association(metadata)
+        .and_then(|bookmark| all_targets.get(bookmark))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn ensure_status_unchanged(expected: &ManagerRow, current: &ManagerRow) -> Result<()> {
@@ -682,24 +841,15 @@ fn inspect_workspace_path(
     })
 }
 
-fn inspect_missing_workspace(client: &JjClient, workspace_name: &str) -> Result<PathBuf> {
-    let output = client.run_unchecked([
-        "--ignore-working-copy",
-        "workspace",
-        "root",
-        "--name",
-        workspace_name,
-    ])?;
-    let path = if output.success() {
-        one_path(output.stdout()?)?
-    } else {
-        missing_path_from_error(&output.stderr()).ok_or_else(|| {
-            anyhow!(
-                "workspace path is unknown rather than confirmed missing: {}",
-                output.stderr()
-            )
-        })?
-    };
+fn inspect_missing_workspace(
+    ownership: &OwnershipView<'_>,
+    workspace_name: &str,
+) -> Result<PathBuf> {
+    let path = ownership.recorded_root(workspace_name)?.ok_or_else(|| {
+        anyhow!(
+            "workspace path is unknown rather than confirmed missing: JJ has no recorded path for {workspace_name}"
+        )
+    })?;
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
         Err(error) => Err(error).with_context(|| {
@@ -715,28 +865,27 @@ fn inspect_missing_workspace(client: &JjClient, workspace_name: &str) -> Result<
     }
 }
 
+/// Refuse to delete a directory that contains another registered checkout, using one listing of
+/// every recorded root. A recorded checkout that no longer exists cannot be harmed and is skipped.
 fn ensure_no_nested_workspace(client: &JjClient, own_name: &str, root: &Path) -> Result<()> {
-    for name in client.workspace_names()? {
+    for (name, recorded) in client.recorded_workspace_roots(None)? {
         if name == own_name {
             continue;
         }
-        let output = client.run_unchecked([
-            "--ignore-working-copy",
-            "workspace",
-            "root",
-            "--name",
-            &name,
-        ])?;
-        if !output.success() {
-            if missing_path_from_error(&output.stderr()).is_some() {
-                continue;
-            }
+        let RecordedRoot::Path(path) = recorded else {
             bail!(
-                "could not verify registered workspace {name} before removal: {}",
-                output.stderr()
+                "could not verify registered workspace {name} before removal: it has no recorded path"
             )
-        }
-        let nested = canonicalize(&one_path(output.stdout()?)?)?;
+        };
+        let nested = match fs::canonicalize(&path) {
+            Ok(nested) => nested,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("could not verify registered workspace {name} before removal")
+                });
+            }
+        };
         if nested != root && nested.starts_with(root) {
             bail!(
                 "workspace contains registered workspace {name} at {}",
@@ -756,33 +905,6 @@ fn repository_identity(client: &JjClient) -> Result<PathBuf> {
         )
     })?;
     canonicalize(directory)
-}
-
-fn one_path(output: &str) -> Result<PathBuf> {
-    let paths = output
-        .lines()
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    match paths.as_slice() {
-        [path] => Ok(PathBuf::from(path)),
-        _ => bail!(
-            "JJ workspace root query returned {} paths; expected exactly one",
-            paths.len()
-        ),
-    }
-}
-
-fn missing_path_from_error(message: &str) -> Option<PathBuf> {
-    const PREFIX: &str = "Cannot resolve absolute workspace path: ";
-    message
-        .lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("Error: ")
-                .unwrap_or(line.trim())
-                .strip_prefix(PREFIX)
-        })
-        .map(PathBuf::from)
 }
 
 fn path_contains(parent: &Path, child: &Path) -> bool {
@@ -1413,7 +1535,8 @@ mod tests {
                 let client = JjClient::current().unwrap();
                 let store = metadata_store(&client).unwrap();
                 let metadata = store.get("one").unwrap().unwrap();
-                assert!(shared_bookmark(&client, &store, "one", Some(&metadata)).unwrap());
+                let registered = client.workspace_names().unwrap().into_iter().collect();
+                assert!(shared_bookmark(&store, &registered, "one", Some(&metadata)).unwrap());
                 let plan = prepare("default@", &["one".into()], false).unwrap();
                 let outcomes = execute(plan, true, false, true);
                 assert!(outcomes[0].success(), "{}", outcomes[0].message);

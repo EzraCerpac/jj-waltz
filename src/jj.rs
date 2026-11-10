@@ -11,7 +11,7 @@ use std::str::FromStr;
 pub const MINIMUM_SUPPORTED_JJ_VERSION: JjVersion = JjVersion::new(0, 39, 0);
 
 // Keep every workspace field JSON encoded. Tabs and newlines inside names and descriptions cannot
-// corrupt record boundaries. The conflict guards keep diff statistics compatible with JJ 0.39.
+// corrupt record boundaries.
 const WORKSPACE_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
 /// `WorkspaceRef.root()` is newer than the minimum supported JJ; callers fall back
 /// to per-workspace `jj workspace root --name` queries when the template is rejected.
@@ -19,9 +19,19 @@ pub(crate) const WORKSPACE_ROOTS_TEMPLATE: &str =
     r#"json(name) ++ "\t" ++ json(self.root()) ++ "\n""#;
 const CURRENT_WORKSPACE_NAMES_TEMPLATE: &str =
     r#"if(target.current_working_copy(), json(name) ++ "\n", "")"#;
-const WORKSPACE_FACTS_TEMPLATE: &str = r#"json(name) ++ "\t" ++ json(target.change_id()) ++ "\t" ++ json(target.commit_id()) ++ "\t" ++ json(target.description().first_line()) ++ "\t" ++ json(target.current_working_copy()) ++ "\t" ++ json(target.empty()) ++ "\t" ++ json(target.conflict()) ++ "\t" ++ json(target.divergent()) ++ "\t" ++ json(target.diff().files().len()) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_added())) ++ "\t" ++ json(if(target.conflict(), 0, target.diff().stat().total_removed())) ++ "\t" ++ json(target.conflicted_files().len()) ++ "\n""#;
+/// Every field here is cheap for any number of workspaces. Diff statistics are deliberately
+/// absent: computing them reads file contents, which costs seconds across many workspaces, so
+/// they are queried separately and only for the revisions that need them.
+const WORKSPACE_FACTS_TEMPLATE: &str = r#"json(name) ++ "\t" ++ json(target.change_id()) ++ "\t" ++ json(target.commit_id()) ++ "\t" ++ json(target.description().first_line()) ++ "\t" ++ json(target.current_working_copy()) ++ "\t" ++ json(target.empty()) ++ "\t" ++ json(target.conflict()) ++ "\t" ++ json(target.divergent()) ++ "\t" ++ json(if(target.conflict(), target.conflicted_files().len(), 0)) ++ "\n""#;
+/// The conflict guards keep diff statistics compatible with JJ 0.39.
+const CHANGE_STATS_TEMPLATE: &str = r#"json(commit_id) ++ "\t" ++ json(self.diff().files().len()) ++ "\t" ++ json(if(self.conflict(), 0, self.diff().stat().total_added())) ++ "\t" ++ json(if(self.conflict(), 0, self.diff().stat().total_removed())) ++ "\n""#;
+const COMMIT_IDS_TEMPLATE: &str = r#"commit_id ++ "\n""#;
+const LOCAL_BOOKMARK_TARGETS_TEMPLATE: &str = r#"commit_id ++ local_bookmarks.map(|bookmark| "\t" ++ json(bookmark.name())).join("") ++ "\n""#;
 const REVISION_TEMPLATE: &str =
     "change_id ++ \"\\0\" ++ commit_id ++ \"\\0\" ++ description.first_line() ++ \"\\0\"";
+/// Revsets built from many IDs are split so one argument stays far below the smallest platform
+/// command-line limit (32 KiB on Windows). Typical repositories need a single query.
+const MAX_REVSET_CHARS: usize = 16 * 1024;
 const LOCAL_BOOKMARK_NAMES_TEMPLATE: &str = r#"if(remote, "", json(name) ++ "\n")"#;
 const BOOKMARK_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
 const TRACKED_FILES_TEMPLATE: &str = r#"json(path) ++ "\n""#;
@@ -254,10 +264,33 @@ pub struct WorkspaceTargetFacts {
     pub empty: bool,
     pub conflicted: bool,
     pub divergent: bool,
+    pub conflicts: u32,
+}
+
+/// Size of one revision's change relative to its parents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeStats {
     pub files: u32,
     pub added: u32,
     pub removed: u32,
-    pub conflicts: u32,
+}
+
+/// Where JJ records a workspace's checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedRoot {
+    /// The recorded checkout path. The directory may no longer exist.
+    Path(PathBuf),
+    /// JJ has no recorded path for this workspace.
+    Unrecorded,
+}
+
+impl RecordedRoot {
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Unrecorded => None,
+        }
+    }
 }
 
 /// Direct, shell-free JJ process adapter rooted at one working directory.
@@ -348,19 +381,6 @@ impl JjClient {
             .run(["--ignore-working-copy", "workspace", "add", "--help"])?
             .stdout()?
             .contains("--colocate"))
-    }
-
-    /// Probe the subcommand rather than assuming a release number implies support.
-    pub fn supports_workspace_removal(&self) -> Result<bool> {
-        let output =
-            self.run_unchecked(["--ignore-working-copy", "workspace", "remove", "--help"])?;
-        if output.success() {
-            return Ok(true);
-        }
-        if output.stderr().contains("unrecognized subcommand 'remove'") {
-            return Ok(false);
-        }
-        bail!("cannot probe native workspace removal: {}", output.stderr())
     }
 
     pub fn require_workspace_colocation(&self) -> Result<()> {
@@ -474,6 +494,83 @@ impl JjClient {
             return Ok(None);
         }
         Ok(parse_workspace_roots(output.stdout()?))
+    }
+
+    /// [`Self::workspace_roots`] at one frozen repository operation.
+    pub fn workspace_roots_at(&self, operation_id: &str) -> Result<Option<WorkspaceRoots>> {
+        let output = self.run_at_unchecked(
+            operation_id,
+            ["workspace", "list", "-T", WORKSPACE_ROOTS_TEMPLATE],
+        )?;
+        if !output.success() {
+            return Ok(None);
+        }
+        Ok(parse_workspace_roots(output.stdout()?))
+    }
+
+    /// Every workspace's recorded root, including the path of a deleted checkout.
+    ///
+    /// One batched listing answers this on JJ 0.46+. Older listings render a deleted checkout as
+    /// unknown, so only those entries (and every entry on JJ without `WorkspaceRef.root()`) fall
+    /// back to `jj workspace root --name`, whose error message names the recorded path.
+    pub fn recorded_workspace_roots(
+        &self,
+        operation_id: Option<&str>,
+    ) -> Result<BTreeMap<String, RecordedRoot>> {
+        let listed = match operation_id {
+            Some(operation_id) => self.workspace_roots_at(operation_id)?,
+            None => self.workspace_roots()?,
+        };
+        let listed = match listed {
+            Some(listed) => listed,
+            None => self
+                .workspace_names()?
+                .into_iter()
+                .map(|name| (name, None))
+                .collect(),
+        };
+        listed
+            .into_iter()
+            .map(|(name, root)| {
+                let root = match root {
+                    Some(root) => RecordedRoot::Path(root),
+                    None => self.recorded_workspace_root(&name, operation_id)?,
+                };
+                Ok((name, root))
+            })
+            .collect()
+    }
+
+    /// One workspace's recorded root, distinguishing a deleted checkout from an unrecorded path.
+    pub fn recorded_workspace_root(
+        &self,
+        name: &str,
+        operation_id: Option<&str>,
+    ) -> Result<RecordedRoot> {
+        let output = match operation_id {
+            Some(operation_id) => {
+                self.run_at_unchecked(operation_id, ["workspace", "root", "--name", name])?
+            }
+            None => {
+                self.run_unchecked(["--ignore-working-copy", "workspace", "root", "--name", name])?
+            }
+        };
+        if output.success() {
+            return Ok(RecordedRoot::Path(PathBuf::from(output.trimmed_stdout()?)));
+        }
+        let message = output.stderr();
+        if message.contains("Workspace has no recorded path") {
+            return Ok(RecordedRoot::Unrecorded);
+        }
+        if let Some(path) = message.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("Error: ")
+                .unwrap_or(line.trim())
+                .strip_prefix("Cannot resolve absolute workspace path: ")
+        }) {
+            return Ok(RecordedRoot::Path(PathBuf::from(path)));
+        }
+        bail!("cannot read the recorded root of workspace {name}: {message}")
     }
 
     /// List targets that JJ marks as the current working copy without snapshotting it.
@@ -651,6 +748,128 @@ impl JjClient {
             .collect())
     }
 
+    /// Every local bookmark's target commit IDs at one frozen operation. A conflicted bookmark
+    /// has several targets. Names are never interpreted as revsets.
+    pub fn local_bookmark_targets_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+    ) -> Result<BTreeMap<String, Vec<String>>> {
+        let output = self.run_at(
+            operation_id,
+            [
+                "log",
+                "-r",
+                "bookmarks()",
+                "--no-graph",
+                "--template",
+                LOCAL_BOOKMARK_TARGETS_TEMPLATE,
+            ],
+        )?;
+        let mut targets = BTreeMap::<String, Vec<String>>::new();
+        for (index, line) in output
+            .stdout()?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .enumerate()
+        {
+            let mut fields = line.split('\t');
+            let commit_id = fields.next().unwrap_or_default();
+            for bookmark in fields {
+                let bookmark: String = parse_json_field(bookmark, index, "bookmark name")?;
+                targets
+                    .entry(bookmark)
+                    .or_default()
+                    .push(commit_id.to_owned());
+            }
+        }
+        for commits in targets.values_mut() {
+            commits.sort();
+        }
+        Ok(targets)
+    }
+
+    /// Change statistics for exact commit IDs at one frozen operation, in as few JJ processes as
+    /// the platform's argument limits allow. Diff statistics read file contents, so callers pass
+    /// only the revisions whose statistics they report.
+    pub fn change_stats_at<'a>(
+        &self,
+        operation_id: &str,
+        commit_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeMap<String, ChangeStats>> {
+        let mut stats = BTreeMap::new();
+        for revset in union_revsets(commit_ids.into_iter().map(ToOwned::to_owned)) {
+            let output = self.run_at(
+                operation_id,
+                [
+                    "log",
+                    "-r",
+                    revset.as_str(),
+                    "--no-graph",
+                    "--template",
+                    CHANGE_STATS_TEMPLATE,
+                ],
+            )?;
+            for (index, line) in output
+                .stdout()?
+                .lines()
+                .filter(|line| !line.is_empty())
+                .enumerate()
+            {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                let [commit_id, files, added, removed] = fields.as_slice() else {
+                    bail!(
+                        "JJ change statistics query returned malformed record {}",
+                        index + 1
+                    )
+                };
+                stats.insert(
+                    parse_json_field(commit_id, index, "commit ID")?,
+                    ChangeStats {
+                        files: parse_count(files, index, "files")?,
+                        added: parse_count(added, index, "added")?,
+                        removed: parse_count(removed, index, "removed")?,
+                    },
+                );
+            }
+        }
+        Ok(stats)
+    }
+
+    /// Which of the given exact commit IDs are present at one frozen operation. Values that are
+    /// not commit IDs are never sent to JJ as revsets and are reported absent.
+    pub fn existing_commit_ids_at<'a>(
+        &self,
+        operation_id: &str,
+        commit_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeSet<String>> {
+        let terms = commit_ids
+            .into_iter()
+            .filter(|id| is_commit_id(id))
+            .map(|id| format!("present({id})"));
+        let mut present = BTreeSet::new();
+        for revset in union_revsets(terms) {
+            let output = self.run_at(
+                operation_id,
+                [
+                    "log",
+                    "-r",
+                    revset.as_str(),
+                    "--no-graph",
+                    "--template",
+                    COMMIT_IDS_TEMPLATE,
+                ],
+            )?;
+            present.extend(
+                output
+                    .stdout()?
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(ToOwned::to_owned),
+            );
+        }
+        Ok(present)
+    }
+
     /// Return JJ's repository-level config path.
     ///
     /// JJ may create the repository config directory when it does not exist.
@@ -752,6 +971,31 @@ fn tree_state_path(workspace_root: &Path) -> PathBuf {
         .join("tree_state")
 }
 
+/// Exact commit IDs are hexadecimal of a backend-defined length. Anything else, such as a
+/// revset expression stored in corrupt metadata, must never be evaluated as a revset.
+pub(crate) fn is_commit_id(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Join revset terms with `|`, splitting into as few revsets as [`MAX_REVSET_CHARS`] allows.
+pub(crate) fn union_revsets(terms: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut revsets = Vec::new();
+    let mut current = String::new();
+    for term in terms {
+        if !current.is_empty() && current.len() + term.len() + 3 > MAX_REVSET_CHARS {
+            revsets.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str(" | ");
+        }
+        current.push_str(&term);
+    }
+    if !current.is_empty() {
+        revsets.push(current);
+    }
+    revsets
+}
+
 fn collect_args<I, S>(args: I) -> Vec<OsString>
 where
     I: IntoIterator<Item = S>,
@@ -837,14 +1081,11 @@ fn parse_workspace_target_facts(output: &str) -> Result<BTreeMap<String, Workspa
             empty,
             conflicted,
             divergent,
-            files,
-            added,
-            removed,
             conflicts,
         ] = fields.as_slice()
         else {
             bail!(
-                "JJ workspace query returned malformed record {} with {} fields; expected 12",
+                "JJ workspace query returned malformed record {} with {} fields; expected 9",
                 index + 1,
                 fields.len()
             )
@@ -863,9 +1104,6 @@ fn parse_workspace_target_facts(output: &str) -> Result<BTreeMap<String, Workspa
             empty: parse_json_field(empty, index, "empty")?,
             conflicted: parse_json_field(conflicted, index, "conflicted")?,
             divergent: parse_json_field(divergent, index, "divergent")?,
-            files: parse_count(files, index, "files")?,
-            added: parse_count(added, index, "added")?,
-            removed: parse_count(removed, index, "removed")?,
             conflicts: parse_count(conflicts, index, "conflicts")?,
         };
         let name = entry.name.clone();
@@ -925,7 +1163,7 @@ fn parse_count(value: &str, record_index: usize, field: &str) -> Result<u32> {
     let value: u64 = parse_json_field(value, record_index, field)?;
     value.try_into().with_context(|| {
         format!(
-            "JJ workspace query returned {field} count outside u32 range in record {}",
+            "JJ query returned {field} count outside u32 range in record {}",
             record_index + 1
         )
     })
@@ -1046,9 +1284,6 @@ mod tests {
             "false",
             "true",
             "false",
-            "3",
-            "18",
-            "4",
             "2",
         ]
         .join("\t")
@@ -1056,12 +1291,107 @@ mod tests {
         let parsed = parse_workspace_target_facts(&output).unwrap();
         let facts = &parsed["solver\tui"];
         assert_eq!(facts.description, "line one\nline two");
-        assert_eq!(facts.files, 3);
+        assert!(facts.conflicted);
         assert_eq!(facts.conflicts, 2);
 
         assert!(parse_workspace_target_facts("\"name\"\t\"too-few\"\n").is_err());
-        let line = "\"same\"\t\"change\"\t\"commit\"\t\"description\"\ttrue\ttrue\tfalse\tfalse\t0\t0\t0\t0\n";
+        let line =
+            "\"same\"\t\"change\"\t\"commit\"\t\"description\"\ttrue\ttrue\tfalse\tfalse\t0\n";
         assert!(parse_workspace_target_facts(&format!("{line}{line}")).is_err());
+    }
+
+    #[test]
+    fn id_revsets_stay_within_the_argument_budget() {
+        assert!(union_revsets(Vec::<String>::new()).is_empty());
+        assert_eq!(
+            union_revsets(["a".to_owned(), "b".to_owned()]),
+            ["a | b".to_owned()]
+        );
+        let ids = (0..2_000)
+            .map(|index| format!("{index:0>40}"))
+            .collect::<Vec<_>>();
+        let revsets = union_revsets(ids.clone());
+        assert!(revsets.len() > 1);
+        assert!(
+            revsets
+                .iter()
+                .all(|revset| revset.len() <= MAX_REVSET_CHARS)
+        );
+        let rejoined = revsets
+            .iter()
+            .flat_map(|revset| revset.split(" | "))
+            .collect::<Vec<_>>();
+        assert_eq!(rejoined, ids);
+    }
+
+    #[test]
+    fn commit_ids_accept_backend_lengths_but_not_revset_expressions() {
+        for length in [40, 64, 128] {
+            assert!(is_commit_id(&"a".repeat(length)));
+        }
+        for invalid in ["", "@", "root()", "abcd | efab", "xyz"] {
+            assert!(!is_commit_id(invalid));
+        }
+    }
+
+    #[test]
+    fn batched_frozen_queries_answer_every_requested_revision_in_one_process() {
+        if Command::new("jj").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let client = JjClient::new(directory.path());
+        client.run(["git", "init"]).unwrap();
+        std::fs::write(directory.path().join("file"), "one\ntwo\n").unwrap();
+        client.run(["commit", "-m", "first"]).unwrap();
+        client
+            .run(["bookmark", "create", "topic", "-r", "@-"])
+            .unwrap();
+        let first = client.resolve_one("@-").unwrap().commit_id;
+        let empty = client.resolve_one("@").unwrap().commit_id;
+        let operation_id = client.operation_id().unwrap();
+
+        let stats = client
+            .change_stats_at(&operation_id, [first.as_str(), empty.as_str()])
+            .unwrap();
+        assert_eq!(
+            stats[&first],
+            ChangeStats {
+                files: 1,
+                added: 2,
+                removed: 0
+            }
+        );
+        assert_eq!(stats[&empty], ChangeStats::default());
+        assert!(
+            client
+                .change_stats_at(&operation_id, std::iter::empty())
+                .unwrap()
+                .is_empty()
+        );
+
+        let missing = "f".repeat(first.len());
+        assert_eq!(
+            client
+                .existing_commit_ids_at(&operation_id, [first.as_str(), &missing, "root()"])
+                .unwrap(),
+            BTreeSet::from([first.clone()])
+        );
+
+        assert_eq!(
+            client.local_bookmark_targets_at(&operation_id).unwrap(),
+            BTreeMap::from([("topic".to_owned(), vec![first])])
+        );
+
+        let roots = client
+            .recorded_workspace_roots(Some(&operation_id))
+            .unwrap();
+        assert_eq!(
+            roots["default"]
+                .path()
+                .map(|path| path.canonicalize().unwrap()),
+            Some(directory.path().canonicalize().unwrap())
+        );
     }
 
     #[test]

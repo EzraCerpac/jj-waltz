@@ -284,18 +284,18 @@ jw remove --keep-bookmark feature-api
 ```
 
 Removal is planned before mutation, so default/current-workspace checks and bookmark
-choices happen before cleanup. On JJ 0.46+ or a build advertising `workspace remove`,
-directory removal uses that native command to snapshot the target's tracked changes
-before deletion. A stale target fails safely; inspect it and run `jj workspace
-update-stale` there before retrying. Older supported JJ versions use guarded forgetting
-and directory deletion. `--keep-dir` and already-missing directories use forgetting;
-`--keep-dir` preserves files. Ignored and other files outside JJ's snapshot are deleted
-with the directory, as before; use `--keep-dir` when they need preservation. The
-interactive manager still requires review of ignored/untracked files.
+choices happen before cleanup. Before deleting a directory, jw snapshots the target
+working copy, so its tracked and new files survive in the workspace's last commit. A
+stale target fails safely before anything changes; inspect it and run `jj workspace
+update-stale` there before retrying. jw then forgets the workspace, moves the
+directory aside, and deletes it in the background, so removing a checkout with large
+dependency trees returns immediately. `--keep-dir` and already-missing directories
+only forget; `--keep-dir` preserves files. Ignored and other files outside JJ's
+snapshot are deleted with the directory, as before; use `--keep-dir` when they need
+preservation. The interactive manager still requires review of ignored/untracked files.
 
-Native errors are checked for partial progress and never trigger a deletion fallback.
-If JJ forgets the workspace but only warns that directory deletion failed, jw reports
-the remaining path as a partial removal after cleaning bookmarks and lifecycle metadata.
+If the directory cannot be moved or deleted, jw reports the remaining path as a
+partial removal after cleaning bookmarks and lifecycle metadata.
 
 ### Colocated workspaces
 
@@ -341,7 +341,7 @@ runs a global Git worktree prune. Changed topology or missing/damaged provenance
 requires inspection instead of automatic deletion. Native app checkouts remain
 externally owned, including after adoption.
 
-For native removal, jw temporarily detaches only its validated Git link to prevent
+When forgetting, jw temporarily detaches only its validated Git link to prevent
 JJ's repository-wide pruning from deleting unrelated missing registrations, then
 cleans only the matching owned registration. A failed removal restores the link
 when the workspace is still registered; unverifiable outcomes retain lifecycle metadata
