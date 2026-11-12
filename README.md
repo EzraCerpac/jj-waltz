@@ -287,6 +287,7 @@ jw merge feature-api --into main    # rebase onto main instead, and advance main
 jw merge feature-api --squash       # combine the workspace's revisions into one first
 jw merge feature-api --into main --push
 jw merge feature-api --keep-dir     # land and forget it, but leave its directory
+jw merge feature-api --force        # delete its directory even if untracked files would be lost
 ```
 
 The landed work is the workspace's publish tip (a non-empty `@`, otherwise its sole
@@ -321,8 +322,9 @@ anything, `jw merge` refuses if any precious file has no identical copy at the s
 in the default workspace, and lists each one with the ignore file, line, and pattern that
 decided it. Copies cloned from the default workspace, as `jw add --cow-all` creates,
 count as identical. Move regenerable patterns into a trash section, pass `--keep-dir` to
-land and forget the workspace while keeping its directory, or delete or move the listed
-files and rerun.
+land and forget the workspace while keeping its directory, pass `-f`/`--force` to skip
+the check and delete the directory with those files, or delete or move the listed files
+and rerun.
 
 Some tools write their own `.gitignore` inside a directory that also holds source you
 track, and rewrite it on every run. inlang's `project.inlang/.gitignore` is `*` with
@@ -341,10 +343,11 @@ When merge refuses over a rule in an untracked nested `.gitignore`, it suggests 
 Trash sections work in every ignore file Git and JJ read: `.gitignore` in any directory,
 the Git directory's `info/exclude`, and `core.excludesFile`, so personal trash such as
 `.DS_Store` can live in your global ignore file. `jw merge` asks Git which rule decides
-each path (`git check-ignore`), so it needs `git` on `PATH` unless you pass `--keep-dir`.
+each path (`git check-ignore`), so it needs `git` on `PATH` unless you pass `--keep-dir` or `--force`.
 
 `jw merge` refuses the default workspace, conflicted or divergent working copies, merge
-commits, conflicted revisions, and directories holding precious untracked files.
+commits, conflicted revisions, and directories holding precious untracked files (unless
+`--force` is passed).
 Removal is planned before any rewrite, so these refusals change nothing. If landing leaves conflicts, or the push fails, the workspace
 is kept; resolve the problem and rerun `jw merge`. Work already landed is not landed
 twice. A conflicted landing names the `jj op restore` operation that undoes it.

@@ -44,7 +44,8 @@ offline.
   merges and conflicts, and reuses `workspace` removal planning and execution. Before
   any rewrite it decides which associated bookmarks point into the landed stack (only
   those are deleted; trunk and the `--into` target never are) and, unless the directory
-  is kept, refuses when `unpreserved` finds untracked files only that checkout has.
+  is kept or `--force` is passed, refuses when `unpreserved` finds untracked files only
+  that checkout has.
 - `unpreserved` walks a checkout's untracked entries (everything not in the snapshot's
   tracked file list) and reports those a directory deletion would lose: not trash, and
   with no identical copy (same size and modification time, else same bytes) at the same

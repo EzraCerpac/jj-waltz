@@ -1491,7 +1491,8 @@ fn merge_refuses_before_any_change_when_untracked_files_would_be_lost() {
             ))
             .stderr(predicate::str::contains("secret.local"))
             .stderr(predicate::str::contains("notes/todo.local"))
-            .stderr(predicate::str::contains("--keep-dir"));
+            .stderr(predicate::str::contains("--keep-dir"))
+            .stderr(predicate::str::contains("--force"));
     }
 
     assert_eq!(main_history(&repo), ["trunk", "initial"]);
@@ -1543,6 +1544,42 @@ fn merge_keep_dir_lands_and_keeps_untracked_files() {
         "only here\n"
     );
     assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn merge_force_lands_and_deletes_untracked_files() {
+    skip_without_jj!();
+    let (repo, feature) = untracked_fixture();
+    write_in(&feature, "secret.local", "only here\n");
+
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted directory"));
+
+    assert_eq!(
+        main_history(&repo),
+        ["ignore", "feature two", "feature one", "trunk", "initial"]
+    );
+    assert!(!feature.exists());
+    assert!(!repo.workspace_names().contains(&"feature-a".to_owned()));
+}
+
+#[test]
+fn merge_force_conflicts_with_keep_dir() {
+    skip_without_jj!();
+    let (repo, feature) = untracked_fixture();
+    write_in(&feature, "secret.local", "only here\n");
+
+    repo.cmd()
+        .args(["merge", "feature-a", "--into", "main", "-f", "--keep-dir"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+
+    assert_eq!(main_history(&repo), ["trunk", "initial"]);
+    assert!(feature.join("secret.local").is_file());
 }
 
 #[test]

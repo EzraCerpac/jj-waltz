@@ -414,6 +414,14 @@ struct MergeCommand {
         help = "Forget the workspace but keep its directory, including untracked files"
     )]
     keep_dir: bool,
+    #[arg(
+        short,
+        long,
+        conflicts_with = "keep_dir",
+        action = ArgAction::SetTrue,
+        help = "Delete the directory even when it holds untracked files that would be lost"
+    )]
+    force: bool,
     #[arg(long, hide = true, action = ArgAction::SetTrue)]
     print_path: bool,
 }
@@ -1115,6 +1123,7 @@ fn run_merge(cmd: MergeCommand) -> Result<()> {
         squash: cmd.squash,
         push: cmd.push,
         keep_dir: cmd.keep_dir,
+        force: cmd.force,
     })?;
     print_warnings(&outcome.warnings);
     let mut report = String::new();

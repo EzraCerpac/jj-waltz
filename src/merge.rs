@@ -21,6 +21,8 @@ pub struct MergeRequest {
     pub push: bool,
     /// Forget the workspace but leave its directory, skipping the unpreserved-file check.
     pub keep_dir: bool,
+    /// Delete the directory without the unpreserved-file check, losing its untracked files.
+    pub force: bool,
 }
 
 #[derive(Debug)]
@@ -59,8 +61,9 @@ enum Landing {
 /// bookmark it is rebased onto that bookmark, which is fast-forwarded. Removal is planned
 /// before any mutation. It deletes the merged workspace's associated bookmark only when that
 /// bookmark points into the landed stack, and never trunk or the `--into` target. Unless the
-/// directory is kept, merging refuses before any mutation when the directory holds files JJ
-/// does not track that the default workspace has no identical copy of. A failure before
+/// directory is kept or `force` is set, merging refuses before any mutation when the
+/// directory holds files JJ does not track that the default workspace has no identical copy
+/// of. A failure before
 /// removal leaves the workspace in place, and rerunning is safe: an already landed stack is
 /// empty.
 pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
@@ -89,7 +92,7 @@ pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
     let tracked = source
         .snapshot_tracked_files()
         .with_context(|| format!("failed to snapshot workspace {name}"))?;
-    if !request.keep_dir {
+    if !request.keep_dir && !request.force {
         refuse_unpreserved_files(&source, &tracked, &name, &source_root, &default_root)?;
     }
 
@@ -320,14 +323,14 @@ fn refuse_unpreserved_files(
         })
     };
     let entries = check().with_context(|| {
-        format!("failed to check workspace {name} for untracked files; pass --keep-dir to keep its directory")
+        format!("failed to check workspace {name} for untracked files; pass --keep-dir to keep its directory, or --force to delete it anyway")
     })?;
     if entries.is_empty() {
         return Ok(());
     }
     let files = entries.iter().map(|entry| entry.files.len()).sum::<usize>();
     bail!(
-        "workspace {name} has {files} untracked file(s) that no `{marker}` ignore rule covers and that the default workspace has no identical copy of; removing the workspace would delete them:\n{}\nIf they are regenerable, move the patterns shown into a `{marker}` section of their ignore file (it ends at the next blank line).{} Otherwise pass --keep-dir to keep the directory, or delete or move these files and rerun `jw merge`",
+        "workspace {name} has {files} untracked file(s) that no `{marker}` ignore rule covers and that the default workspace has no identical copy of; removing the workspace would delete them:\n{}\nIf they are regenerable, move the patterns shown into a `{marker}` section of their ignore file (it ends at the next blank line).{} Otherwise pass --keep-dir to keep the directory, pass --force to delete these files with it, or delete or move them and rerun `jw merge`",
         unpreserved::summarize(&entries, UNPRESERVED_LIST_LIMIT),
         adoption_hint(&entries, tracked),
         marker = trash::TRASH_MARKER,

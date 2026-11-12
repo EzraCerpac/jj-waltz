@@ -131,7 +131,8 @@ workspace and deletes its directory.
   or not, without an identical copy at the same path in the default workspace. Show the
   listed files and rules to the user. Move a pattern into a trash section, or adopt a
   tool's ignore file, only when the user confirms its files are regenerable; pass `--keep-dir` only when they want the
-  directory kept, and never delete those files without asking.
+  directory kept, and never delete those files without asking. `--force` deletes the directory with every listed
+  file; pass it only when the user explicitly confirms those files may be lost.
 - Conflicts or a failed `--push` keep the workspace; resolve and rerun.
 
 ## Prune
