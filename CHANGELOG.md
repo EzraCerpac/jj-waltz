@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Add `jw merge [workspace] [--into bookmark] [--squash] [--push] [--keep-dir | --force]`,
+  which lands a workspace's stack and then removes the workspace and its directory.
+  By default the stack is inserted before the current workspace's `@` (the default
+  workspace's when merging the current one) without moving bookmarks; `--into`
+  rebases onto a bookmark and advances it. The associated bookmark is deleted only
+  when it points into the landed stack; trunk, the `--into` target, and bookmarks
+  pointing elsewhere are kept with a warning. Only untracked files covered by a
+  `# jw:trash` section of an ignore file (which ends at the next blank line or `# jw:`
+  line) are deleted with the directory. A `# jw:trash-rules <path>` line in a
+  `.gitignore` adopts a nested `.gitignore` below it, such as one a tool writes and
+  rewrites, making all of its rules trash. Before any change, merge refuses when the
+  directory holds any other untracked file, ignored or not, with no identical copy in
+  the default workspace, listing each with the ignore file, line, and pattern that
+  decided it, as `git check-ignore` reports; `--keep-dir` lands and forgets the
+  workspace but keeps the directory, and `-f`/`--force` skips the check and deletes the
+  directory with those files. Merging the current workspace moves the shell to the default workspace.
+  Conflicts and push failures keep the workspace; reruns do not land work twice.
 - Read every workspace root with one `jj workspace list` process on JJ releases
   whose templates expose `WorkspaceRef.root()`, instead of one `jj workspace root`
   process per workspace. With ~180 workspaces this takes `jw add` and `jw remove`

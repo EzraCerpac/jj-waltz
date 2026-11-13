@@ -63,6 +63,16 @@ by itself a claim that a command exposing that concept already exists.
   possibly stale rows must say so.
 - **Creation workflow** — ordered policy, workspace creation, bookmark creation,
   link application, rollback, and switch-state recording.
+- **Trash section** — the lines after a `# jw:trash` comment in any ignore file Git
+  and JJ read, up to the next blank line or `# jw:` line. Untracked files whose
+  deciding ignore pattern sits in one are **trash**: regenerable, and deleted with a
+  merged workspace's directory.
+- **Adopted ignore file** — a nested `.gitignore`, typically written by a tool, named
+  by a `# jw:trash-rules <path>` line in a `.gitignore` in a directory above it. Every
+  ignoring rule in it is a trash rule, since the tool's rewrites would drop a marker.
+- **Precious file** — any other untracked file: ignored by a pattern outside a trash
+  section, or not ignored at all. Merge never deletes one that the default workspace
+  lacks an identical copy of.
 - **Removal plan** — workspace, directory action, and associated bookmarks known
   before destructive work begins.
 - **Associated bookmark** — a local bookmark recorded by `jw` for one workspace.
@@ -100,7 +110,8 @@ by itself a claim that a command exposing that concept already exists.
 - One status or planning command derives from one final repository snapshot and
   names its JJ operation ID.
 - Trunk resolves to exactly one revision; no ordinary `jw` operation moves a
-  trunk bookmark.
+  trunk bookmark. `jw merge --into` is the explicit exception: it fast-forwards
+  the bookmark it lands on.
 - Refresh completes before snapshot capture. Status derivation performs no
   process execution or filesystem mutation.
 - Managed metadata records only `jw` lifecycle intent. Unmanaged inference stays
@@ -121,7 +132,9 @@ by itself a claim that a command exposing that concept already exists.
   shared entries with the same source. Relative targets are resolved per
   receiving workspace.
 - Removal preserves bookmarks unless the user confirms deletion.
-- Publication and cleanup remain separate workflows.
+- Publication and cleanup remain separate workflows, except that `jw merge`
+  sequences landing and removal: removal is planned first and runs only after
+  landing succeeds.
 - Core workspace lifecycle and local status remain offline; forge and network
   information are optional enrichment.
 - JSON stdout contains only its versioned document; diagnostics use stderr.

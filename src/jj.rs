@@ -25,6 +25,7 @@ const REVISION_TEMPLATE: &str =
 const LOCAL_BOOKMARK_NAMES_TEMPLATE: &str = r#"if(remote, "", json(name) ++ "\n")"#;
 const BOOKMARK_NAMES_TEMPLATE: &str = r#"json(name) ++ "\n""#;
 const TRACKED_FILES_TEMPLATE: &str = r#"json(path) ++ "\n""#;
+const DESCRIPTIONS_TEMPLATE: &str = r#"json(description) ++ "\n""#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjVersion {
@@ -631,6 +632,25 @@ impl JjClient {
             .collect())
     }
 
+    /// Read full revision descriptions, oldest first, at one frozen operation.
+    pub fn descriptions_at(
+        &self,
+        operation_id: impl AsRef<OsStr>,
+        revset: impl AsRef<OsStr>,
+    ) -> Result<Vec<String>> {
+        let args = [
+            OsString::from("log"),
+            OsString::from("-r"),
+            revset.as_ref().to_owned(),
+            OsString::from("--no-graph"),
+            OsString::from("--reversed"),
+            OsString::from("--template"),
+            OsString::from(DESCRIPTIONS_TEMPLATE),
+        ];
+        let output = self.run_at(operation_id, args)?;
+        parse_json_string_lines(output.stdout()?, "description")
+    }
+
     /// Read conflicted bookmark names at one frozen repository operation.
     pub fn conflicted_bookmark_names_at(
         &self,
@@ -670,20 +690,40 @@ impl JjClient {
     /// List the files tracked in this workspace's working-copy commit, relative to
     /// the workspace root, without snapshotting the working copy.
     pub fn tracked_files(&self) -> Result<Vec<PathBuf>> {
-        let output = self.run([
-            "--ignore-working-copy",
+        self.list_tracked_files(&["--ignore-working-copy"])
+    }
+
+    /// Snapshot the working copy, then list the files tracked in its commit, relative
+    /// to the workspace root. Every other file on disk is untracked: ignored, excluded by
+    /// `snapshot.auto-track`, or refused by JJ (for example over
+    /// `snapshot.max-new-file-size`).
+    pub(crate) fn snapshot_tracked_files(&self) -> Result<Vec<PathBuf>> {
+        self.list_tracked_files(&[])
+    }
+
+    fn list_tracked_files(&self, global_args: &[&str]) -> Result<Vec<PathBuf>> {
+        let args = global_args.iter().copied().chain([
             "file",
             "list",
             "-r",
             "@",
             "-T",
             TRACKED_FILES_TEMPLATE,
-        ])?;
+        ]);
+        let output = self.run(args)?;
         // JJ repository paths are always `/`-separated, independent of platform.
         Ok(parse_json_string_lines(output.stdout()?, "file path")?
             .into_iter()
             .map(|path| path.split('/').collect())
             .collect())
+    }
+
+    /// The Git directory backing this repository, which holds `info/exclude`.
+    pub(crate) fn git_root(&self) -> Result<PathBuf> {
+        let output = self
+            .run(["--ignore-working-copy", "git", "root"])
+            .context("the repository is not backed by Git")?;
+        Ok(PathBuf::from(output.trimmed_stdout()?))
     }
 
     /// Whether the watchman filesystem monitor is configured.
