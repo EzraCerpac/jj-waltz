@@ -1,4 +1,4 @@
-use crate::jj::{JjClient, WorkspaceTargetFacts};
+use crate::jj::{self, JjClient, WorkspaceTargetFacts};
 use crate::observe::ObservationEngine;
 use crate::snapshot::{ManagementState, SnapshotEnvelope, WorkspaceSnapshot};
 use anyhow::{Context, Result, bail};
@@ -45,9 +45,9 @@ pub(crate) struct ManagerRow {
 /// Capture manager rows from one final, frozen JJ operation.
 ///
 /// The observation engine owns inventory, metadata, trunk resolution, and the requested refresh
-/// policy. Integration then performs read-only graph queries at the operation recorded by that
-/// snapshot. A broken integration query becomes an `Unknown` row warning so one bad bookmark does
-/// not hide the rest of the workspace list.
+/// policy. Integration then performs two read-only queries at the operation recorded by that
+/// snapshot, however many workspaces exist. A broken integration query becomes an `Unknown` row
+/// warning so one bad bookmark does not hide the rest of the workspace list.
 pub fn capture(trunk: &str, refresh: &[String]) -> anyhow::Result<ManagerSnapshot> {
     capture_with_client(&JjClient::current()?, trunk, refresh)
 }
@@ -66,73 +66,59 @@ fn capture_with_engine(
     engine: &ObservationEngine,
     refresh: &[String],
 ) -> Result<ManagerSnapshot> {
-    let snapshot = engine.capture_list_named(refresh)?;
+    let observation = engine.capture_list_named(refresh)?;
+    let snapshot = observation.envelope;
     let operation_id = snapshot.repository.operation_id.clone();
     let trunk_commit = snapshot.repository.trunk.commit_id.clone();
 
-    let facts = client.workspace_target_facts_at(&operation_id).ok();
-    let local_bookmarks = client.local_bookmark_names_at(&operation_id);
-
-    let mut roots = BTreeSet::from([trunk_commit.clone()]);
-    let bookmark_targets = query_bookmark_targets(client, &operation_id);
-    let mut bookmark_revisions = BTreeMap::<String, Vec<String>>::new();
-    let mut root_errors = BTreeMap::<String, String>::new();
-
-    for workspace in &snapshot.workspaces {
-        let Some(bookmark) = authoritative_bookmark(workspace) else {
-            continue;
-        };
-        let Some(local_bookmarks) = local_bookmarks.as_ref().ok() else {
-            continue;
-        };
-        if !local_bookmarks.contains(bookmark) {
-            continue;
-        }
-        match bookmark_targets.as_ref() {
-            Ok(targets) => {
-                let ids = targets.get(bookmark).cloned().unwrap_or_default();
-                roots.extend(ids.iter().cloned());
-                bookmark_revisions.insert(workspace.name.clone(), ids);
-            }
-            Err(error) => {
-                root_errors.insert(
-                    workspace.name.clone(),
-                    format!("could not resolve recorded bookmark `{bookmark}`: {error:#}"),
-                );
-            }
-        }
-    }
-
-    let mut work_revisions = BTreeMap::<String, WorkTip>::new();
-    if let Some(facts) = facts.as_ref() {
+    let bookmark_targets = client.local_bookmark_targets_at(&operation_id);
+    let mut revisions = BTreeSet::new();
+    let mut empty_tips = BTreeSet::new();
+    if let Ok(targets) = &bookmark_targets {
         for workspace in &snapshot.workspaces {
-            let Some(fact) = facts.get(&workspace.name) else {
-                root_errors.insert(
-                    workspace.name.clone(),
-                    "workspace facts were missing from the frozen observation".to_owned(),
-                );
-                continue;
-            };
-            let tip = select_publish_tip(fact);
-            if let Some(commit_id) = tip.commit_id() {
-                roots.insert(commit_id.to_owned());
+            if let Some([target]) = authoritative_bookmark(workspace)
+                .and_then(|bookmark| targets.get(bookmark))
+                .map(Vec::as_slice)
+            {
+                revisions.insert(target.clone());
             }
-            work_revisions.insert(workspace.name.clone(), tip);
         }
     }
 
-    let graph = query_graph(client, &operation_id, &roots);
-    let trunk_ancestors = graph
-        .as_ref()
-        .ok()
-        .and_then(|graph| graph.ancestors_including(&trunk_commit).ok());
-    let integration_context = IntegrationContext {
-        operation_id: &operation_id,
-        bookmark_revisions: &bookmark_revisions,
-        local_bookmarks: &local_bookmarks,
-        root_errors: &root_errors,
-        graph: graph.as_ref(),
-        trunk_ancestors: trunk_ancestors.as_ref(),
+    let mut work_tips = BTreeMap::<String, WorkTip>::new();
+    let mut tip_errors = BTreeMap::<String, String>::new();
+    for workspace in &snapshot.workspaces {
+        let Some(facts) = observation.facts.get(&workspace.name) else {
+            tip_errors.insert(
+                workspace.name.clone(),
+                "workspace facts were missing from the frozen observation".to_owned(),
+            );
+            continue;
+        };
+        let tip = select_publish_tip(facts);
+        match &tip {
+            WorkTip::Commit(commit_id) => {
+                revisions.insert(commit_id.clone());
+            }
+            WorkTip::Empty(commit_id) => {
+                revisions.insert(commit_id.clone());
+                empty_tips.insert(commit_id.clone());
+            }
+            WorkTip::Conflicted | WorkTip::Divergent => {}
+        }
+        work_tips.insert(workspace.name.clone(), tip);
+    }
+
+    let relations = query_relations(
+        client,
+        &operation_id,
+        &trunk_commit,
+        &revisions,
+        &empty_tips,
+    );
+    let context = IntegrationContext {
+        bookmark_targets: bookmark_targets.as_ref(),
+        relations: relations.as_ref(),
     };
     let mut rows = Vec::with_capacity(snapshot.workspaces.len());
     for workspace in snapshot.workspaces.iter().cloned() {
@@ -142,13 +128,14 @@ fn capture_with_engine(
             .filter(|warning| warning.id == format!("refresh-failed:{}", workspace.name))
             .map(|warning| warning.message.clone())
             .collect::<Vec<_>>();
-        let bookmark_integration =
-            bookmark_integration(&integration_context, &workspace, &mut warnings);
+        let bookmark_integration = bookmark_integration(&context, &workspace, &mut warnings);
+        if let Some(error) = tip_errors.get(&workspace.name) {
+            warnings.push(error.clone());
+        }
         let work_integration = work_integration(
+            &context,
             &trunk_commit,
-            work_revisions.get(&workspace.name),
-            graph.as_ref(),
-            trunk_ancestors.as_ref(),
+            work_tips.get(&workspace.name),
             &mut warnings,
         );
         rows.push(ManagerRow {
@@ -159,15 +146,6 @@ fn capture_with_engine(
         });
     }
 
-    if let Err(error) = &local_bookmarks {
-        for row in &mut rows {
-            if authoritative_bookmark(&row.workspace).is_some() {
-                row.warnings.push(format!(
-                    "could not inspect local bookmarks at the frozen operation: {error:#}"
-                ));
-            }
-        }
-    }
     if let Err(error) = &bookmark_targets {
         for row in &mut rows {
             if authoritative_bookmark(&row.workspace).is_some() {
@@ -177,16 +155,10 @@ fn capture_with_engine(
             }
         }
     }
-    if let Some(error) = graph.as_ref().err() {
+    if let Err(error) = &relations {
         for row in &mut rows {
             row.warnings
                 .push(format!("could not inspect revision ancestry: {error:#}"));
-        }
-    }
-    if facts.is_none() {
-        for row in &mut rows {
-            row.warnings
-                .push("could not inspect workspace facts at the frozen operation".to_owned());
         }
     }
 
@@ -200,12 +172,8 @@ fn authoritative_bookmark(workspace: &WorkspaceSnapshot) -> Option<&str> {
 }
 
 struct IntegrationContext<'a> {
-    operation_id: &'a str,
-    bookmark_revisions: &'a BTreeMap<String, Vec<String>>,
-    local_bookmarks: &'a Result<BTreeSet<String>>,
-    root_errors: &'a BTreeMap<String, String>,
-    graph: Result<&'a RevisionGraph, &'a anyhow::Error>,
-    trunk_ancestors: Option<&'a BTreeSet<String>>,
+    bookmark_targets: Result<&'a BTreeMap<String, Vec<String>>, &'a anyhow::Error>,
+    relations: Result<&'a Relations, &'a anyhow::Error>,
 }
 
 fn bookmark_integration(
@@ -216,28 +184,13 @@ fn bookmark_integration(
     let Some(bookmark) = authoritative_bookmark(workspace) else {
         return Integration::Unassociated;
     };
-    if let Some(error) = context.root_errors.get(&workspace.name) {
-        warnings.push(error.clone());
-        return Integration::Unknown;
-    }
-    let Ok(local_bookmarks) = context.local_bookmarks else {
+    let Ok(targets) = context.bookmark_targets else {
         return Integration::Unknown;
     };
-    if !local_bookmarks.contains(bookmark) {
+    let Some(revisions) = targets.get(bookmark) else {
         warnings.push(format!("recorded bookmark `{bookmark}` is missing"));
         return Integration::Missing;
-    }
-    let Some(revisions) = context.bookmark_revisions.get(&workspace.name) else {
-        warnings.push(format!(
-            "recorded bookmark `{bookmark}` could not be resolved at operation {}",
-            context.operation_id
-        ));
-        return Integration::Unknown;
     };
-    if revisions.is_empty() {
-        warnings.push(format!("recorded bookmark `{bookmark}` has no target"));
-        return Integration::Missing;
-    }
     if revisions.len() > 1 {
         warnings.push(format!(
             "recorded bookmark `{bookmark}` has {} conflicting targets",
@@ -245,19 +198,13 @@ fn bookmark_integration(
         ));
         return Integration::Conflicted;
     }
-    relation_for_revision(
-        context.graph,
-        context.trunk_ancestors,
-        &revisions[0],
-        warnings,
-    )
+    relation_for_revision(context.relations, &revisions[0], warnings)
 }
 
 fn work_integration(
+    context: &IntegrationContext<'_>,
     trunk_commit: &str,
     tip: Option<&WorkTip>,
-    graph: Result<&RevisionGraph, &anyhow::Error>,
-    trunk_ancestors: Option<&BTreeSet<String>>,
     warnings: &mut Vec<String>,
 ) -> Integration {
     let Some(tip) = tip else {
@@ -267,23 +214,21 @@ fn work_integration(
     match tip {
         WorkTip::Conflicted => Integration::Conflicted,
         WorkTip::Divergent => Integration::Unknown,
-        WorkTip::Commit(commit_id) => {
-            relation_for_revision(graph, trunk_ancestors, commit_id, warnings)
-        }
+        WorkTip::Commit(commit_id) => relation_for_revision(context.relations, commit_id, warnings),
         WorkTip::Empty(commit_id) => {
-            let Ok(graph) = graph else {
+            let Ok(relations) = context.relations else {
                 return Integration::Unknown;
             };
-            let Some(node) = graph.nodes.get(commit_id) else {
+            let Some(node) = relations.get(commit_id) else {
                 warnings.push(format!(
-                    "empty working-copy revision `{commit_id}` was absent from the frozen graph"
+                    "empty working-copy revision `{commit_id}` was absent from the frozen ancestry query"
                 ));
                 return Integration::Unknown;
             };
             match node.parents.as_slice() {
                 [] if commit_id == trunk_commit => Integration::InTrunk,
                 [] => Integration::Missing,
-                [parent] => relation_for_revision(Ok(graph), trunk_ancestors, parent, warnings),
+                [parent] => relation_for_revision(Ok(relations), parent, warnings),
                 parents => {
                     warnings.push(format!(
                         "empty working-copy revision `{commit_id}` has {} parents; publish tip is ambiguous",
@@ -317,208 +262,121 @@ enum WorkTip {
     Divergent,
 }
 
-impl WorkTip {
-    fn commit_id(&self) -> Option<&str> {
-        match self {
-            Self::Commit(id) | Self::Empty(id) => Some(id),
-            Self::Conflicted | Self::Divergent => None,
-        }
-    }
-}
-
 fn relation_for_revision(
-    graph: Result<&RevisionGraph, &anyhow::Error>,
-    trunk_ancestors: Option<&BTreeSet<String>>,
+    relations: Result<&Relations, &anyhow::Error>,
     revision: &str,
     warnings: &mut Vec<String>,
 ) -> Integration {
-    let Ok(graph) = graph else {
+    let Ok(relations) = relations else {
         return Integration::Unknown;
     };
-    if trunk_ancestors.is_some_and(|ancestors| ancestors.contains(revision))
-        && is_zero_commit_id(revision)
-    {
-        return Integration::InTrunk;
-    }
-    let Some(node) = graph.nodes.get(revision) else {
+    let Some(node) = relations.get(revision) else {
         warnings.push(format!(
-            "revision `{revision}` was absent from the frozen graph"
+            "revision `{revision}` was absent from the frozen ancestry query"
         ));
         return Integration::Unknown;
     };
     if node.conflicted {
         return Integration::Conflicted;
     }
-    if graph
-        .change_counts
-        .get(&node.change_id)
-        .copied()
-        .unwrap_or(0)
-        > 1
-    {
+    if node.divergent {
         warnings.push(format!(
-            "revision `{revision}` has a divergent change ID in the frozen graph"
+            "revision `{revision}` has a divergent change ID at the frozen operation"
         ));
         return Integration::Unknown;
     }
-    match trunk_ancestors {
-        Some(trunk_ancestors) if trunk_ancestors.contains(revision) => Integration::InTrunk,
-        Some(_) => Integration::OutsideTrunk,
-        None => {
-            warnings.push("could not derive trunk ancestry from the frozen graph".to_owned());
-            Integration::Unknown
-        }
+    if node.in_trunk {
+        Integration::InTrunk
+    } else {
+        Integration::OutsideTrunk
     }
 }
 
+/// How each inspected revision relates to trunk, keyed by commit ID.
+type Relations = BTreeMap<String, RevisionRelation>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RevisionNode {
-    change_id: String,
+struct RevisionRelation {
     parents: Vec<String>,
     conflicted: bool,
+    divergent: bool,
+    in_trunk: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RevisionGraph {
-    nodes: BTreeMap<String, RevisionNode>,
-    change_counts: BTreeMap<String, usize>,
-}
-
-impl RevisionGraph {
-    fn ancestors_including(&self, start: &str) -> Result<BTreeSet<String>> {
-        let mut result = BTreeSet::new();
-        let mut pending = vec![start.to_owned()];
-        while let Some(commit_id) = pending.pop() {
-            if !result.insert(commit_id.clone()) {
-                continue;
-            }
-            if is_zero_commit_id(&commit_id) {
-                continue;
-            }
-            let Some(node) = self.nodes.get(&commit_id) else {
-                bail!("revision `{commit_id}` was absent from the frozen graph")
-            };
-            pending.extend(node.parents.iter().cloned());
-        }
-        Ok(result)
-    }
-}
-
-fn query_graph(
+/// Reads trunk ancestry for exactly the inspected revisions, plus the parents of empty working
+/// copies, at one frozen operation. JJ answers `::trunk` membership itself, so the output size
+/// depends on the number of workspaces and bookmarks, never on the length of history.
+fn query_relations(
     client: &JjClient,
     operation_id: &str,
-    roots: &BTreeSet<String>,
-) -> Result<RevisionGraph> {
-    let roots = roots
-        .iter()
-        .filter(|id| !is_zero_commit_id(id))
-        .map(|id| format!("::{id}"))
-        .collect::<Vec<_>>();
-    if roots.is_empty() {
-        bail!("frozen ancestry query had no non-empty revisions")
+    trunk_commit: &str,
+    revisions: &BTreeSet<String>,
+    empty_tips: &BTreeSet<String>,
+) -> Result<Relations> {
+    if !jj::is_commit_id(trunk_commit) {
+        bail!("resolved trunk `{trunk_commit}` is not a commit ID")
     }
-    let revset = roots.join(" | ");
-    let output = client.run_at(
-        operation_id,
-        [
-            "log",
-            "-r",
-            revset.as_str(),
-            "--no-graph",
-            "--template",
-            r#"commit_id ++ "\t" ++ change_id ++ "\t" ++ json(conflict) ++ "\t" ++ parents.map(|parent| parent.commit_id()).join(",") ++ "\n""#,
-        ],
-    )?;
-    parse_graph(output.stdout()?)
+    if let Some(invalid) = revisions.iter().find(|id| !jj::is_commit_id(id)) {
+        bail!("inspected revision `{invalid}` is not a commit ID")
+    }
+    let in_trunk = format!(
+        "self.contained_in({})",
+        serde_json::to_string(&format!("::{trunk_commit}"))?
+    );
+    let template = format!(
+        r#"commit_id ++ "\t" ++ json(conflict) ++ "\t" ++ json(divergent) ++ "\t" ++ json({in_trunk}) ++ "\t" ++ parents.map(|parent| parent.commit_id()).join(",") ++ "\n""#
+    );
+    let terms = revisions
+        .iter()
+        .cloned()
+        .chain(empty_tips.iter().map(|id| format!("parents({id})")));
+    let mut relations = Relations::new();
+    for revset in jj::union_revsets(terms) {
+        let output = client.run_at(
+            operation_id,
+            [
+                "log",
+                "-r",
+                revset.as_str(),
+                "--no-graph",
+                "--template",
+                template.as_str(),
+            ],
+        )?;
+        relations.extend(parse_relations(output.stdout()?)?);
+    }
+    Ok(relations)
 }
 
-fn parse_graph(output: &str) -> Result<RevisionGraph> {
-    let mut nodes = BTreeMap::new();
-    let mut change_counts = BTreeMap::new();
+fn parse_relations(output: &str) -> Result<Relations> {
+    let mut relations = Relations::new();
     for (index, line) in output.lines().filter(|line| !line.is_empty()).enumerate() {
         let fields = line.split('\t').collect::<Vec<_>>();
-        let [commit_id, change_id, conflicted, parents] = fields.as_slice() else {
+        let [commit_id, conflicted, divergent, in_trunk, parents] = fields.as_slice() else {
             bail!(
                 "frozen ancestry query returned malformed record {}",
                 index + 1
             )
         };
-        let conflicted: bool = serde_json::from_str(conflicted)
-            .with_context(|| format!("invalid conflict flag in graph record {}", index + 1))?;
-        let parents = parents
-            .split(',')
-            .filter(|parent| !parent.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        if nodes
-            .insert(
-                (*commit_id).to_owned(),
-                RevisionNode {
-                    change_id: (*change_id).to_owned(),
-                    parents,
-                    conflicted,
-                },
-            )
-            .is_some()
-        {
-            bail!("frozen ancestry query returned duplicate revision `{commit_id}`")
-        }
-        *change_counts.entry((*change_id).to_owned()).or_default() += 1;
-    }
-    if nodes.is_empty() {
-        bail!("frozen ancestry query returned no revisions")
-    }
-    Ok(RevisionGraph {
-        nodes,
-        change_counts,
-    })
-}
-
-fn is_zero_commit_id(commit_id: &str) -> bool {
-    !commit_id.is_empty() && commit_id.bytes().all(|byte| byte == b'0')
-}
-
-/// Reads every local bookmark target in one frozen query. `bookmarks` is the local bookmark
-/// collection exposed by JJ's commit template, so no bookmark name is treated as a revset.
-fn query_bookmark_targets(
-    client: &JjClient,
-    operation_id: &str,
-) -> Result<BTreeMap<String, Vec<String>>> {
-    let output = client.run_at(
-        operation_id,
-        [
-            "log",
-            "-r",
-            "bookmarks()",
-            "--no-graph",
-            "--template",
-            r#"commit_id ++ "\t" ++ bookmarks.map(|bookmark| json(bookmark.name())).join("\t") ++ "\n""#,
-        ],
-    )?;
-    let mut targets = BTreeMap::<String, Vec<String>>::new();
-    for (index, line) in output
-        .stdout()?
-        .lines()
-        .filter(|line| !line.is_empty())
-        .enumerate()
-    {
-        let mut fields = line.split('\t');
-        let Some(commit_id) = fields.next() else {
-            bail!(
-                "bookmark target query returned malformed record {}",
-                index + 1
-            )
+        let flag = |value: &str, name: &str| -> Result<bool> {
+            serde_json::from_str(value)
+                .with_context(|| format!("invalid {name} flag in ancestry record {}", index + 1))
         };
-        for bookmark in fields {
-            let bookmark: String = serde_json::from_str(bookmark)
-                .with_context(|| format!("invalid bookmark name in target record {}", index + 1))?;
-            targets
-                .entry(bookmark)
-                .or_default()
-                .push(commit_id.to_owned());
-        }
+        relations.insert(
+            (*commit_id).to_owned(),
+            RevisionRelation {
+                parents: parents
+                    .split(',')
+                    .filter(|parent| !parent.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                conflicted: flag(conflicted, "conflict")?,
+                divergent: flag(divergent, "divergent")?,
+                in_trunk: flag(in_trunk, "trunk")?,
+            },
+        );
     }
-    Ok(targets)
+    Ok(relations)
 }
 
 #[cfg(test)]
@@ -561,19 +419,40 @@ mod tests {
     }
 
     #[test]
-    fn graph_parses_parent_edges_and_zero_root() {
-        let graph = parse_graph(
-            "trunk\ttrunk-change\tfalse\tparent\nparent\tparent-change\tfalse\t0000000000000000000000000000000000000000\n",
+    fn relations_parse_flags_and_parent_edges() {
+        let relations = parse_relations(
+            "merge\tfalse\tfalse\ttrue\tleft,right\nroot\tfalse\tfalse\ttrue\t\nwork\ttrue\ttrue\tfalse\tmerge\n",
         )
         .unwrap();
-        assert_eq!(
-            graph.ancestors_including("trunk").unwrap(),
-            BTreeSet::from([
-                "trunk".to_owned(),
-                "parent".to_owned(),
-                "0000000000000000000000000000000000000000".to_owned(),
-            ])
-        );
+        assert_eq!(relations["merge"].parents, ["left", "right"]);
+        assert!(relations["root"].parents.is_empty() && relations["root"].in_trunk);
+        let work = &relations["work"];
+        assert!(work.conflicted && work.divergent && !work.in_trunk);
+        assert!(parse_relations("work\tfalse\n").is_err());
+        assert!(parse_relations("work\tmaybe\tfalse\tfalse\t\n").is_err());
+    }
+
+    #[test]
+    fn ancestry_query_output_is_bounded_by_inspected_revisions_not_history() {
+        let (directory, client) = repo();
+        for index in 0..20 {
+            commit(&client, &directory, "history", &index.to_string());
+        }
+        let trunk = client.resolve_one("@-").unwrap().commit_id;
+        let tip = commit(&client, &directory, "work", "work");
+        let operation_id = client.operation_id().unwrap();
+        let relations = query_relations(
+            &client,
+            &operation_id,
+            &trunk,
+            &BTreeSet::from([tip.clone(), trunk.clone()]),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(relations.len(), 2);
+        assert!(relations[&trunk].in_trunk);
+        assert!(!relations[&tip].in_trunk);
+        assert_eq!(relations[&tip].parents, [trunk]);
     }
 
     #[test]

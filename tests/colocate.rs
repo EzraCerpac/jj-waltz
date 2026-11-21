@@ -85,14 +85,6 @@ impl Fixture {
         )
         .contains("--colocate")
     }
-    fn supports_removal(&self) -> bool {
-        self.command("jj", &self.root)
-            .args(["workspace", "remove", "--help"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    }
     fn config(&self, text: &str) {
         let path = self.temp.path().join("config/jj-waltz");
         fs::create_dir_all(&path).unwrap();
@@ -1092,10 +1084,10 @@ fn keep_dir_can_disconnect_the_current_owned_workspace() {
 }
 
 #[test]
-fn native_removal_snapshots_dirty_target_before_deleting_it() {
+fn removal_snapshots_dirty_target_before_deleting_it() {
     for colocated in [false, true] {
         let f = Fixture::new();
-        if !f.supports_removal() || (colocated && !f.supports()) {
+        if colocated && !f.supports() {
             continue;
         }
         f.jw()
@@ -1156,16 +1148,18 @@ fn native_removal_snapshots_dirty_target_before_deleting_it() {
 }
 
 #[test]
-fn native_removal_of_stale_target_fails_without_lifecycle_cleanup() {
+fn removal_of_stale_target_fails_without_lifecycle_cleanup() {
     let f = Fixture::new();
-    if !f.supports_removal() {
-        return;
-    }
+    let colocate = if f.supports() {
+        "--colocate"
+    } else {
+        "--no-colocate"
+    };
     f.jw()
-        .args(["add", "stale", "--colocate", "--bookmark", "wip/stale"])
+        .args(["add", "stale", colocate, "--bookmark", "wip/stale"])
         .assert()
         .success();
-    let link = fs::read(f.path("stale").join(".git")).unwrap();
+    let link = fs::read(f.path("stale").join(".git")).ok();
     let (record, _) = f.record("stale");
     let metadata = fs::read(&record).unwrap();
     fs::write(f.path("stale").join("tracked"), "unsaved stale target\n").unwrap();
@@ -1183,7 +1177,7 @@ fn native_removal_of_stale_target_fails_without_lifecycle_cleanup() {
         fs::read(f.path("stale").join("tracked")).unwrap(),
         b"unsaved stale target\n"
     );
-    assert_eq!(fs::read(f.path("stale").join(".git")).unwrap(), link);
+    assert_eq!(fs::read(f.path("stale").join(".git")).ok(), link);
     assert_eq!(fs::read(record).unwrap(), metadata);
     assert_eq!(f.registrations(), registrations);
     f.run("jj", &f.root, &["log", "-r", "wip/stale"]);
@@ -1191,9 +1185,9 @@ fn native_removal_of_stale_target_fails_without_lifecycle_cleanup() {
 
 #[cfg(unix)]
 #[test]
-fn native_removal_is_capability_based_and_never_retries_after_mutation() {
+fn forget_reporting_failure_after_completing_still_finishes_owned_cleanup() {
     let f = Fixture::new();
-    if !f.supports_removal() {
+    if !f.supports() {
         return;
     }
     let stale = f.stale_registration();
@@ -1204,8 +1198,7 @@ fn native_removal_is_capability_based_and_never_retries_after_mutation() {
         .success();
     let (record, _) = f.record("owned");
     let mut cmd = f.jw();
-    // A build with an older version string can still advertise native removal.
-    f.with_shim(&mut cmd, "#!/bin/sh\ncase \"$*\" in *--version*) echo 'jj 0.39.0'; exit 0;; *\"workspace remove\"*--help*) exec \"$JW_REAL_JJ\" \"$@\";; *\"workspace remove\"*) \"$JW_REAL_JJ\" \"$@\" || exit $?; echo injected-after-remove >&2; exit 1;; *\"workspace forget\"*) echo forbidden-fallback >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n");
+    f.with_shim(&mut cmd, "#!/bin/sh\ncase \"$*\" in *\"workspace forget\"*) \"$JW_REAL_JJ\" \"$@\" || exit $?; echo injected-after-forget >&2; exit 1;; *\"workspace remove\"*) echo forbidden-native >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n");
     cmd.args(["remove", "owned", "--keep-bookmark"])
         .assert()
         .success()
@@ -1220,42 +1213,9 @@ fn native_removal_is_capability_based_and_never_retries_after_mutation() {
 
 #[cfg(unix)]
 #[test]
-fn unsupported_native_removal_falls_back_but_probe_errors_fail_before_mutation() {
-    for probe_error in [false, true] {
-        let f = Fixture::new();
-        f.jw()
-            .args(["add", "old", "--no-colocate"])
-            .assert()
-            .success();
-        let mut cmd = f.jw();
-        let script = if probe_error {
-            "#!/bin/sh\ncase \"$*\" in *\"workspace remove\"*--help*) echo cannot-read-config >&2; exit 1;; *\"workspace remove\"*|*\"workspace forget\"*) echo forbidden-mutation >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n"
-        } else {
-            "#!/bin/sh\ncase \"$*\" in *\"workspace remove\"*--help*) echo \"error: unrecognized subcommand 'remove'\" >&2; exit 2;; *\"workspace remove\"*) echo forbidden-native >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n"
-        };
-        f.with_shim(&mut cmd, script);
-        cmd.args(["remove", "old", "--keep-bookmark"]);
-        if probe_error {
-            cmd.assert().failure().stderr(predicate::str::contains(
-                "cannot probe native workspace removal",
-            ));
-            assert!(f.path("old").is_dir());
-            assert!(f.names().lines().any(|name| name == "old"));
-        } else {
-            cmd.assert().success();
-            assert!(!f.path("old").exists());
-            assert!(!f.names().lines().any(|name| name == "old"));
-        }
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn native_success_with_remaining_directory_reports_partial_without_retry() {
+fn undeletable_directory_after_forget_reports_partial_removal() {
+    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
-    if !f.supports_removal() {
-        return;
-    }
     f.jw()
         .args([
             "add",
@@ -1267,10 +1227,16 @@ fn native_success_with_remaining_directory_reports_partial_without_retry() {
         .assert()
         .success();
     let (record, _) = f.record("partial");
-    let mut cmd = f.jw();
-    f.with_shim(&mut cmd, "#!/bin/sh\ncase \"$*\" in *\"workspace remove\"*--help*) exec \"$JW_REAL_JJ\" \"$@\";; *\"workspace remove\"*) \"$JW_REAL_JJ\" workspace forget partial || exit $?; echo 'Warning: failed to remove workspace directory' >&2; exit 0;; *\"workspace forget\"*) echo forbidden-fallback >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n");
-    cmd.args(["remove", "partial", "--delete-bookmark"])
-        .assert()
+    // A read-only parent can neither rename the checkout aside nor unlink it.
+    let parent = f.path("partial").parent().unwrap().to_owned();
+    let permissions = fs::metadata(&parent).unwrap().permissions();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let assert = f
+        .jw()
+        .args(["remove", "partial", "--delete-bookmark"])
+        .assert();
+    fs::set_permissions(&parent, permissions).unwrap();
+    assert
         .failure()
         .stderr(predicate::str::contains(
             "partial removal: workspace partial was forgotten and bookmark wip/partial was deleted",
@@ -1283,9 +1249,9 @@ fn native_success_with_remaining_directory_reports_partial_without_retry() {
 
 #[cfg(unix)]
 #[test]
-fn unverifiable_native_removal_retains_registration_and_metadata() {
+fn unverifiable_forget_retains_checkout_registration_and_metadata() {
     let f = Fixture::new();
-    if !f.supports_removal() {
+    if !f.supports() {
         return;
     }
     let stale = f.stale_registration();
@@ -1300,13 +1266,14 @@ fn unverifiable_native_removal_retains_registration_and_metadata() {
             .unwrap(),
     );
     let mut cmd = f.jw();
-    cmd.env("JW_REMOVED", f.temp.path().join("removed"));
-    f.with_shim(&mut cmd, "#!/bin/sh\ncase \"$*\" in *\"workspace remove\"*--help*) exec \"$JW_REAL_JJ\" \"$@\";; *\"workspace remove\"*) \"$JW_REAL_JJ\" \"$@\" || exit $?; touch \"$JW_REMOVED\"; exit 0;; *\"workspace list\"*) if test -f \"$JW_REMOVED\"; then echo injected-list-error >&2; exit 1; fi;; *\"workspace forget\"*) echo forbidden-fallback >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n");
+    cmd.env("JW_FORGOTTEN", f.temp.path().join("forgotten"));
+    f.with_shim(&mut cmd, "#!/bin/sh\ncase \"$*\" in *\"workspace forget\"*) \"$JW_REAL_JJ\" \"$@\" || exit $?; touch \"$JW_FORGOTTEN\"; exit 0;; *\"workspace list\"*) if test -f \"$JW_FORGOTTEN\"; then echo injected-list-error >&2; exit 1; fi;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n");
     cmd.args(["remove", "owned", "--keep-bookmark"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("cannot verify remove outcome"));
-    assert!(!f.path("owned").exists());
+        .stderr(predicate::str::contains("cannot verify forget outcome"))
+        .stderr(predicate::str::contains("detached Git link retained"));
+    assert!(f.path("owned").is_dir());
     assert!(record.exists());
     assert!(admin.exists());
     assert!(stale.exists());
@@ -1314,14 +1281,14 @@ fn unverifiable_native_removal_retains_registration_and_metadata() {
 
 #[cfg(unix)]
 #[test]
-fn keep_dir_missing_remove_and_prune_do_not_use_native_removal() {
-    for mode in ["keep", "missing", "prune"] {
+fn removal_and_prune_never_use_native_workspace_remove() {
+    for mode in ["delete", "keep", "missing", "prune"] {
         let f = Fixture::new();
         f.jw()
             .args(["add", "target", "--no-colocate"])
             .assert()
             .success();
-        if mode != "keep" {
+        if matches!(mode, "missing" | "prune") {
             fs::remove_dir_all(f.path("target")).unwrap();
         }
         let path_unknown = mode == "missing"
@@ -1341,6 +1308,9 @@ fn keep_dir_missing_remove_and_prune_do_not_use_native_removal() {
         let mut cmd = f.jw();
         f.with_shim(&mut cmd, "#!/bin/sh\ncase \"$*\" in *\"workspace remove\"*) echo forbidden-native >&2; exit 1;; esac\nexec \"$JW_REAL_JJ\" \"$@\"\n");
         match mode {
+            "delete" => {
+                cmd.args(["remove", "target", "--keep-bookmark"]);
+            }
             "keep" => {
                 cmd.args(["remove", "target", "--keep-dir", "--keep-bookmark"]);
             }

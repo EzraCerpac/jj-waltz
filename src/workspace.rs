@@ -70,8 +70,11 @@ pub struct WorkspaceInventory {
 impl WorkspaceInventory {
     pub fn load() -> Result<Self> {
         let current_root = canonicalize_dir(&workspace_root_current()?)?;
-        let names = workspace_names()?;
         let listed_roots = JjClient::current()?.workspace_roots()?;
+        let names = match &listed_roots {
+            Some(listed) => listed.keys().cloned().collect(),
+            None => workspace_names()?,
+        };
         let mut entries = names
             .iter()
             .map(|name| {
@@ -247,15 +250,17 @@ pub fn current_workspace_name() -> Result<String> {
 }
 
 /// Resolve a root from the batched listing. JJ renders the same recorded path that
-/// `jj workspace root --name` prints, including for a deleted checkout, so the
-/// listing is used verbatim. Names it could not render use the per-workspace query.
+/// `jj workspace root --name` prints, including for a deleted checkout on JJ 0.46+.
+/// A listed workspace without a rendered root has no usable checkout: either JJ has no
+/// recorded path, or an older JJ cannot render a deleted one, which the per-workspace
+/// query also reports as missing. Only JJ without root templates queries per workspace.
 fn workspace_root_by_name(
     listed: Option<&crate::jj::WorkspaceRoots>,
     name: &str,
 ) -> Result<Option<PathBuf>> {
-    match listed.and_then(|listed| listed.get(name)) {
-        Some(Some(root)) => Ok(Some(root.clone())),
-        _ => workspace_root_by_name_direct(name),
+    match listed {
+        Some(listed) => Ok(listed.get(name).cloned().flatten()),
+        None => workspace_root_by_name_direct(name),
     }
 }
 
@@ -419,14 +424,20 @@ pub fn plan_remove_workspace(
     })
 }
 
+/// Forget a planned workspace, then delete its directory and any confirmed bookmarks.
+///
+/// Before a directory is deleted its working copy is snapshotted, so uncommitted changes to
+/// tracked and new files survive in the workspace's last commit; a stale working copy refuses
+/// removal. The directory is renamed aside and deleted by a detached process, so the command
+/// returns without waiting for large checkouts to be unlinked.
 pub fn execute_remove_workspace(
     plan: RemovalPlan,
     delete_bookmarks: bool,
 ) -> Result<RemovalResult> {
     let client = JjClient::current()?;
     let current_metadata = metadata_store()?.get(&plan.workspace)?;
-    crate::ownership::ensure_removal_allowed(
-        &client,
+    let ownership = crate::ownership::OwnershipView::live(&client);
+    ownership.ensure_removal_allowed(
         &plan.workspace,
         Some(&plan.path),
         current_metadata.as_ref(),
@@ -435,22 +446,15 @@ pub fn execute_remove_workspace(
         bail!("workspace metadata changed during removal; review it again")
     }
     let deleted_dir = plan.delete_dir && plan.path.is_dir();
-    let native_removal = deleted_dir && client.supports_workspace_removal()?;
-    if native_removal {
-        crate::ownership::remove_workspace(
-            &client,
-            &plan.workspace,
-            &plan.path,
-            current_metadata.as_ref(),
-        )?;
-    } else {
-        crate::ownership::forget_workspace(
-            &client,
-            &plan.workspace,
-            Some(&plan.path),
-            current_metadata.as_ref(),
-        )?;
+    if deleted_dir {
+        JjClient::new(&plan.path).run(["status"]).with_context(|| {
+            format!(
+                "failed to snapshot workspace {} before removal; nothing was removed",
+                plan.workspace
+            )
+        })?;
     }
+    ownership.forget(&plan.workspace, Some(&plan.path), current_metadata.as_ref())?;
 
     let mut deleted_bookmarks = Vec::new();
     if delete_bookmarks && !plan.bookmarks.is_empty() {
@@ -485,24 +489,8 @@ pub fn execute_remove_workspace(
         }
     }
 
-    if native_removal {
-        match fs::symlink_metadata(&plan.path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            outcome => {
-                let detail = match outcome {
-                    Err(error) => format!("; cannot verify directory deletion: {error}"),
-                    Ok(_) => String::new(),
-                };
-                bail!(
-                    "{}; workspace directory remains at {}{}",
-                    partial_removal_progress(&plan.workspace, &deleted_bookmarks),
-                    plan.path.display(),
-                    detail
-                )
-            }
-        }
-    } else if deleted_dir {
-        remove_workspace_directory(&plan.path).with_context(|| {
+    if deleted_dir {
+        retire_workspace_directory(&plan.path).with_context(|| {
             format!(
                 "{}; workspace directory remains at {}",
                 partial_removal_progress(&plan.workspace, &deleted_bookmarks),
@@ -534,6 +522,93 @@ fn partial_removal_progress(workspace: &str, deleted_bookmarks: &[String]) -> St
 
 fn remove_workspace_directory(path: &Path) -> io::Result<()> {
     remove_workspace_directory_with(path, |path| fs::remove_dir_all(path))
+}
+
+/// Hidden subcommand the detached deleter runs. Not part of the public CLI.
+pub const PURGE_RETIRED_COMMAND: &str = "__purge-retired-directory";
+const RETIRED_MARKER: &str = ".jw-retired-";
+
+/// Make a forgotten workspace's directory disappear from its path without waiting to unlink it.
+///
+/// The directory is renamed to a hidden sibling, which is atomic within one filesystem, and a
+/// detached `jw` process deletes it. A checkout with large dependency trees can take seconds
+/// to unlink. When the rename or the deleter cannot be started, the directory is deleted here.
+fn retire_workspace_directory(path: &Path) -> io::Result<()> {
+    let Some(retired) = retired_directory_path(path) else {
+        return remove_workspace_directory(path);
+    };
+    if crate::ownership::rename_no_replace(path, &retired).is_err() {
+        return remove_workspace_directory(path);
+    }
+    if spawn_retired_directory_purge(&retired).is_err() {
+        return remove_workspace_directory(&retired);
+    }
+    Ok(())
+}
+
+fn retired_directory_path(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    let name = path.file_name()?.to_string_lossy();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(parent.join(format!(
+        ".{name}{RETIRED_MARKER}{}-{nanos}",
+        std::process::id()
+    )))
+}
+
+fn spawn_retired_directory_purge(retired: &Path) -> io::Result<()> {
+    // Unit-test binaries cannot run jw subcommands.
+    if cfg!(test) {
+        return remove_workspace_directory(retired);
+    }
+    let mut command = std::process::Command::new(env::current_exe()?);
+    command
+        .arg(PURGE_RETIRED_COMMAND)
+        .arg(retired)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Leave the terminal's process group so Ctrl-C after jw exits cannot interrupt deletion.
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    let mut child = command.spawn()?;
+    // Reap the deleter if this process outlives it, as the interactive manager does.
+    thread::spawn(move || child.wait());
+    Ok(())
+}
+
+/// Entry point of the detached deleter. Only directories this module retired are accepted.
+pub fn purge_retired_directory(path: &Path) -> Result<()> {
+    let is_retired = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.') && name.contains(RETIRED_MARKER));
+    if !is_retired {
+        bail!(
+            "refusing to purge a directory jw did not retire: {}",
+            path.display()
+        )
+    }
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("cannot inspect retired directory {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("retired path is not a directory: {}", path.display())
+    }
+    remove_workspace_directory(path)
+        .with_context(|| format!("failed to delete retired directory {}", path.display()))
 }
 
 fn remove_workspace_directory_with(
@@ -812,41 +887,37 @@ fn rollback_workspace_parts(
     }
 }
 
+/// Forget every workspace whose checkout is gone, with one JJ operation.
+///
+/// Every candidate is validated first; if any is refused, none is forgotten.
 pub fn prune_missing_workspaces() -> Result<Vec<String>> {
-    let mut removed = Vec::new();
     let store = metadata_store()?;
+    let missing = WorkspaceInventory::load()?
+        .entries
+        .into_iter()
+        .filter(|entry| !entry.root.as_deref().is_some_and(Path::is_dir))
+        .map(|entry| Ok((store.get(&entry.name)?, entry.name)))
+        .collect::<Result<Vec<_>>>()?;
+    let targets = missing
+        .iter()
+        .map(|(metadata, name)| crate::ownership::MissingWorkspace {
+            name,
+            metadata: metadata.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    crate::ownership::forget_missing(&JjClient::current()?, &targets)?;
 
-    for entry in WorkspaceInventory::load()?.entries {
-        match &entry.root {
-            Some(path) if path.is_dir() => {}
-            _ => {
-                let metadata = store.get(&entry.name)?;
-                crate::ownership::ensure_removal_allowed(
-                    &JjClient::current()?,
-                    &entry.name,
-                    entry.root.as_deref(),
-                    metadata.as_ref(),
-                )?;
-                crate::ownership::forget_workspace(
-                    &JjClient::current()?,
-                    &entry.name,
-                    entry.root.as_deref(),
-                    metadata.as_ref(),
-                )?;
-                if let Some(metadata) = metadata
-                    && !store.remove_if_matches(&metadata)?
-                {
-                    bail!(
-                        "workspace metadata changed during prune and was retained: {}",
-                        metadata.workspace_name
-                    )
-                }
-                removed.push(entry.name);
-            }
+    for (metadata, _) in &missing {
+        if let Some(metadata) = metadata
+            && !store.remove_if_matches(metadata)?
+        {
+            bail!(
+                "workspace metadata changed during prune and was retained: {}",
+                metadata.workspace_name
+            )
         }
     }
-
-    Ok(removed)
+    Ok(missing.into_iter().map(|(_, name)| name).collect())
 }
 
 /// Workspace names for shell completion, from a single JJ call that skips the snapshot.
@@ -1162,6 +1233,51 @@ mod tests {
         assert!(validate_workspace_name("../bad").is_err());
         assert!(validate_workspace_name("-bad").is_err());
         assert!(validate_workspace_name("bad:name").is_err());
+    }
+
+    #[test]
+    fn retired_workspace_directory_leaves_its_path_immediately() {
+        let tempdir = tempfile::tempdir().expect("create temporary directory");
+        let workspace = tempdir.path().join("repo.feature");
+        fs::create_dir_all(workspace.join("node_modules/dep")).expect("create workspace");
+        fs::write(workspace.join("node_modules/dep/index.js"), "x").expect("write file");
+
+        retire_workspace_directory(&workspace).expect("retire directory");
+
+        assert!(!workspace.exists());
+        let leftovers = fs::read_dir(tempdir.path())
+            .expect("list parent")
+            .collect::<io::Result<Vec<_>>>()
+            .expect("read parent entries");
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn purge_accepts_only_directories_jw_retired() {
+        let tempdir = tempfile::tempdir().expect("create temporary directory");
+        let ordinary = tempdir.path().join("repo.feature");
+        fs::create_dir(&ordinary).expect("create ordinary directory");
+        assert!(purge_retired_directory(&ordinary).is_err());
+        assert!(ordinary.is_dir());
+
+        let retired = retired_directory_path(&ordinary).expect("retired name");
+        fs::rename(&ordinary, &retired).expect("retire directory");
+        purge_retired_directory(&retired).expect("purge retired directory");
+        assert!(!retired.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_refuses_a_retired_name_that_is_a_symlink() {
+        let tempdir = tempfile::tempdir().expect("create temporary directory");
+        let victim = tempdir.path().join("victim");
+        fs::create_dir(&victim).expect("create victim");
+        fs::write(victim.join("keep"), "keep").expect("write victim file");
+        let link = retired_directory_path(&tempdir.path().join("repo.feature")).expect("name");
+        std::os::unix::fs::symlink(&victim, &link).expect("create symlink");
+
+        assert!(purge_retired_directory(&link).is_err());
+        assert!(victim.join("keep").is_file());
     }
 
     #[test]

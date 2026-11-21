@@ -7,12 +7,34 @@
   process per workspace. With ~180 workspaces this takes `jw add` and `jw remove`
   from about 13 seconds to about one. Older JJ keeps per-workspace queries, trying
   `default` first when locating the primary workspace.
-- Prefer native `jj workspace remove` when the executable advertises it (JJ 0.46+),
-  snapshotting dirty target changes before deletion while retaining ownership,
-  manager review gates, unrelated Git registrations, and older-JJ fallback.
-  Keep-directory and missing-directory cleanup continue to use guarded forgetting.
-  Verify native partial progress, including warning-only directory deletion failures,
-  without retrying through custom deletion. Minimum JJ remains 0.39.
+- No command starts more JJ processes because a repository has more workspaces
+  (JJ 0.44+; 0.39 keeps per-workspace root queries). With 188 workspaces, opening
+  `jw` (the manager) goes from 200 JJ processes and ~13 seconds to 10 processes and
+  under half a second; `jw list --format=json`, `jw status`, and `jw doctor` go from
+  18–25 seconds to about half a second. A new test enforces flat process counts.
+  - Workspace roots are read from one listing in every snapshot, adoption, the
+    manager's nested-workspace check, and doctor.
+  - Diff statistics, which read file contents, are computed only for refreshed,
+    modified working copies; the per-workspace facts query no longer computes them.
+    The manager reuses the snapshot's facts instead of querying them again.
+  - Trunk ancestry is answered by JJ for the inspected revisions only, instead of
+    loading all history, so the manager's cost no longer grows with history.
+    Divergence now uses JJ's `divergent` rather than duplicates within that history.
+  - Creation bases, bookmark targets, and doctor's checks are batched. Ownership
+    checks share one read of the Git backend and linked registrations, and inspect a
+    checkout's Git topology with one `git` process instead of three.
+  - The manager revalidates a removal batch with one capture instead of one per row,
+    and prunes missing workspaces with one `jj workspace forget`.
+- `jw remove` returns without waiting for large checkouts to be deleted. Removal
+  snapshots the target working copy (preserving its tracked and new files, and
+  refusing a stale one), forgets it, renames the directory to a hidden sibling, and
+  deletes it in a detached process. With a 3.4 GB `node_modules` this takes removal
+  from ~4.7 seconds to ~0.2. Snapshotting now also protects dirty targets on JJ
+  older than 0.46. Native `jj workspace remove` is no longer used, because it
+  deletes synchronously.
+- `jw prune` validates every missing workspace before forgetting any of them; one
+  refused workspace now leaves every workspace registered instead of pruning those
+  listed before it.
 - Explicit unsupported workspace colocation now advises upgrading to JJ 0.46+
   or using `--no-colocate`; automatic inheritance still falls back to JJ-only.
 - Speed up workspace-name shell completion: it now makes a single JJ call that
