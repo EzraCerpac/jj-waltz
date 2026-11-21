@@ -166,9 +166,10 @@ pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
             }
             bookmark_revset(name)
         }
-        // Pin the parents by commit ID: inserting the stack rewrites the working copy.
+        // Pin the parents by commit ID: inserting the stack rewrites the working copy. The
+        // working copy itself is a base too, so a stack built on it never includes it.
         Landing::Workspace { working_copy, .. } => source
-            .resolve_all_at(&operation_id, format!("{working_copy}-"))?
+            .resolve_all_at(&operation_id, format!("{working_copy} | {working_copy}-"))?
             .iter()
             .map(|parent| parent.commit_id.as_str())
             .collect::<Vec<_>>()

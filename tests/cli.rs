@@ -1171,6 +1171,34 @@ fn merge_named_workspace_inserts_it_before_current_working_copy() {
 }
 
 #[test]
+fn merge_inserts_a_workspace_built_on_the_receiving_working_copy() {
+    skip_without_jj!();
+    let repo = TestRepo::new().expect("create test repo");
+    fs::write(repo.default_root.join("wip.txt"), "wip\n").expect("write uncommitted work");
+    repo.run_jj(["file", "track", "wip.txt"]);
+    repo.run_jj(["describe", "-m", "wip"]);
+    repo.cmd()
+        .args(["add", "--at", "@", "--no-bookmark", "feature-a"])
+        .assert()
+        .success();
+    let feature = repo.default_root.with_extension("feature-a");
+    commit_file(&repo, &feature, "one.txt", "one\n", "feature one");
+
+    repo.cmd()
+        .args(["merge", "feature-a"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Landed workspace feature-a into workspace default: 1 revision(s)",
+        ));
+    assert_eq!(
+        history(&repo, "::@ ~ root()"),
+        ["wip", "feature one", "initial"]
+    );
+    assert!(!feature.exists());
+}
+
+#[test]
 fn merge_current_workspace_inserts_it_into_default_workspace() {
     skip_without_jj!();
     let (repo, feature) = merge_fixture(None);
