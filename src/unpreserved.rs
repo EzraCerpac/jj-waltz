@@ -337,7 +337,7 @@ mod tests {
             .iter()
             .map(|entry| {
                 (
-                    entry.path.to_str().unwrap(),
+                    entry.path.as_path(),
                     entry.files.len(),
                     entry.verdict.clone(),
                 )
@@ -346,10 +346,10 @@ mod tests {
         assert_eq!(
             summary,
             [
-                (".vscode", 2, rule(".vscode/")),
-                ("cache.local", 1, rule(".env*")),
-                ("notes/a.md", 1, Verdict::NotIgnored),
-                ("src/.env.local", 1, rule(".env*")),
+                (Path::new(".vscode"), 2, rule(".vscode/")),
+                (Path::new("cache.local"), 1, rule(".env*")),
+                (Path::new("notes/a.md"), 1, Verdict::NotIgnored),
+                (Path::new("src/.env.local"), 1, rule(".env*")),
             ]
         );
         // One batch beside tracked files, then one per level of untracked, unignored

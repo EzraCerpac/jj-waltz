@@ -252,7 +252,8 @@ const GITIGNORE: &str = ".gitignore";
 /// `.gitignore` inside the workspace, below its root, since the adopting `.gitignore`
 /// must sit in a directory above it.
 pub(crate) fn adoptable_directory(source: &Path) -> Option<&Path> {
-    if source.is_absolute() || source.file_name()? != GITIGNORE {
+    // Rooted, not just absolute: Windows reads `/home/u/.gitignore` as relative.
+    if source.has_root() || source.file_name()? != GITIGNORE {
         return None;
     }
     source
