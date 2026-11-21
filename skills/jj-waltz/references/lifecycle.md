@@ -114,6 +114,27 @@ Do not bypass this with native JJ/Git cleanup or a gardener; use the owning app.
 
 Complete removal when `jw list` no longer contains the workspace and the directory and bookmarks match the chosen preservation policy.
 
+## Merge
+
+Run `jw merge` only when the user asks to land a workspace. It lands the workspace's
+stack (before the receiving `@`, or onto `--into <bookmark>`), then forgets the
+workspace and deletes its directory.
+
+- It deletes the associated bookmark only when it points into the landed stack; trunk,
+  the `--into` target, and bookmarks pointing elsewhere are kept with a warning.
+- Only untracked files covered by a `# jw:trash` section of an ignore file are deleted
+  with the directory. A section starts at a `# jw:trash` line and ends at the next blank
+  line or `# jw:` line. A `# jw:trash-rules <path>` line in a `.gitignore` adopts a nested
+  `.gitignore` below it, path relative to its own directory, making all of that file's
+  rules trash; use it for ignore files a tool writes, which cannot keep a marker.
+- It refuses, changing nothing, when the directory holds any other untracked file, ignored
+  or not, without an identical copy at the same path in the default workspace. Show the
+  listed files and rules to the user. Move a pattern into a trash section, or adopt a
+  tool's ignore file, only when the user confirms its files are regenerable; pass `--keep-dir` only when they want the
+  directory kept, and never delete those files without asking. `--force` deletes the directory with every listed
+  file; pass it only when the user explicitly confirms those files may be lost.
+- Conflicts or a failed `--push` keep the workspace; resolve and rerun.
+
 ## Prune
 
 `jw prune` forgets workspaces whose paths are already missing. It does not share `remove`'s explicit default-workspace guard. Inspect `jw list` and `jj workspace list` first, and run it only when every missing entry is intended for forgetting.

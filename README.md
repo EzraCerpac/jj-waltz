@@ -18,6 +18,7 @@ JJ-native workspace lifecycle and cross-workspace coordination.
 The responsibility split is deliberate:
 
 - `jj` owns revision-graph work, bookmarks, fetch/push, and operation-log recovery.
+  `jw merge` is the one exception: it runs a fixed rebase-and-land sequence through `jj`.
 - `jw` owns workspace creation, navigation, links, lifecycle metadata, and safe
   cross-workspace coordination.
 - Forge tools such as `gh` and `glab` own pull requests, merge requests, and CI.
@@ -42,6 +43,7 @@ to a warning rather than make local workspace management fail.
 - `jw adopt <name> --base <revset>` records an existing workspace as managed without rewriting JJ state
 - `jw repair <name> --base <revset> (--bookmark <bookmark> | --no-bookmark)` repairs existing managed metadata without changing JJ state
 - `jw path`, `jw remove <name>...`, `jw prune`, `jw root`, and `jw current`
+- `jw merge [workspace]` lands a workspace before your `@` (or `--into` a bookmark), then removes it
 - `jw reconcile-external <name>` reconciles stale JJ state after external checkout cleanup
 - `--execute` support for jumping into editors or agents after switching
 - optional automatic bookmark creation for new workspaces
@@ -272,6 +274,83 @@ Each target is revalidated before mutation. Changed targets require another
 review. Independent rows continue after a failure; results identify partial
 progress, and failed rows remain selected for an explicit retry. No batch rollback
 or automatic repair is performed.
+
+## Merging workspaces
+
+`jw merge` lands a workspace's work and retires the workspace in one step. Like
+`git merge`, it brings the named workspace into where you are:
+
+```bash
+jw merge feature-api                # insert feature-api's work before your @
+jw merge                            # from inside a workspace: insert it before the default workspace's @
+jw merge feature-api --into main    # rebase onto main instead, and advance main
+jw merge feature-api --squash       # combine the workspace's revisions into one first
+jw merge feature-api --into main --push
+jw merge feature-api --keep-dir     # land and forget it, but leave its directory
+jw merge feature-api --force        # delete its directory even if untracked files would be lost
+```
+
+The landed work is the workspace's publish tip (a non-empty `@`, otherwise its sole
+parent) and every ancestor not already in the destination. By default it is inserted
+between the receiving workspace's `@` and its parent, as `jj rebase -B @` would, so
+uncommitted work stays on top and no bookmark moves. With `--into`, it is rebased onto
+the bookmark, which is fast-forwarded, and `--push` pushes it. Then the merged
+workspace and its directory are removed, along with its associated bookmark when that
+bookmark points into the landed work. The `--into` target, trunk bookmarks, and
+bookmarks pointing anywhere else, such as one associated with trunk through `jw repair`,
+are kept with a warning. Merging the current workspace moves the shell to the default
+workspace.
+
+Deleting the directory loses every file JJ does not track, so `jw merge` only deletes
+the ones you have marked regenerable. Mark them in your ignore files: a `# jw:trash` line
+starts a trash section, which runs until the next blank line or `# jw:` line.
+
+```gitignore
+# jw:trash
+target/
+node_modules/
+*.log
+
+# Everything else stays precious, including rules appended later.
+.env*
+```
+
+Every other untracked file is precious: one ignored by a rule outside a trash section,
+such as a local secret, and one JJ leaves untracked although it is not ignored, such as
+a file `snapshot.auto-track` excludes or one too large to snapshot. Before changing
+anything, `jw merge` refuses if any precious file has no identical copy at the same path
+in the default workspace, and lists each one with the ignore file, line, and pattern that
+decided it. Copies cloned from the default workspace, as `jw add --cow-all` creates,
+count as identical. Move regenerable patterns into a trash section, pass `--keep-dir` to
+land and forget the workspace while keeping its directory, pass `-f`/`--force` to skip
+the check and delete the directory with those files, or delete or move the listed files
+and rerun.
+
+Some tools write their own `.gitignore` inside a directory that also holds source you
+track, and rewrite it on every run. inlang's `project.inlang/.gitignore` is `*` with
+exceptions for its settings. You cannot keep a marker in such a file, and no rule above
+it can override it, because Git lets the deepest ignore file decide. Adopt it instead
+from a `.gitignore` in a directory above it, with a path relative to that directory:
+
+```gitignore
+# jw:trash-rules project.inlang/.gitignore
+```
+
+Every ignoring rule in an adopted file is trash; its negations still re-include files,
+which JJ then tracks. Only adopt a file whose rules cover nothing but regenerable files.
+When merge refuses over a rule in an untracked nested `.gitignore`, it suggests the line.
+
+Trash sections work in every ignore file Git and JJ read: `.gitignore` in any directory,
+the Git directory's `info/exclude`, and `core.excludesFile`, so personal trash such as
+`.DS_Store` can live in your global ignore file. `jw merge` asks Git which rule decides
+each path (`git check-ignore`), so it needs `git` on `PATH` unless you pass `--keep-dir` or `--force`.
+
+`jw merge` refuses the default workspace, conflicted or divergent working copies, merge
+commits, conflicted revisions, and directories holding precious untracked files (unless
+`--force` is passed).
+Removal is planned before any rewrite, so these refusals change nothing. If landing leaves conflicts, or the push fails, the workspace
+is kept; resolve the problem and rerun `jw merge`. Work already landed is not landed
+twice. A conflicted landing names the `jj op restore` operation that undoes it.
 
 ## Removing workspaces
 

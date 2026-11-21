@@ -18,7 +18,10 @@ work. The current command surface remains authoritative in `jw --help`.
 | `gh` / `glab` | Pull or merge requests, forge checks, and CI state |
 
 `jw` may coordinate a graph or publication step through `jj`, but it does not add
-general wrappers for ordinary JJ verbs. Forge and network adapters are optional;
+general wrappers for ordinary JJ verbs. `jw merge` is that coordination for landing: a fixed
+snapshot, optional squash, insertion before a working copy or rebase and fast-forward
+of an explicit bookmark, optional push, and removal,
+with removal planned before the first rewrite. Forge and network adapters are optional;
 core creation, switching, inventory, local status, links, and removal stay
 offline.
 
@@ -37,6 +40,23 @@ offline.
 - `metadata` persists repository-scoped managed-workspace intent.
 - `doctor` runs independent read-only checks and always produces a complete report,
   including configured-link health for every managed workspace.
+- `merge` owns the landing workflow. It selects the publish tip and stack, refuses
+  merges and conflicts, and reuses `workspace` removal planning and execution. Before
+  any rewrite it decides which associated bookmarks point into the landed stack (only
+  those are deleted; trunk and the `--into` target never are) and, unless the directory
+  is kept or `--force` is passed, refuses when `unpreserved` finds untracked files only
+  that checkout has.
+- `unpreserved` walks a checkout's untracked entries (everything not in the snapshot's
+  tracked file list) and reports those a directory deletion would lose: not trash, and
+  with no identical copy (same size and modification time, else same bytes) at the same
+  path in a reference checkout. Trash directories are never entered, a directory is
+  decided whole by the rule that decides it, and symlinks are skipped.
+- `trash` classifies untracked paths with one batched `git check-ignore --verbose` per
+  walk level, against the repository's Git directory with the checkout as work tree.
+  A path is trash only when the deciding pattern sits in a `# jw:trash` section of its
+  ignore file, or in a nested `.gitignore` that a `# jw:trash-rules <path>` line in a
+  `.gitignore` above it adopts; unmarked rules, negations, and unignored paths are
+  precious.
 - `workspace` owns Jujutsu workspace discovery and mutation. Its inventory gives
   commands one consistent view; removal is planned before execution.
 - `cow` owns copy-on-write file cloning and filesystem capability probing. The

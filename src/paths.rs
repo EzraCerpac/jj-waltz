@@ -1,6 +1,14 @@
 use std::borrow::Cow;
 use std::path::Path;
 
+/// Spell a workspace-relative path with `/` on every platform, as ignore files do.
+pub(crate) fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Rust's canonical Windows paths use a verbatim prefix that Git for Windows
 /// cannot accept as a worktree destination or repository argument.
 pub(crate) fn external_command_path(path: &Path) -> Cow<'_, Path> {

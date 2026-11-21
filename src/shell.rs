@@ -8,6 +8,7 @@ pub use clap_complete::Shell;
 
 const COMPLETION_ENV: &str = "_JW_COMPLETE";
 const SWITCH_COMMAND: &str = "switch";
+const MERGE_COMMAND: &str = "merge";
 pub const SWITCH_SHORTHANDS: [&str; 2] = ["^", "-"];
 pub const SWITCH_ALIASES: [&str; 3] = ["s", SWITCH_SHORTHANDS[0], SWITCH_SHORTHANDS[1]];
 const PASSTHROUGH_ARGS: [&str; 4] = ["-x", "--execute", "-h", "--help"];
@@ -53,8 +54,13 @@ fn switch_commands() -> impl Iterator<Item = &'static str> {
     std::iter::once(SWITCH_COMMAND).chain(SWITCH_ALIASES)
 }
 
-fn quoted_switch_commands(separator: &str) -> String {
-    switch_commands()
+/// Commands whose `--print-path` output is the directory the parent shell should enter.
+fn path_commands() -> impl Iterator<Item = &'static str> {
+    switch_commands().chain([MERGE_COMMAND])
+}
+
+fn quoted_path_commands(separator: &str) -> String {
+    path_commands()
         .map(|command| format!("'{command}'"))
         .collect::<Vec<_>>()
         .join(separator)
@@ -69,7 +75,7 @@ fn quoted_passthrough_args(separator: &str) -> String {
 }
 
 fn fish_init() -> String {
-    let switch_commands = quoted_switch_commands(" ");
+    let path_commands = quoted_path_commands(" ");
     let passthrough_args = quoted_passthrough_args(" ");
 
     format!(
@@ -100,10 +106,10 @@ fn fish_init() -> String {
         return 0
     end
 
-    set -l switch_commands {switch_commands}
+    set -l path_commands {path_commands}
     set -l passthrough_args {passthrough_args}
 
-    if contains -- $argv[1] $switch_commands
+    if contains -- $argv[1] $path_commands
         for arg in $argv
             if contains -- $arg $passthrough_args; or string match --quiet -- '{ATTACHED_EXECUTE_LONG}*' $arg; or string match --quiet -- '{ATTACHED_EXECUTE_SHORT}*' $arg
                 command jw $argv
@@ -127,7 +133,7 @@ command jw shell completions fish | source
 }
 
 fn posix_init(shell_name: &str) -> String {
-    let switch_commands = quoted_switch_commands("|");
+    let path_commands = quoted_path_commands("|");
     let mut passthrough_patterns = PASSTHROUGH_ARGS.to_vec();
     passthrough_patterns.push("--execute=*");
     passthrough_patterns.push("-x?*");
@@ -154,7 +160,7 @@ fn posix_init(shell_name: &str) -> String {
     fi
 
     case "$1" in
-        {switch_commands})
+        {path_commands})
             local arg
             for arg in "$@"; do
                 case "$arg" in
@@ -181,7 +187,7 @@ eval "$(command jw shell completions {shell_name})"
 }
 
 fn elvish_init() -> String {
-    let switch_commands = quoted_switch_commands(" ");
+    let path_commands = quoted_path_commands(" ");
     let passthrough_condition = PASSTHROUGH_ARGS
         .iter()
         .map(|arg| format!("(has-value $args '{arg}')"))
@@ -200,7 +206,7 @@ fn elvish_init() -> String {
         if (> (count $target) 0) {{
             cd $target
         }}
-    }} elif (has-value [{switch_commands}] $args[0]) {{
+    }} elif (has-value [{path_commands}] $args[0]) {{
         var attached-execute = (keep-if {{|arg| or (str:has-prefix $arg '{ATTACHED_EXECUTE_LONG}') (str:has-prefix $arg '{ATTACHED_EXECUTE_SHORT}') }} $args)
         if (or {passthrough_condition} (> (count $attached-execute) 0)) {{
             e:command jw $@args
@@ -219,7 +225,7 @@ eval (command jw shell completions elvish | slurp)
 }
 
 fn powershell_init() -> String {
-    let switch_commands = quoted_switch_commands(", ");
+    let path_commands = quoted_path_commands(", ");
     let passthrough_args = quoted_passthrough_args(", ");
 
     format!(
@@ -246,7 +252,7 @@ function jw {{
         return
     }}
 
-    $switchCommands = @({switch_commands})
+    $pathCommands = @({path_commands})
     $passthroughArgs = @({passthrough_args})
     $shouldPassthrough = $false
     foreach ($arg in $JwArgs) {{
@@ -256,7 +262,7 @@ function jw {{
         }}
     }}
 
-    if (($switchCommands -contains $JwArgs[0]) -and -not $shouldPassthrough) {{
+    if (($pathCommands -contains $JwArgs[0]) -and -not $shouldPassthrough) {{
         $target = & $script:__jwExecutable @JwArgs --print-path
         if ($LASTEXITCODE -ne 0) {{ return }}
         Set-Location -LiteralPath $target
@@ -279,10 +285,10 @@ mod tests {
     fn all_shell_init_adapters_share_switch_policy() {
         for shell in Shell::value_variants() {
             let script = init_script(*shell).expect("generate init script");
-            for command in switch_commands() {
+            for command in path_commands() {
                 assert!(
                     script.contains(&format!("'{command}'")),
-                    "{shell} init omits switch command {command}"
+                    "{shell} init omits path command {command}"
                 );
             }
             for arg in PASSTHROUGH_ARGS {
