@@ -550,8 +550,8 @@ unlisted command is available; the feature list and `jw --help` are the current
 command surface.
 
 `jw` supports JJ 0.39 and newer within its tested compatibility window. CI pins
-the oldest supported release, 0.39.0, and newer compatibility targets, 0.44.0
-and 0.45.1, instead of following a moving `latest` label. On JJ 0.45 and newer,
+the oldest supported release, 0.39.0, and newer compatibility targets, 0.44.0,
+0.45.1, 0.46.0, and 0.47.1, instead of following a moving `latest` label. On JJ 0.45 and newer,
 doctor's divergence remedy can use `jj converge --no-interactive`; older supported
 versions retain the manual merge-or-abandon guidance.
 
