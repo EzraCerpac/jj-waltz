@@ -156,6 +156,56 @@ pub(crate) fn load_link_config(config_root: &Path) -> Result<Option<LinkConfig>>
     Ok(found.then_some(LinkConfig { rules: combined }))
 }
 
+/// Link sources a whole-checkout copy-on-write clone must leave out.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CloneExclusions {
+    /// Workspace-relative sources not to clone.
+    pub(crate) excluded: Vec<PathBuf>,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Decide which link sources owned by `config_root` a whole-checkout clone into
+/// `destination` must skip, before `destination` holds any files.
+///
+/// - A target outside the new workspace that already exists will be linked, so the
+///   source is skipped and the link supplies it.
+/// - A target inside the new workspace, such as a `target = source` private
+///   override, is never linked; the source is cloned like any other path.
+/// - An optional rule whose target is missing creates no link, but a private copy at
+///   a link source is a link conflict, so the source is skipped with a warning
+///   rather than silently.
+/// - A required rule whose target is missing fails link application either way.
+pub(crate) fn clone_exclusions(config_root: &Path, destination: &Path) -> Result<CloneExclusions> {
+    let Some(config) = load_link_config(config_root)? else {
+        return Ok(CloneExclusions::default());
+    };
+    let destination_resolved = resolve_existing_prefix(destination)?;
+    let mut exclusions = CloneExclusions::default();
+    for rule in normalize_rules(&config, destination)? {
+        // `destination` does not exist yet, so resolve `..` lexically instead of
+        // asking the filesystem to traverse it.
+        let target = resolve_existing_prefix(&rule.target)?;
+        if target.starts_with(&destination_resolved) {
+            continue;
+        }
+        let target_exists = fs::metadata(&target).is_ok();
+        let relative = rule
+            .source
+            .strip_prefix(destination)
+            .expect("normalized link sources stay inside their workspace")
+            .to_path_buf();
+        if !target_exists && !rule.required {
+            exclusions.warnings.push(format!(
+                "not cloning {}: it is a workspace link source and its optional target {} is missing",
+                relative.display(),
+                target.display()
+            ));
+        }
+        exclusions.excluded.push(relative);
+    }
+    Ok(exclusions)
+}
+
 pub(crate) fn inspect_loaded_workspace_links(
     config: &LinkConfig,
     workspace_root: &Path,
@@ -809,6 +859,46 @@ fn remove_symlink(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clone_exclusions_skip_only_paths_links_will_supply() {
+        let tempdir = tempfile::tempdir().expect("create temp directory");
+        let root = tempdir.path().join("repo");
+        fs::create_dir_all(root.join("shared")).expect("create shared target");
+        fs::write(
+            root.join(LINKS_FILE),
+            r#"
+[[link]]
+source = "shared"
+target = "../repo/shared"
+
+[[link]]
+source = "private"
+target = "private"
+required = true
+
+[[link]]
+source = "optional-cache"
+target = "../repo/missing-cache"
+
+[[link]]
+source = "required-missing"
+target = "../repo/required-missing"
+required = true
+"#,
+        )
+        .expect("write links config");
+        let destination = tempdir.path().join("repo.feature");
+
+        let exclusions = clone_exclusions(&root, &destination).expect("exclusions");
+
+        assert_eq!(
+            exclusions.excluded,
+            ["shared", "optional-cache", "required-missing"].map(PathBuf::from)
+        );
+        assert_eq!(exclusions.warnings.len(), 1);
+        assert!(exclusions.warnings[0].contains("optional-cache"));
+    }
 
     #[test]
     fn normalize_lexical_clamps_parent_traversal_at_absolute_root() {

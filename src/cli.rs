@@ -1,4 +1,4 @@
-use crate::config::{Config, DefaultCommand};
+use crate::config::{Config, CopyOnWrite, DefaultCommand};
 use crate::context;
 use crate::doctor::DoctorEngine;
 use crate::jj::JjClient;
@@ -114,10 +114,17 @@ struct AddCommand {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        conflicts_with = "no_cow",
-        help = "Clone new workspace files from the current workspace with copy-on-write"
+        conflicts_with_all = ["cow_all", "no_cow"],
+        help = "Clone the current workspace's tracked files into a new workspace with copy-on-write"
     )]
     cow: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_cow",
+        help = "Clone everything in the current workspace, including ignored files such as node_modules, with copy-on-write"
+    )]
+    cow_all: bool,
     #[arg(
         long,
         action = ArgAction::SetTrue,
@@ -176,10 +183,17 @@ struct SwitchCommand {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        conflicts_with = "no_cow",
-        help = "Clone new workspace files from the current workspace with copy-on-write"
+        conflicts_with_all = ["cow_all", "no_cow"],
+        help = "Clone the current workspace's tracked files into a new workspace with copy-on-write"
     )]
     cow: bool,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "no_cow",
+        help = "Clone everything in the current workspace, including ignored files such as node_modules, with copy-on-write"
+    )]
+    cow_all: bool,
     #[arg(
         long,
         action = ArgAction::SetTrue,
@@ -622,7 +636,7 @@ fn run_add(cmd: AddCommand) -> Result<()> {
         cmd.bookmark,
         cmd.no_bookmark,
         cmd.no_links,
-        copy_on_write_override(cmd.cow, cmd.no_cow),
+        copy_on_write_override(cmd.cow, cmd.cow_all, cmd.no_cow),
         cmd.names.len(),
     )?
     .with_colocation_override(if cmd.colocate {
@@ -650,7 +664,7 @@ fn run_switch(cmd: SwitchCommand) -> Result<()> {
         cmd.bookmark,
         cmd.no_bookmark,
         cmd.no_links,
-        copy_on_write_override(cmd.cow, cmd.no_cow),
+        copy_on_write_override(cmd.cow, cmd.cow_all, cmd.no_cow),
         cmd.names.len(),
     )?
     .with_colocation_override(if cmd.colocate {
@@ -702,10 +716,11 @@ fn print_switch_path(result: &workspace::SwitchResult) -> Result<()> {
     print_line(path.display())
 }
 
-fn copy_on_write_override(cow: bool, no_cow: bool) -> Option<bool> {
-    match (cow, no_cow) {
-        (true, _) => Some(true),
-        (_, true) => Some(false),
+fn copy_on_write_override(cow: bool, cow_all: bool, no_cow: bool) -> Option<CopyOnWrite> {
+    match (cow, cow_all, no_cow) {
+        (true, _, _) => Some(CopyOnWrite::Tracked),
+        (_, true, _) => Some(CopyOnWrite::All),
+        (_, _, true) => Some(CopyOnWrite::Off),
         _ => None,
     }
 }

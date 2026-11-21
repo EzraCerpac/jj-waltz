@@ -31,7 +31,45 @@ pub struct WorkspaceConfig {
     /// None inherits the verified primary workspace; Some(false) explicitly opts out.
     pub colocate: Option<bool>,
     pub bookmark_template: String,
-    pub copy_on_write: bool,
+    pub copy_on_write: CopyOnWrite,
+}
+
+/// How new workspaces receive their files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CopyOnWrite {
+    /// JJ writes every file.
+    #[default]
+    Off,
+    /// Clone only the files JJ tracks in the current workspace.
+    Tracked,
+    /// Clone everything in the current workspace, including ignored and untracked
+    /// files such as `node_modules` and `.env`.
+    All,
+}
+
+impl CopyOnWrite {
+    pub fn enabled(self) -> bool {
+        self != Self::Off
+    }
+}
+
+/// `copy_on_write = true` predates scopes and means `"tracked"`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawCopyOnWrite {
+    Enabled(bool),
+    Scope(CopyOnWrite),
+}
+
+impl From<RawCopyOnWrite> for CopyOnWrite {
+    fn from(raw: RawCopyOnWrite) -> Self {
+        match raw {
+            RawCopyOnWrite::Enabled(true) => Self::Tracked,
+            RawCopyOnWrite::Enabled(false) => Self::Off,
+            RawCopyOnWrite::Scope(scope) => scope,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +90,7 @@ struct RawWorkspaceConfig {
     create_bookmark: bool,
     colocate: Option<bool>,
     bookmark_template: Option<String>,
-    #[serde(default)]
-    copy_on_write: bool,
+    copy_on_write: Option<RawCopyOnWrite>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -69,7 +106,7 @@ impl Default for Config {
                 create_bookmark: false,
                 colocate: None,
                 bookmark_template: DEFAULT_BOOKMARK_TEMPLATE.to_owned(),
-                copy_on_write: false,
+                copy_on_write: CopyOnWrite::Off,
             },
             trunk: TrunkConfig {
                 revset: DEFAULT_TRUNK_REVSET.to_owned(),
@@ -110,7 +147,9 @@ impl From<RawConfig> for Config {
                 bookmark_template: workspace
                     .bookmark_template
                     .unwrap_or(defaults.workspace.bookmark_template),
-                copy_on_write: workspace.copy_on_write,
+                copy_on_write: workspace
+                    .copy_on_write
+                    .map_or(CopyOnWrite::Off, CopyOnWrite::from),
             },
             trunk: TrunkConfig {
                 revset: trunk.revset.unwrap_or(defaults.trunk.revset),
@@ -145,7 +184,7 @@ mod tests {
         assert_eq!(config.default_command, DefaultCommand::Ui);
         assert!(!config.workspace.create_bookmark);
         assert_eq!(config.workspace.bookmark_template, "{workspace}");
-        assert!(!config.workspace.copy_on_write);
+        assert_eq!(config.workspace.copy_on_write, CopyOnWrite::Off);
         assert_eq!(config.trunk.revset, "trunk()");
     }
 
@@ -173,8 +212,28 @@ mod tests {
         .unwrap();
 
         let config = Config::from(raw);
-        assert!(config.workspace.copy_on_write);
+        assert_eq!(config.workspace.copy_on_write, CopyOnWrite::Tracked);
         assert!(!config.workspace.create_bookmark);
+    }
+
+    #[test]
+    fn parses_copy_on_write_scopes() {
+        for (value, expected) in [
+            ("false", CopyOnWrite::Off),
+            ("true", CopyOnWrite::Tracked),
+            ("\"off\"", CopyOnWrite::Off),
+            ("\"tracked\"", CopyOnWrite::Tracked),
+            ("\"all\"", CopyOnWrite::All),
+        ] {
+            let raw: RawConfig =
+                toml::from_str(&format!("[workspace]\ncopy_on_write = {value}\n")).unwrap();
+            assert_eq!(
+                Config::from(raw).workspace.copy_on_write,
+                expected,
+                "{value}"
+            );
+        }
+        assert!(toml::from_str::<RawConfig>("[workspace]\ncopy_on_write = \"some\"\n").is_err());
     }
 
     #[test]

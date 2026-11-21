@@ -53,10 +53,29 @@ operation diff matches the intended repair.
 ## Copy-on-write creation
 
 `jw add --cow` and `jw switch --cow` clone the current workspace's tracked files
-into the new workspace on APFS, Btrfs, or XFS. `workspace.copy_on_write = true`
-makes it the default; `--no-cow` opts out. The result matches a full checkout of
-the creation base: ignored and untracked files are not carried over. A warning on
-stderr means the filesystem could not clone and a full checkout was used.
+into the new workspace on APFS, Btrfs, or XFS. `--cow-all` also clones ignored and
+untracked files such as `node_modules` and `.env`.
+`workspace.copy_on_write = "tracked"` (or `true`) or `"all"` makes it the default;
+`--no-cow` opts out. Tracked files match a full checkout of the creation base, and
+uncommitted edits, including untracked files JJ would snapshot, never carry over.
+
+Choosing between workspace links and `--cow-all`:
+
+- Links share one mutable target: writes from any workspace are seen by all. Use
+  them for large shared data or caches.
+- `--cow-all` gives each workspace an independently writable copy. Use it for
+  per-branch dependencies and build output such as `node_modules`.
+- With `--cow-all`, a link source is not cloned when its target exists outside
+  the new workspace (the link supplies it). Private overrides whose target is the
+  source itself are cloned. A source with a missing optional target is skipped
+  with a warning, since a private copy there would be a link conflict.
+- `--cow-all` copies secrets such as `.env` into every new workspace as
+  independent files, and copies symlinks verbatim: relative ones resolve from the
+  new workspace, absolute ones keep their old target.
+
+A warning on stderr that copy-on-write is unavailable means a full checkout was
+used. Watchman or a rejected working-copy state also fall back silently. Any
+fallback is an ordinary checkout, so `--cow-all` then carries no ignored files.
 
 ## Adopt
 
