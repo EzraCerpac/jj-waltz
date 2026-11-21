@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::jj::JjClient;
+use crate::paths;
 use crate::trash::{self, Classifier, Verdict};
 use crate::unpreserved::{self, Unpreserved};
 use crate::workspace::{self, RemovalResult, WorkspaceInventory};
@@ -358,15 +359,7 @@ fn adoption_hint(entries: &[Unpreserved], tracked: &[PathBuf]) -> String {
     }
     let lines = sources
         .iter()
-        .map(|source| {
-            // Ignore files use `/` on every platform.
-            let path = source
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            format!("`{} {path}`", trash::ADOPT_MARKER)
-        })
+        .map(|source| format!("`{} {}`", trash::ADOPT_MARKER, paths::slash_path(source)))
         .collect::<Vec<_>>()
         .join(", ");
     format!(

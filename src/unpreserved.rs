@@ -7,6 +7,7 @@
 //! ignored by an unmarked rule, such as a local secret, excluded by
 //! `snapshot.auto-track`, or refused by JJ's snapshot.
 
+use crate::paths;
 use crate::trash::Verdict;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -244,9 +245,9 @@ pub(crate) fn summarize(entries: &[Unpreserved], limit: usize) -> String {
             let name = if entry.directory {
                 let count = entry.files.len();
                 let noun = if count == 1 { "file" } else { "files" };
-                format!("{}/ ({count} {noun})", entry.path.display())
+                format!("{}/ ({count} {noun})", paths::slash_path(&entry.path))
             } else {
-                entry.path.display().to_string()
+                paths::slash_path(&entry.path)
             };
             format!("  {name}  [{}]", entry.verdict)
         })
