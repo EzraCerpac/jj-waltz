@@ -1186,14 +1186,20 @@ fn cow_all_clones_private_overrides_and_warns_about_unlinked_sources() {
 
     let output = repo.command_output(&["add", "--cow-all", "feature-a"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr: {stderr}");
     if stderr.contains("copy-on-write is unavailable") {
         assert!(
             env::var_os("JW_TEST_REQUIRE_COW").is_none_or(|value| value.is_empty()),
             "real cloning required"
         );
+        // Without a clone the private override is missing, and the error says why.
+        assert!(!output.status.success());
+        assert!(
+            stderr.contains("required link target is missing"),
+            "stderr: {stderr}"
+        );
         return;
     }
+    assert!(output.status.success(), "stderr: {stderr}");
 
     let workspace_root = repo.default_root.with_extension("feature-a");
     // A target inside the new workspace is a private override, never a link.

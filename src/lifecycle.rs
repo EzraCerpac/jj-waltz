@@ -151,6 +151,20 @@ struct CheckoutPlan {
     warnings: Vec<String>,
 }
 
+impl CheckoutPlan {
+    /// Name checkout warnings in a link failure, since a skipped clone can leave a link
+    /// target missing and the warnings would otherwise never be shown.
+    fn explain_link_failure(&self, error: Error) -> Error {
+        if self.warnings.is_empty() {
+            return error;
+        }
+        error.context(format!(
+            "failed to apply workspace links (warning: {})",
+            self.warnings.join("; ")
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PlannedWorkspace {
     name: String,
@@ -731,7 +745,7 @@ fn create_workspace(
                 links: None,
             };
             Err(with_cleanup_error(
-                error,
+                checkout.explain_link_failure(error),
                 rollback_pending(store, pending).err(),
             ))
         }
