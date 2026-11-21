@@ -1,8 +1,9 @@
 use crate::jj::{JjClient, JjVersion, MINIMUM_SUPPORTED_JJ_VERSION};
 use crate::links::{self, LinkCheckState};
 use crate::metadata::{ManagedWorkspaceMetadata, WorkspaceMetadataStore};
+use crate::ownership::OwnershipView;
 use crate::workspace;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -71,14 +72,21 @@ impl DoctorEngine {
         report.repository.trunk = trunk;
 
         let metadata = self.check_metadata(&mut report);
-        let workspaces = self.check_workspace_paths(&mut report, operation_id.as_deref());
+        let mut cleanup = CleanupContext::new(operation_id.as_deref());
+        let workspaces =
+            self.check_workspace_paths(&mut report, &mut cleanup, operation_id.as_deref());
         self.check_metadata_consistency(
             &mut report,
             operation_id.as_deref(),
             metadata.as_deref(),
             workspaces.as_deref(),
         );
-        self.check_workspace_links(&mut report, metadata.as_deref(), workspaces.as_deref());
+        self.check_workspace_links(
+            &mut report,
+            &mut cleanup,
+            metadata.as_deref(),
+            workspaces.as_deref(),
+        );
         self.check_bookmarks_and_divergence(
             &mut report,
             operation_id.as_deref(),
@@ -240,11 +248,7 @@ impl DoctorEngine {
     }
 
     fn check_metadata(&self, report: &mut DoctorReport) -> Option<Vec<ManagedWorkspaceMetadata>> {
-        let config_path = match &self.repository_config_path {
-            Some(path) => Ok(path.clone()),
-            None => self.client.repo_config_path(),
-        };
-        let store = match config_path.and_then(WorkspaceMetadataStore::from_repo_config_path) {
+        let store = match self.metadata_store() {
             Ok(store) => store,
             Err(error) => {
                 report.push(DoctorDiagnostic::error(
@@ -278,15 +282,26 @@ impl DoctorEngine {
         }
     }
 
-    fn cleanup_remedy(&self, name: &str, path: Option<&Path>) -> String {
+    fn metadata_store(&self) -> Result<WorkspaceMetadataStore> {
+        let config_path = match &self.repository_config_path {
+            Some(path) => path.clone(),
+            None => self.client.repo_config_path()?,
+        };
+        WorkspaceMetadataStore::from_repo_config_path(config_path)
+    }
+
+    fn cleanup_remedy<'a>(
+        &'a self,
+        context: &mut CleanupContext<'a>,
+        name: &str,
+        path: Option<&Path>,
+    ) -> String {
         let result = (|| -> Result<()> {
-            let config_path = match &self.repository_config_path {
-                Some(path) => path.clone(),
-                None => self.client.repo_config_path()?,
-            };
-            let store = WorkspaceMetadataStore::from_repo_config_path(config_path)?;
+            let (store, ownership) = context.load(self)?;
             let metadata = store.get(name)?;
-            crate::ownership::ensure_removal_allowed(&self.client, name, path, metadata.as_ref())
+            ownership
+                .ensure_removal_allowed(name, path, metadata.as_ref())
+                .map(|_| ())
         })();
         match result {
             Ok(()) => "restore the checkout or run `jw prune` if it was removed".to_owned(),
@@ -296,9 +311,10 @@ impl DoctorEngine {
         }
     }
 
-    fn check_workspace_paths(
-        &self,
+    fn check_workspace_paths<'a>(
+        &'a self,
         report: &mut DoctorReport,
+        cleanup: &mut CleanupContext<'a>,
         operation_id: Option<&str>,
     ) -> Option<Vec<DoctorWorkspace>> {
         let Some(operation_id) = operation_id else {
@@ -320,22 +336,29 @@ impl DoctorEngine {
                 return None;
             }
         };
-        let current_root = (workspaces
+        let single_current = workspaces
             .iter()
             .filter(|workspace| workspace.current)
             .count()
-            == 1)
-            .then(|| query_current_workspace_root(&self.client, operation_id).ok())
-            .flatten();
+            == 1;
+        // One listing renders every root JJ can; only the rest are queried individually, which
+        // keeps JJ's own explanation of why a root is unavailable.
+        let listed = self.client.workspace_roots_at(operation_id).ok().flatten();
 
         let mut problems = 0;
         for workspace in &mut workspaces {
-            let path = match query_workspace_root(&self.client, operation_id, &workspace.name) {
-                Ok(path) => Ok(path),
-                Err(_) if workspace.current && current_root.is_some() => {
-                    Ok(current_root.clone().expect("current root checked above"))
+            let listed_path = listed
+                .as_ref()
+                .and_then(|listed| listed.get(&workspace.name).cloned().flatten());
+            let path = match listed_path {
+                Some(path) => Ok(path),
+                None => query_workspace_root(&self.client, operation_id, &workspace.name),
+            };
+            let path = match path {
+                Err(_) if workspace.current && single_current => {
+                    query_current_workspace_root(&self.client, operation_id)
                 }
-                Err(error) => Err(error),
+                path => path,
             };
             match path {
                 Ok(path) => {
@@ -349,7 +372,11 @@ impl DoctorEngine {
                                 DoctorDiagnostic::error(
                                     DoctorCode::WorkspacePath,
                                     format!("workspace path is unusable: {error:#}"),
-                                    Some(self.cleanup_remedy(&workspace.name, Some(&path))),
+                                    Some(self.cleanup_remedy(
+                                        cleanup,
+                                        &workspace.name,
+                                        Some(&path),
+                                    )),
                                 )
                                 .with_subject(&workspace.name),
                             );
@@ -362,7 +389,7 @@ impl DoctorEngine {
                         DoctorDiagnostic::error(
                             DoctorCode::WorkspacePath,
                             format!("workspace path is missing or unreadable: {error:#}"),
-                            Some(self.cleanup_remedy(&workspace.name, None)),
+                            Some(self.cleanup_remedy(cleanup, &workspace.name, None)),
                         )
                         .with_subject(&workspace.name),
                     );
@@ -397,18 +424,27 @@ impl DoctorEngine {
         };
 
         let mut problems = 0;
+        let ownership = OwnershipView::at_operation(&self.client, operation_id);
+        let ownership = if metadata
+            .iter()
+            .any(|record| record.owned_git_worktree.is_some())
+        {
+            ownership.with_all_roots()
+        } else {
+            Ok(ownership)
+        };
         for workspace in workspaces {
             let record = metadata
                 .iter()
                 .find(|record| record.workspace_name == workspace.name);
             if let Some(owner) = record.and_then(|record| record.owned_git_worktree.as_ref()) {
-                if let Err(error) = crate::ownership::validate_owned_at(
-                    &self.client,
-                    operation_id,
-                    &workspace.name,
-                    workspace.path.as_deref(),
-                    owner,
-                ) {
+                let validation = ownership
+                    .as_ref()
+                    .map_err(|error| anyhow!("{error:#}"))
+                    .and_then(|ownership| {
+                        ownership.validate_owned(&workspace.name, workspace.path.as_deref(), owner)
+                    });
+                if let Err(error) = validation {
                     problems += 1;
                     report.push(DoctorDiagnostic::error(
                         DoctorCode::MetadataConsistency,
@@ -438,6 +474,12 @@ impl DoctorEngine {
             .map(|workspace| workspace.name.as_str())
             .collect::<BTreeSet<_>>();
         let bookmarks = query_bookmark_names(&self.client, operation_id);
+        let present_bases = self.client.existing_commit_ids_at(
+            operation_id,
+            metadata
+                .iter()
+                .map(|record| record.creation_base_commit_id.as_str()),
+        );
 
         for record in metadata {
             let workspace_registered = workspace_names.contains(record.workspace_name.as_str());
@@ -465,21 +507,29 @@ impl DoctorEngine {
                 );
             }
 
-            let creation_base_valid = match query_revisions(
-                &self.client,
-                operation_id,
-                &record.creation_base_commit_id,
-            ) {
-                Ok(revisions) if revisions.len() == 1 => true,
-                Ok(revisions) => {
+            let base = record.creation_base_commit_id.as_str();
+            // Exact commit IDs are answered by the batch. Anything else, and any record when the
+            // batch failed, is resolved alone so JJ's own diagnosis reaches the report.
+            let revision_count = match present_bases.as_ref() {
+                Ok(present) if crate::jj::is_commit_id(base) => {
+                    if present.contains(base) {
+                        Ok(1)
+                    } else {
+                        Err(anyhow!(
+                            "commit {base} does not exist at the captured operation"
+                        ))
+                    }
+                }
+                _ => query_revisions(&self.client, operation_id, base).map(|found| found.len()),
+            };
+            let creation_base_valid = match revision_count {
+                Ok(1) => true,
+                Ok(count) => {
                     problems += 1;
                     report.push(
                         DoctorDiagnostic::error(
                             DoctorCode::MetadataConsistency,
-                            format!(
-                                "creation base resolves to {} revisions; expected one",
-                                revisions.len()
-                            ),
+                            format!("creation base resolves to {count} revisions; expected one"),
                             repair_remedy(),
                         )
                         .with_subject(&record.workspace_name),
@@ -548,9 +598,10 @@ impl DoctorEngine {
         }
     }
 
-    fn check_workspace_links(
-        &self,
+    fn check_workspace_links<'a>(
+        &'a self,
         report: &mut DoctorReport,
+        cleanup: &mut CleanupContext<'a>,
         metadata: Option<&[ManagedWorkspaceMetadata]>,
         workspaces: Option<&[DoctorWorkspace]>,
     ) {
@@ -575,7 +626,7 @@ impl DoctorEngine {
                     DoctorDiagnostic::skipped(
                         DoctorCode::WorkspaceLink,
                         "managed workspace has no matching JJ workspace; links could not be inspected",
-                        Some(self.cleanup_remedy(&record.workspace_name, None)),
+                        Some(self.cleanup_remedy(cleanup, &record.workspace_name, None)),
                     )
                     .with_subject(&record.workspace_name),
                 );
@@ -586,7 +637,7 @@ impl DoctorEngine {
                     DoctorDiagnostic::skipped(
                         DoctorCode::WorkspaceLink,
                         "managed workspace has no usable checkout; links could not be inspected",
-                        Some(self.cleanup_remedy(&record.workspace_name, None)),
+                        Some(self.cleanup_remedy(cleanup, &record.workspace_name, None)),
                     )
                     .with_subject(&record.workspace_name),
                 );
@@ -1040,6 +1091,43 @@ struct DoctorWorkspace {
     divergent: bool,
     current: bool,
     path: Option<PathBuf>,
+}
+
+/// What cleanup remedies need, loaded once on the first unusable workspace so a repository with
+/// many stale checkouts costs a fixed number of JJ processes.
+struct CleanupContext<'a> {
+    operation_id: Option<&'a str>,
+    loaded: Option<Result<(WorkspaceMetadataStore, OwnershipView<'a>), String>>,
+}
+
+impl<'a> CleanupContext<'a> {
+    fn new(operation_id: Option<&'a str>) -> Self {
+        Self {
+            operation_id,
+            loaded: None,
+        }
+    }
+
+    fn load(
+        &mut self,
+        engine: &'a DoctorEngine,
+    ) -> Result<(&WorkspaceMetadataStore, &OwnershipView<'a>)> {
+        let operation_id = self.operation_id;
+        let loaded = self.loaded.get_or_insert_with(|| {
+            let load = || -> Result<_> {
+                let operation_id = operation_id.context("repository operation capture failed")?;
+                let store = engine.metadata_store()?;
+                let ownership =
+                    OwnershipView::at_operation(&engine.client, operation_id).with_all_roots()?;
+                Ok((store, ownership))
+            };
+            load().map_err(|error| format!("{error:#}"))
+        });
+        match loaded {
+            Ok((store, ownership)) => Ok((store, ownership)),
+            Err(error) => bail!("{error}"),
+        }
+    }
 }
 
 fn query_revisions(
