@@ -286,7 +286,7 @@ pub fn merge_workspace(request: &MergeRequest) -> Result<MergeOutcome> {
             .run(["git", "push", "--bookmark", bookmark])
             .with_context(|| {
                 format!(
-                    "{bookmark} was updated locally, but pushing it failed; workspace {name} was kept, rerun `jw merge --push` to retry"
+                    "{bookmark} was updated locally, but pushing it failed; workspace {name} was kept, rerun `jw merge {name} --into {bookmark} --push` to retry"
                 )
             })?;
     }
