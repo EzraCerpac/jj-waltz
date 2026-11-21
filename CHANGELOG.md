@@ -57,6 +57,7 @@
 - Speed up workspace-name shell completion: it now makes a single JJ call that
   skips the working-copy snapshot instead of one snapshotting call per workspace.
   Candidates no longer note which workspace is current, previous, or default.
+- Test JJ 0.47.1 on Linux, macOS, and Windows alongside the existing pins.
 
 ## Version 0.8.0 (2026-10-09)
 
